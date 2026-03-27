@@ -1,0 +1,6 @@
+PORT: 8080
+MONITORING_PORT: 8888
+DATABASE_URL: "postgres://dimo:dimo@localhost:5432/did_directory?sslmode=disable"
+LOG_LEVEL: "info"
+MAX_OPERATIONS_PER_DID: 1000
+EXPORT_PAGE_SIZE: 100

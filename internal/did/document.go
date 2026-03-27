@@ -1,0 +1,86 @@
+package did
+
+import (
+	"fmt"
+
+	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
+)
+
+// DIDDocument represents a W3C DID Document.
+type DIDDocument struct {
+	Context            []string                 `json:"@context"`
+	ID                 string                   `json:"id"`
+	AlsoKnownAs        []string                 `json:"alsoKnownAs"`
+	VerificationMethod []VerificationMethodEntry `json:"verificationMethod"`
+	Service            []ServiceEntry           `json:"service,omitempty"`
+	DimoSacdEpoch      uint64                   `json:"dimoSacdEpoch"`
+}
+
+// VerificationMethodEntry represents a verification method in a DID Document.
+type VerificationMethodEntry struct {
+	ID                 string `json:"id"`
+	Type               string `json:"type"`
+	Controller         string `json:"controller"`
+	PublicKeyMultibase string `json:"publicKeyMultibase"`
+}
+
+// ServiceEntry represents a service endpoint in a DID Document.
+type ServiceEntry struct {
+	ID              string `json:"id"`
+	Type            string `json:"type"`
+	ServiceEndpoint string `json:"serviceEndpoint"`
+}
+
+// GenerateDocument generates a W3C DID Document from the current DID state.
+func GenerateDocument(did string, op *Operation, sacdEpoch uint64) (*DIDDocument, error) {
+	if op.IsTombstone() {
+		return nil, fmt.Errorf("DID %s has been deactivated", did)
+	}
+
+	doc := &DIDDocument{
+		Context: []string{
+			"https://www.w3.org/ns/did/v1",
+			"https://w3id.org/security/multikey/v1",
+			"https://w3id.org/security/suites/secp256k1-2019/v1",
+			"https://schema.dimo.zone/did/v1",
+		},
+		ID:            did,
+		AlsoKnownAs:   op.AlsoKnownAs,
+		DimoSacdEpoch: sacdEpoch,
+	}
+
+	if doc.AlsoKnownAs == nil {
+		doc.AlsoKnownAs = []string{}
+	}
+
+	// Build verification methods.
+	for vmID, didKey := range op.VerificationMethods {
+		pub, err := dimocrypto.DecodeDIDKey(didKey)
+		if err != nil {
+			return nil, fmt.Errorf("decode verification method %q: %w", vmID, err)
+		}
+
+		multibase, err := dimocrypto.PublicKeyMultibase(pub)
+		if err != nil {
+			return nil, fmt.Errorf("encode multibase for %q: %w", vmID, err)
+		}
+
+		doc.VerificationMethod = append(doc.VerificationMethod, VerificationMethodEntry{
+			ID:                 did + "#" + vmID,
+			Type:               "Multikey",
+			Controller:         did,
+			PublicKeyMultibase: multibase,
+		})
+	}
+
+	// Build service endpoints.
+	for svcID, svc := range op.Services {
+		doc.Service = append(doc.Service, ServiceEntry{
+			ID:              "#" + svcID,
+			Type:            svc.Type,
+			ServiceEndpoint: svc.Endpoint,
+		})
+	}
+
+	return doc, nil
+}
