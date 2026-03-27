@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	github.com/fxamacker/cbor/v2 v2.8.0
-	github.com/gofiber/fiber/v2 v2.52.6
+	github.com/gofiber/fiber/v2 v2.52.12
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/multiformats/go-multibase v0.2.0
