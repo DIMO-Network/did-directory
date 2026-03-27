@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: dimo_did
+      POSTGRES_USER: dimo
+      POSTGRES_PASSWORD: dimo
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dimo -d dimo_did"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  directory:
+    build:
+      context: .
+      target: directory
+    environment:
+      DATABASE_URL: "postgres://dimo:dimo@postgres:5432/dimo_did?sslmode=disable"
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["-settings", "/dev/null"]
+
+  auth-service:
+    build:
+      context: .
+      target: auth-service
+    environment:
+      DIRECTORY_URL: "http://directory:8080"
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      - directory

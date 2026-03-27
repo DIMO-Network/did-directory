@@ -1,4 +1,4 @@
-FROM golang:1.25 AS build
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -6,15 +6,19 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /did-directory ./cmd/did-directory
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /directory ./cmd/did-directory
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /auth-service ./cmd/auth-service
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /dimocli ./cmd/dimocli
 
-FROM gcr.io/distroless/base:nonroot
-
-COPY --from=build /did-directory /did-directory
-
-USER nonroot:nonroot
-
-EXPOSE 8080
-
-ENTRYPOINT ["/did-directory"]
+FROM alpine:3.21 AS directory
+COPY --from=builder /directory /usr/local/bin/directory
+ENTRYPOINT ["directory"]
 CMD ["-settings", "/config/settings.yaml"]
+
+FROM alpine:3.21 AS auth-service
+COPY --from=builder /auth-service /usr/local/bin/auth-service
+ENTRYPOINT ["auth-service"]
+
+FROM alpine:3.21 AS cli
+COPY --from=builder /dimocli /usr/local/bin/dimocli
+ENTRYPOINT ["dimocli"]
