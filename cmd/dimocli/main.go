@@ -5,6 +5,10 @@ import (
 	"os"
 )
 
+func isVerbose() bool {
+	return os.Getenv("DIMO_VERBOSE") == "1"
+}
+
 func defaultServer() string {
 	if s := os.Getenv("DIRECTORY_URL"); s != "" {
 		return s

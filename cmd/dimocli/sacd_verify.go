@@ -37,6 +37,7 @@ func runSACDVerify(args []string) {
 
 	// Resolve grantor DID.
 	c := client.New(*server)
+	c.SetVerbose(isVerbose())
 	doc, err := c.Resolve(context.Background(), sacdDoc.Grantor)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving grantor DID: %v\n", err)

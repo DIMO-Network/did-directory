@@ -31,6 +31,7 @@ func runRevokeAll(args []string) {
 	}
 
 	c := client.New(*server)
+	c.SetVerbose(isVerbose())
 	ctx := context.Background()
 
 	// Resolve to get current sacdEpoch.

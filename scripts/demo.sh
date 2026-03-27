@@ -21,6 +21,7 @@ NC='\033[0m'
 
 DIRECTORY_URL="${DIRECTORY_URL:-http://localhost:8080}"
 AUTH_URL="${AUTH_URL:-http://localhost:8081}"
+export DIMO_VERBOSE=1
 DIMOCLI="${DIMOCLI:-}"
 DEVICE_SACD=$(mktemp /tmp/sacd-device-XXXXXX.json)
 DEV_SACD=$(mktemp /tmp/sacd-dev-XXXXXX.json)

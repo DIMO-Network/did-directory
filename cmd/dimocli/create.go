@@ -120,6 +120,7 @@ func runCreate(args []string) {
 
 	// Submit to directory.
 	c := client.New(*server)
+	c.SetVerbose(isVerbose())
 	resp, err := c.Submit(context.Background(), derivedDID, op)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error submitting operation: %v\n", err)

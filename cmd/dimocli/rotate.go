@@ -47,6 +47,7 @@ func runRotate(args []string) {
 	}
 
 	c := client.New(*server)
+	c.SetVerbose(isVerbose())
 	ctx := context.Background()
 
 	// Get the latest CID and operation.

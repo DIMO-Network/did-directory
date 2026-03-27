@@ -23,6 +23,7 @@ func runResolve(args []string) {
 	didStr := fs.Arg(0)
 
 	c := client.New(*server)
+	c.SetVerbose(isVerbose())
 	doc, err := c.Resolve(context.Background(), didStr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving DID: %v\n", err)

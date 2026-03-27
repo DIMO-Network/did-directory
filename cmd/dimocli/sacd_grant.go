@@ -38,6 +38,7 @@ func runSACDGrant(args []string) {
 
 	// Resolve grantor DID to get current sacdEpoch.
 	c := client.New(*server)
+	c.SetVerbose(isVerbose())
 	doc, err := c.Resolve(context.Background(), *grantor)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving grantor DID: %v\n", err)

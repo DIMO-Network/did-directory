@@ -1,17 +1,16 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
+	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/sacd"
 )
 
@@ -28,6 +27,11 @@ func runAuth(args []string) {
 		os.Exit(1)
 	}
 
+	// Use the client for verbose HTTP logging.
+	c := client.New(*authURL)
+	c.SetVerbose(isVerbose())
+	ctx := context.Background()
+
 	// Load developer's key.
 	privKey, err := LoadKey(*didStr)
 	if err != nil {
@@ -36,18 +40,17 @@ func runAuth(args []string) {
 	}
 
 	// Step 1: Get challenge from auth service.
-	challengeResp, err := http.Get(*authURL + "/v1/challenge")
+	challengeRespBody, err := c.RawGet(ctx, *authURL+"/v1/challenge")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting challenge: %v\n", err)
 		os.Exit(1)
 	}
-	defer challengeResp.Body.Close()
 
 	var challengeBody struct {
 		Challenge string `json:"challenge"`
 		ExpiresAt string `json:"expiresAt"`
 	}
-	if err := json.NewDecoder(challengeResp.Body).Decode(&challengeBody); err != nil {
+	if err := json.Unmarshal(challengeRespBody, &challengeBody); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing challenge: %v\n", err)
 		os.Exit(1)
 	}
@@ -99,21 +102,14 @@ func runAuth(args []string) {
 		os.Exit(1)
 	}
 
-	resp, err := http.Post(*authURL+"/v1/auth", "application/json", bytes.NewReader(reqBody))
+	status, respBody, err := c.RawPost(ctx, *authURL+"/v1/auth", reqBody)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error authenticating: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading response: %v\n", err)
-		os.Exit(1)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "Auth failed (status %d): %s\n", resp.StatusCode, string(respBody))
+	if status != 200 {
+		fmt.Fprintf(os.Stderr, "Auth failed (status %d): %s\n", status, string(respBody))
 		os.Exit(1)
 	}
 
@@ -132,7 +128,7 @@ func runAuth(args []string) {
 	if len(parts) == 3 {
 		claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 		if err == nil {
-			var claims map[string]interface{}
+			var claims map[string]any
 			if err := json.Unmarshal(claimsJSON, &claims); err == nil {
 				pretty, _ := json.MarshalIndent(claims, "", "  ")
 				fmt.Printf("Claims:\n%s\n", string(pretty))
