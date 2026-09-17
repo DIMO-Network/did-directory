@@ -203,6 +203,97 @@ func TestUnknownConstraintIsRefused(t *testing.T) {
 	assert.ErrorContains(t, err, "spatial")
 }
 
+// ODRL has several policy types and only two of them are a grant. An Offer is a
+// proposal, a Request is someone asking, and a policy with no @type at all says
+// nothing. Parsing any of them into a binding delegation hands out authority
+// nobody agreed to give — the same reasoning that refuses an unknown constraint,
+// one level up.
+func TestOnlyAgreementsAndSetsAreGrants(t *testing.T) {
+	rec := fleetAgreement()
+	good, err := ToPolicy(&rec, grantURI)
+	require.NoError(t, err)
+
+	for _, typ := range []string{TypeOffer, TypeRequest, "Privacy", "Ticket"} {
+		t.Run(typ, func(t *testing.T) {
+			p := *good
+			p.Type = typ
+			_, err := FromPolicy(&p)
+			assert.ErrorIs(t, err, ErrUnsupported)
+			assert.ErrorContains(t, err, typ)
+		})
+	}
+
+	t.Run("no type at all", func(t *testing.T) {
+		p := *good
+		p.Type = ""
+		_, err := FromPolicy(&p)
+		assert.ErrorIs(t, err, ErrNotODRL)
+	})
+}
+
+// A prohibition forbids an action outright and a duty gates the permission it
+// hangs off. This reader enforces neither, so it refuses the policy rather than
+// dropping the term and handing back a grant that says more than the policy did.
+func TestProhibitionsAndPermissionDutiesAreRefused(t *testing.T) {
+	rec := fleetAgreement()
+
+	t.Run("prohibition", func(t *testing.T) {
+		p, err := ToPolicy(&rec, grantURI)
+		require.NoError(t, err)
+		p.Prohibition = []Prohibition{{
+			Target: car, Action: []string{Action("location:precise")},
+		}}
+		_, err = FromPolicy(p)
+		assert.ErrorIs(t, err, ErrUnsupported)
+		assert.ErrorContains(t, err, "prohibition")
+	})
+
+	t.Run("duty on the permission", func(t *testing.T) {
+		p, err := ToPolicy(&rec, grantURI)
+		require.NoError(t, err)
+		p.Permission[0].Duty = []Duty{{Action: "odrl:compensate"}}
+		_, err = FromPolicy(p)
+		assert.ErrorIs(t, err, ErrUnsupported)
+		assert.ErrorContains(t, err, "duty")
+	})
+
+	// The same policy off a wire, not built in Go: the field has to exist on the
+	// struct or the JSON decoder drops the prohibition before anyone can refuse it.
+	t.Run("from the wire", func(t *testing.T) {
+		data, err := Marshal(&rec, grantURI)
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+		raw["prohibition"] = []any{map[string]any{
+			"target": car, "action": []any{Action("location:precise")},
+		}}
+		data, err = json.Marshal(raw)
+		require.NoError(t, err)
+
+		_, _, _, err = Unmarshal(data)
+		assert.ErrorIs(t, err, ErrUnsupported)
+	})
+}
+
+// A cap that rounds to zero seconds is no cap at all, and zero means unlimited.
+// The format carries whole seconds, so a duration it cannot carry is refused
+// rather than silently widened to forever.
+func TestSubSecondMaxValidityIsRefused(t *testing.T) {
+	rec := delegation.Record{
+		Type: delegation.TypeRole, From: avis, To: "did:dimo:svc",
+		Covers:      delegation.Covers{Vehicle: car},
+		Abilities:   []string{"delegation:create"},
+		Constraints: &delegation.RoleConstraints{MaxValidity: 500 * time.Millisecond},
+	}
+	_, err := ToPolicy(&rec, grantURI)
+	assert.ErrorIs(t, err, ErrUnsupported)
+	assert.ErrorContains(t, err, "seconds")
+
+	// A whole number of seconds still round-trips.
+	rec.Constraints.MaxValidity = time.Second
+	assert.Equal(t, rec, roundTrip(t, rec))
+}
+
 func TestRejects(t *testing.T) {
 	rec := fleetAgreement()
 	good, err := ToPolicy(&rec, grantURI)

@@ -39,8 +39,17 @@ const (
 	ContextDIMO = "https://schema.dimo.zone/odrl/v1"
 	Profile     = ContextDIMO
 
+	// TypeAgreement and TypeSet are the two policy types that carry a grant: an
+	// Agreement is a bargain between two parties, a Set is an org's own rule about
+	// its staff.
 	TypeAgreement = "Agreement"
 	TypeSet       = "Set"
+
+	// TypeOffer and TypeRequest are ODRL policy types that grant nothing. An Offer
+	// is a proposal open for acceptance and a Request is someone asking for
+	// access; neither is agreed, and neither parses into a delegation here.
+	TypeOffer   = "Offer"
+	TypeRequest = "Request"
 
 	// Prefix namespaces every profile term and every ability IRI.
 	Prefix = "dimo:"
@@ -63,6 +72,10 @@ type Policy struct {
 	Assignee   string       `json:"assignee"`
 	Permission []Permission `json:"permission"`
 	Duty       []Duty       `json:"obligation,omitempty"`
+	// Prohibition is here so it can be refused. This codec produces a grant, and a
+	// prohibition forbids an action outright; a reader that cannot enforce one
+	// must not quietly drop it and hand back a permission the policy qualified.
+	Prohibition []Prohibition `json:"prohibition,omitempty"`
 
 	// Profile terms. ODRL has no delegation primitive, no exclusivity and no
 	// notion of a grant that narrows another, so these stay explicit rather than
@@ -89,6 +102,16 @@ type Permission struct {
 	Action     []string     `json:"action"`
 	Constraint []Constraint `json:"constraint,omitempty"`
 	Duty       []Duty       `json:"duty,omitempty"`
+}
+
+// Prohibition is an ODRL prohibition: an action the policy forbids, with an
+// optional remedy if it happens anyway. Nothing in the delegation record can
+// express one, so a policy carrying a prohibition is refused rather than parsed.
+type Prohibition struct {
+	Target     string       `json:"target"`
+	Action     []string     `json:"action"`
+	Constraint []Constraint `json:"constraint,omitempty"`
+	Remedy     []Duty       `json:"remedy,omitempty"`
 }
 
 // Constraint is an ODRL constraint.
@@ -214,6 +237,14 @@ func ToPolicy(rec *delegation.Record, uid string, duties ...Duty) (*Policy, erro
 		}
 	}
 	if c := rec.Constraints; c != nil {
+		// Seconds are the unit and zero means unlimited, so a sub-second cap would
+		// truncate to zero and become no cap at all: the one rounding error in this
+		// codec that widens a term instead of narrowing it. A duration the format
+		// cannot carry is refused, not rounded.
+		if c.MaxValidity%time.Second != 0 {
+			return nil, fmt.Errorf("%w: maxValidity %s is not a whole number of seconds and the wire format carries seconds",
+				ErrUnsupported, c.MaxValidity)
+		}
 		p.Constraints = &Constraints{
 			MaxVehicles:       c.MaxVehicles,
 			MaxValiditySecs:   int64(c.MaxValidity / time.Second),
@@ -247,15 +278,32 @@ func FromPolicy(p *Policy) (*delegation.Record, error) {
 	if p.Profile != Profile {
 		return nil, fmt.Errorf("%w: profile %q", ErrUnsupported, p.Profile)
 	}
+	recType, err := recordType(p.Type)
+	if err != nil {
+		return nil, err
+	}
+	if len(p.Prohibition) > 0 {
+		// A prohibition forbids an action outright. There is nothing in a
+		// delegation record that says "not this", so honouring it is impossible and
+		// dropping it would hand back a permission the policy qualified.
+		return nil, fmt.Errorf("%w: policy carries a prohibition, which this profile cannot express", ErrUnsupported)
+	}
 	if len(p.Permission) != 1 {
 		// One grant per policy: a permission set with several targets would be
 		// several grants, each with its own basis and revocation.
 		return nil, fmt.Errorf("%w: expected one permission, got %d", ErrNoPermission, len(p.Permission))
 	}
+	if len(p.Permission[0].Duty) > 0 {
+		// A duty on a permission gates it: the permission holds only while the duty
+		// is met. The policy-level obligations ride through untouched for the caller
+		// to enforce, but one attached to the permission would turn into an
+		// unconditional grant here, which is the opposite of what it says.
+		return nil, fmt.Errorf("%w: the permission carries a duty, which gates it and this reader cannot enforce", ErrUnsupported)
+	}
 
 	perm := p.Permission[0]
 	rec := &delegation.Record{
-		Type:            recordType(p.Type),
+		Type:            recType,
 		From:            p.Assigner,
 		To:              p.Assignee,
 		Basis:           p.Basis,
@@ -441,11 +489,27 @@ func policyType(recordType string) string {
 	return TypeAgreement
 }
 
-func recordType(policyType string) string {
-	if policyType == TypeSet {
-		return delegation.TypeRole
+// recordType maps a policy type to a record type and refuses everything that is
+// not a grant.
+//
+// ODRL has more policy types than this profile carries, and the difference is
+// not decorative: an Offer is a proposal open for acceptance, a Request is
+// someone asking. Treating either as an Agreement would turn a document that
+// grants nothing into a live delegation, so they are refused for the same reason
+// an unknown constraint is — reading a policy as more than it says is the one
+// failure this codec must never have.
+func recordType(policyType string) (string, error) {
+	switch policyType {
+	case TypeAgreement:
+		return delegation.TypeDelegation, nil
+	case TypeSet:
+		return delegation.TypeRole, nil
+	case "":
+		return "", fmt.Errorf("%w: policy has no @type, expected %q or %q", ErrNotODRL, TypeAgreement, TypeSet)
+	default:
+		return "", fmt.Errorf("%w: policy @type %q grants nothing, expected %q or %q",
+			ErrUnsupported, policyType, TypeAgreement, TypeSet)
 	}
-	return delegation.TypeDelegation
 }
 
 // strList reads a list of strings from either a policy built in Go, where the

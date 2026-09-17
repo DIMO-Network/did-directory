@@ -44,9 +44,9 @@ func keys(m map[string]delegation.Record) []string {
 func TestPaidBookingCompilesCustodyAndHistory(t *testing.T) {
 	a := booking()
 	got := compile(t, &a, day(10))
-	assert.ElementsMatch(t, []string{"bk-1/custody", "bk-1/history"}, keys(got))
+	assert.ElementsMatch(t, []string{"bk-1/rental/custody", "bk-1/rental/history"}, keys(got))
 
-	custody := got["bk-1/custody"]
+	custody := got["bk-1/rental/custody"]
 	assert.Equal(t, delegation.TypeDelegation, custody.Type)
 	assert.Equal(t, avis, custody.From)
 	assert.Equal(t, renter, custody.To)
@@ -62,7 +62,7 @@ func TestPaidBookingCompilesCustodyAndHistory(t *testing.T) {
 	assert.Equal(t, backend, custody.CreatedBy)
 	assert.Equal(t, day(10), custody.CreatedAt)
 
-	history := got["bk-1/history"]
+	history := got["bk-1/rental/history"]
 	assert.Equal(t, []string{"telemetry:read"}, history.Abilities)
 	assert.Empty(t, history.Exclusive)
 	assert.Equal(t, day(15).Add(30*24*time.Hour), *history.Validity.To)
@@ -107,9 +107,9 @@ func TestCancelledAfterPickupKeepsTheDrive(t *testing.T) {
 
 	grants := compile(t, &a, day(12))
 	require.NotEmpty(t, grants, "the drive survives the cancellation")
-	assert.NotContains(t, keys(grants), a.ID+"/custody", "the commands stop at the cancellation")
+	assert.NotContains(t, keys(grants), a.ID+"/rental/custody", "the commands stop at the cancellation")
 
-	history, ok := grants[a.ID+"/history"]
+	history, ok := grants[a.ID+"/rental/history"]
 	require.True(t, ok, "the renter keeps the days they drove")
 	assert.Equal(t, day(10), *history.DataWindow.From)
 	assert.Equal(t, day(11), *history.DataWindow.To)
@@ -127,10 +127,122 @@ func TestCancelledWithCarStillOutEndsCustody(t *testing.T) {
 	require.NotNil(t, a.ReturnedAt())
 	assert.Equal(t, day(11), *a.ReturnedAt())
 
-	assert.NotContains(t, keys(compile(t, &a, day(12))), a.ID+"/custody")
+	assert.NotContains(t, keys(compile(t, &a, day(12))), a.ID+"/rental/custody")
 	window, err := a.CustodyWindow()
 	require.NoError(t, err)
 	assert.Equal(t, day(11), *window.To)
+}
+
+// A car handed back in the middle of a booking and taken again is still rented.
+// A valet drop-off or an overnight garage hand-back closes a custody leg; the
+// renter takes the car again the next morning, has to be able to unlock the car
+// they are standing next to, and the operator must stay suspended for as long as
+// somebody might be driving.
+func TestHandBackAndRetakeKeepsCustody(t *testing.T) {
+	a := booking()
+	a.Custody = []Custody{{Start: day(10), End: tp(day(11))}}
+	a.State = StatePickedUp
+
+	assert.Nil(t, a.ReturnedAt(), "a closed leg is not the end of the rental")
+
+	got := compile(t, &a, day(13))
+	require.Contains(t, got, "bk-1/rental/custody", "the renter still has the car")
+	custody := got["bk-1/rental/custody"]
+	assert.Equal(t, custody.Abilities, custody.Exclusive,
+		"the operator must not command a car somebody is driving")
+
+	// The hull still reaches the end of the booking, because the days after the
+	// hand-back are part of the drive. narrowToCustody trims the gap.
+	assert.Equal(t, day(15), *got["bk-1/rental/history"].DataWindow.To)
+}
+
+// Offer names are unique per service code, which is all a catalog can enforce:
+// two products may legitimately both call their grant "custody". The compiled
+// keys must still differ, or a live two-service booking compiles to nothing.
+func TestGrantKeysAreScopedByService(t *testing.T) {
+	cat := RentalCatalog()
+	cat["subscription"] = []Offer{{
+		Name: "custody", To: ToCustomer, Abilities: []string{"stream:live"},
+		Validity: ScopeBooking, DataWindow: ScopeUnbounded,
+	}}
+	require.NoError(t, cat.Validate(), "this catalog passes startup validation")
+
+	a := booking()
+	a.Services = append(a.Services, Service{Code: "subscription"})
+	grants, err := Compile(&a, cat, day(10))
+	require.NoError(t, err)
+
+	byKey := map[string]delegation.Record{}
+	for i := range grants {
+		byKey[grants[i].Key] = grants[i].Record
+	}
+	assert.ElementsMatch(t,
+		[]string{"bk-1/rental/custody", "bk-1/rental/history", "bk-1/subscription/custody"},
+		keys(byKey))
+}
+
+// A compiled record is validated once and then committed. Nothing in it may
+// alias the agreement it came from, or a later edit to the booking silently
+// rewrites a record an org host has already accepted.
+func TestCompiledRecordsDoNotAliasTheAgreement(t *testing.T) {
+	a := booking()
+	a.Custody = []Custody{{Start: day(10)}}
+	a.State = StatePickedUp
+	a.Services = append(a.Services,
+		Service{Code: "waiver", Beneficiary: insurer, Term: span(1, 400)},
+		Service{Code: "roadside"})
+	a.Incidents = []Incident{{ID: "i1", Responder: roadside, OpenedAt: day(11)}}
+
+	got := compile(t, &a, day(11).Add(time.Hour))
+	want := map[string][]time.Time{}
+	for key, rec := range got {
+		want[key] = bounds(rec)
+	}
+
+	// Everything the compiler read: custody starts, the booking window, the line
+	// item's term and the incident's own times.
+	a.Custody[0].Start = day(1)
+	*a.Window.From = day(2)
+	*a.Window.To = day(300)
+	*a.Services[1].Term.From = day(3)
+	a.Incidents[0].OpenedAt = day(4)
+
+	for key, rec := range got {
+		assert.Equal(t, want[key], bounds(rec), key)
+	}
+
+	// The exported windows hand out copies too, for the same reason.
+	b := booking()
+	b.Duties[1].DueBy = tp(day(13))
+	w, err := b.BookingWindow()
+	require.NoError(t, err)
+	*w.From, *w.To = day(1), day(300)
+	assert.Equal(t, day(10), *b.Window.From)
+	assert.Equal(t, day(13), *b.Duties[1].DueBy)
+
+	c := booking()
+	c.Custody = []Custody{{Start: day(10), End: tp(day(12))}}
+	c.State = StateReturned
+	custody, err := c.CustodyWindow()
+	require.NoError(t, err)
+	*custody.From, *custody.To = day(1), day(300)
+	assert.Equal(t, day(10), c.Custody[0].Start)
+	assert.Equal(t, day(12), *c.Custody[0].End)
+}
+
+// bounds is a record's two windows as values, so a test can tell a copy from an
+// alias: comparing the windows themselves would follow the very pointers the
+// test is trying to catch.
+func bounds(rec delegation.Record) []time.Time {
+	var out []time.Time
+	for _, w := range []delegation.Window{rec.Validity, rec.DataWindow} {
+		for _, t := range []*time.Time{w.From, w.To} {
+			if t != nil {
+				out = append(out, *t)
+			}
+		}
+	}
+	return out
 }
 
 // A renter books a class and gets a specific car, often minutes before pickup.
@@ -145,7 +257,7 @@ func TestVehicleAssignedAtPickup(t *testing.T) {
 	a.Target.AssignedAt = tp(day(10))
 	got := compile(t, &a, day(10))
 	assert.Len(t, got, 2)
-	assert.Equal(t, car, got["bk-1/custody"].Covers.Vehicle)
+	assert.Equal(t, car, got["bk-1/rental/custody"].Covers.Vehicle)
 }
 
 // Custody dies at return; history keeps exactly the window the renter drove and
@@ -156,9 +268,9 @@ func TestEarlyReturn(t *testing.T) {
 	a.State = StateReturned
 
 	got := compile(t, &a, day(12).Add(time.Hour))
-	assert.ElementsMatch(t, []string{"bk-1/history"}, keys(got))
+	assert.ElementsMatch(t, []string{"bk-1/rental/history"}, keys(got))
 
-	history := got["bk-1/history"]
+	history := got["bk-1/rental/history"]
 	// Custody narrowed the data window after the fact: the renter keeps day 10
 	// to day 12, not the booking's day 10 to day 15.
 	assert.Equal(t, day(10), *history.DataWindow.From)
@@ -188,7 +300,7 @@ func TestRetentionExpiry(t *testing.T) {
 // no line item means no insurer even though the catalog declares the offer.
 func TestWaiverAddsInsurerGrant(t *testing.T) {
 	a := booking()
-	assert.NotContains(t, keys(compile(t, &a, day(10))), "bk-1/insurer")
+	assert.NotContains(t, keys(compile(t, &a, day(10))), "bk-1/waiver/insurer")
 
 	a.Services = append(a.Services, Service{
 		Code:        "waiver",
@@ -196,21 +308,25 @@ func TestWaiverAddsInsurerGrant(t *testing.T) {
 		Term:        delegation.Window{From: tp(day(1)), To: tp(day(400))},
 	})
 	got := compile(t, &a, day(10))
-	assert.ElementsMatch(t, []string{"bk-1/custody", "bk-1/history", "bk-1/insurer"}, keys(got))
+	assert.ElementsMatch(t, []string{"bk-1/rental/custody", "bk-1/rental/history", "bk-1/waiver/insurer"}, keys(got))
 
-	ins := got["bk-1/insurer"]
+	ins := got["bk-1/waiver/insurer"]
 	assert.Equal(t, insurer, ins.To)
 	assert.Equal(t, []string{"events:read"}, ins.Abilities)
 	// Validity is the policy term; what it may read is only the customer's drive.
 	assert.Equal(t, day(400), *ins.Validity.To)
 	assert.Equal(t, day(15), *ins.DataWindow.To)
+	// The evaluator narrows by the recipient's own custody, and the insurer never
+	// had the car. The customer's drive bounds them through the window instead.
+	assert.False(t, ins.NarrowToCustody)
+	assert.True(t, got["bk-1/rental/history"].NarrowToCustody)
 
 	// The insurer's grant survives the return, like the renter's history.
 	a.Custody = []Custody{{Start: day(10), End: tp(day(12))}}
 	a.State = StateReturned
 	got = compile(t, &a, day(13))
-	assert.ElementsMatch(t, []string{"bk-1/history", "bk-1/insurer"}, keys(got))
-	assert.Equal(t, day(12), *got["bk-1/insurer"].DataWindow.To)
+	assert.ElementsMatch(t, []string{"bk-1/rental/history", "bk-1/waiver/insurer"}, keys(got))
+	assert.Equal(t, day(12), *got["bk-1/waiver/insurer"].DataWindow.To)
 }
 
 // Roadside exists only while something is wrong.
@@ -219,21 +335,21 @@ func TestRoadsideOnlyWhileIncidentIsOpen(t *testing.T) {
 	a.Services = append(a.Services, Service{Code: "roadside"})
 
 	// Purchased, but nothing has happened.
-	assert.NotContains(t, keys(compile(t, &a, day(11))), "bk-1/roadside/i1")
+	assert.NotContains(t, keys(compile(t, &a, day(11))), "bk-1/roadside/roadside/i1")
 
 	a.Incidents = []Incident{{ID: "i1", Responder: roadside, OpenedAt: day(11), ClosedAt: tp(day(12))}}
-	assert.NotContains(t, keys(compile(t, &a, day(10))), "bk-1/roadside/i1", "not yet opened")
+	assert.NotContains(t, keys(compile(t, &a, day(10))), "bk-1/roadside/roadside/i1", "not yet opened")
 
 	got := compile(t, &a, day(11).Add(time.Hour))
-	require.Contains(t, got, "bk-1/roadside/i1")
-	rs := got["bk-1/roadside/i1"]
+	require.Contains(t, got, "bk-1/roadside/roadside/i1")
+	rs := got["bk-1/roadside/roadside/i1"]
 	assert.Equal(t, roadside, rs.To)
 	assert.Equal(t, []string{"location:precise"}, rs.Abilities)
 	assert.Equal(t, day(11), *rs.Validity.From)
 	assert.Equal(t, day(12), *rs.Validity.To)
 	assert.Equal(t, rs.Validity, rs.DataWindow)
 
-	assert.NotContains(t, keys(compile(t, &a, day(13))), "bk-1/roadside/i1", "closed")
+	assert.NotContains(t, keys(compile(t, &a, day(13))), "bk-1/roadside/roadside/i1", "closed")
 
 	// Two incidents open at once get one grant each, keyed by incident.
 	a.Incidents = []Incident{
@@ -241,8 +357,8 @@ func TestRoadsideOnlyWhileIncidentIsOpen(t *testing.T) {
 		{ID: "i2", Responder: "did:dimo:tow", OpenedAt: day(11)},
 	}
 	got = compile(t, &a, day(12))
-	assert.Contains(t, got, "bk-1/roadside/i1")
-	assert.Contains(t, got, "bk-1/roadside/i2")
+	assert.Contains(t, got, "bk-1/roadside/roadside/i1")
+	assert.Contains(t, got, "bk-1/roadside/roadside/i2")
 }
 
 // The provider already holds every ability as controller of record, and a
@@ -252,7 +368,7 @@ func TestSelfGrantIsNotWritten(t *testing.T) {
 	a := booking()
 	a.Services = append(a.Services, Service{Code: "roadside"})
 	a.Incidents = []Incident{{ID: "i1", Responder: avis, OpenedAt: day(11)}}
-	assert.ElementsMatch(t, []string{"bk-1/custody", "bk-1/history"}, keys(compile(t, &a, day(12))))
+	assert.ElementsMatch(t, []string{"bk-1/rental/custody", "bk-1/rental/history"}, keys(compile(t, &a, day(12))))
 }
 
 // Peer to peer is the same chain: the host's listing delegation is the basis and
@@ -324,15 +440,13 @@ func TestCompileErrors(t *testing.T) {
 		assert.Error(t, err)
 	})
 
+	// The service code is part of the key, so what still collides is the same
+	// line item bought twice on one booking: an ambiguous record key, refused
+	// rather than committed twice.
 	t.Run("duplicate grant", func(t *testing.T) {
-		cat := RentalCatalog()
-		cat["upgrade"] = []Offer{{
-			Name: "custody", To: ToCustomer, Abilities: []string{"stream:live"},
-			Validity: ScopeBooking, DataWindow: ScopeUnbounded,
-		}}
 		a := booking()
-		a.Services = append(a.Services, Service{Code: "upgrade"})
-		_, err := Compile(&a, cat, day(10))
+		a.Services = append(a.Services, Service{Code: "rental"})
+		_, err := Compile(&a, RentalCatalog(), day(10))
 		assert.ErrorIs(t, err, ErrDuplicateGrant)
 	})
 

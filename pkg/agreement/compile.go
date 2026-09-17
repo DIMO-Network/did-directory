@@ -157,7 +157,11 @@ func (a *Agreement) grant(off *Offer, svc *Service, inc *Incident, now time.Time
 		return nil, nil
 	}
 
-	key := a.ID + "/" + off.Name
+	// The service code is part of the key. Offer names are unique per code and
+	// that is all a catalog can enforce, so two products may legitimately both
+	// call their grant "custody"; keying on the name alone would make a live
+	// two-service booking compile to nothing at all.
+	key := a.ID + "/" + svc.Code + "/" + off.Name
 	if inc != nil {
 		key += "/" + inc.ID
 	}
@@ -177,7 +181,14 @@ func (a *Agreement) grant(off *Offer, svc *Service, inc *Incident, now time.Time
 		// A custody-scoped data window is a hull: one Window cannot express a car
 		// handed back and re-taken. NarrowToCustody makes the evaluator intersect
 		// the real intervals, so the hull is only ever an outer bound.
-		NarrowToCustody: off.DataWindow == ScopeCustody,
+		//
+		// The evaluator narrows by the custody of the recipient, so this can only
+		// be claimed for a grant that goes to the customer. The insurer behind a
+		// damage waiver never had the car: narrowing their grant to their own
+		// custody would read nothing at all, and a grant that compiles and then
+		// answers ErrNotCovered forever is not a product. What bounds the insurer
+		// is the hull — the customer's drive — which is what the waiver bought.
+		NarrowToCustody: off.DataWindow == ScopeCustody && to == a.Assignee,
 		Validity:        validity,
 		Redelegate:      off.Redelegate,
 		RevocableBy:     off.RevocableBy,
@@ -211,7 +222,9 @@ func (a *Agreement) recipient(off *Offer, svc *Service, inc *Incident) (string, 
 	}
 }
 
-// scope resolves an offer's scope against this agreement's facts.
+// scope resolves an offer's scope against this agreement's facts. Every branch
+// returns times of its own: nothing in a compiled record may point back into the
+// agreement it was compiled from.
 func (a *Agreement) scope(s Scope, svc *Service, inc *Incident) (delegation.Window, error) {
 	switch s {
 	case ScopeBooking:
@@ -224,9 +237,9 @@ func (a *Agreement) scope(s Scope, svc *Service, inc *Incident) (delegation.Wind
 		if svc.Term.From == nil && svc.Term.To == nil {
 			return delegation.Window{}, fmt.Errorf("%w: service %s", ErrNoTerm, svc.Code)
 		}
-		return svc.Term, nil
+		return copyWindow(svc.Term), nil
 	case ScopeIncident:
-		return delegation.Window{From: &inc.OpenedAt, To: inc.ClosedAt}, nil
+		return copyWindow(delegation.Window{From: &inc.OpenedAt, To: inc.ClosedAt}), nil
 	case ScopeUnbounded:
 		return delegation.Window{}, nil
 	default:

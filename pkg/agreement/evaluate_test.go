@@ -180,8 +180,8 @@ func TestCompiledGrantsEvaluate(t *testing.T) {
 		Validity:  span(1, 400),
 	}, day(1))
 
-	custodyURI := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1/custody"
-	historyURI := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1/history"
+	custodyURI := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1/rental/custody"
+	historyURI := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1/rental/history"
 
 	t.Run("renter can unlock during the booking", func(t *testing.T) {
 		cov, err := ev.Authorize(ctx, custodyURI, renter, "", car, []string{"command:unlock"}, day(11))
@@ -231,6 +231,39 @@ func TestCompiledGrantsEvaluate(t *testing.T) {
 		_, err := ev.Authorize(ctx, historyURI, valet, "", car, []string{"telemetry:read"}, day(20))
 		assert.ErrorIs(t, err, delegation.ErrUnauthorized)
 	})
+}
+
+// The insurer behind a damage waiver never had the car, so a grant narrowed by
+// the insurer's own custody reads nothing at all. What the waiver buys is a look
+// at the customer's drive, and the compiled record has to actually evaluate to
+// it: a grant that compiles and then answers ErrNotCovered forever is not a
+// product.
+func TestInsurerGrantEvaluates(t *testing.T) {
+	ctx := context.Background()
+
+	f := newFleet(t, car, avis)
+	f.role(avis, backend, RentalCatalog().Abilities(), day(1))
+	ev := &delegation.Evaluator{Resolver: f, Policy: CommitPolicy()}
+
+	a := booking()
+	a.Services = append(a.Services, Service{
+		Code: "waiver", Beneficiary: insurer, Term: span(1, 400),
+	})
+	a.Custody = []Custody{{Start: day(10), End: tp(day(12))}}
+	a.State = StateReturned
+	f.hold(renter, day(10), tp(day(12)))
+	for _, g := range mustCompile(t, &a, day(13)) {
+		f.commit(g.Key, g.Record, day(9))
+	}
+
+	uri := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1/waiver/insurer"
+	cov, err := ev.Authorize(ctx, uri, insurer, "", car, []string{"events:read"}, day(20))
+	require.NoError(t, err, "the insurer bought a look at the customer's drive")
+
+	window := cov.Historical["events:read"]
+	assert.True(t, window.Contains(day(11)), "the day the customer drove")
+	assert.False(t, window.Contains(day(14)), "after the car came back")
+	assert.False(t, window.Contains(day(9)), "before the customer picked it up")
 }
 
 func mustCompile(t *testing.T, a *Agreement, now time.Time) []Grant {
