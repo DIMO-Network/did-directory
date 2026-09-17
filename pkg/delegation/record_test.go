@@ -99,3 +99,30 @@ func TestCheckMembershipGrowth(t *testing.T) {
 	assert.NoError(t, CheckMembershipGrowth(covering, 501, true, Policy{}))
 	assert.NoError(t, CheckMembershipGrowth(nil, 10_000, false, Policy{}))
 }
+
+// A device sending a reading is doing it now. Checking a write against a data
+// window asks whether it may write a reading it has not taken yet.
+func TestClassOf_WritesAreLive(t *testing.T) {
+	assert.Equal(t, Live, ClassOf("telemetry:write"))
+	assert.Equal(t, Live, ClassOf("data:write"))
+	assert.Equal(t, Live, ClassOf("data:deliver"))
+	assert.Equal(t, Historical, ClassOf("telemetry:read"))
+	assert.Equal(t, Admin, ClassOf("tag:write"), "editing a tag is not writing vehicle data")
+
+	// Actuation is narrower than live, and it is what approval and custody are
+	// about: pairing a device is not the thing two admins are guarding against.
+	assert.True(t, IsActuating("command:unlock"))
+	assert.False(t, IsActuating("telemetry:write"))
+
+	pairing := validRecord()
+	pairing.Abilities = []string{"telemetry:write"}
+	assert.NoError(t, CheckCommit(&pairing, CommitContext{
+		From: Party{Kind: KindOrg, Operator: true}, CoveredVehicles: 1,
+	}), "a device pairing does not need two admins")
+
+	unlock := validRecord()
+	unlock.Abilities = []string{"command:unlock"}
+	assert.ErrorIs(t, CheckCommit(&unlock, CommitContext{
+		From: Party{Kind: KindOrg, Operator: true}, CoveredVehicles: 1,
+	}), ErrApprovalRequired)
+}

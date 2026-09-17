@@ -27,7 +27,9 @@ type Policy struct {
 	// VehicleApprovalThreshold is the vehicle count above which a write needs a
 	// second approval.
 	VehicleApprovalThreshold int
-	// ApprovalForLiveAbilities requires a second approval for commands.
+	// ApprovalForLiveAbilities requires a second approval for abilities that
+	// actuate the vehicle. Data writes are live too, but a device pairing is not
+	// the thing a pair of admins is protecting against.
 	ApprovalForLiveAbilities bool
 	// AllowIrrevocableFromNonOperator lets a party without attested operator
 	// status issue a grant only its recipient can revoke. Off by default:
@@ -87,7 +89,7 @@ func ApprovalReasons(rec *Record, coveredVehicles int, policy Policy) []string {
 	}
 	if policy.ApprovalForLiveAbilities {
 		for _, a := range rec.Abilities {
-			if ClassOf(a) == Live {
+			if IsActuating(a) {
 				reasons = append(reasons, "grants live ability "+a)
 			}
 		}

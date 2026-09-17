@@ -204,14 +204,28 @@ const (
 	Admin
 )
 
+// IsActuating reports whether an ability makes the vehicle do something —
+// unlock, start, charge. Actuation is what a second approval is for, and what
+// custody suspends; writing data is neither.
+func IsActuating(ability string) bool {
+	return strings.HasPrefix(ability, "command:")
+}
+
 // ClassOf classifies an ability by namespace.
+//
+// Writing and delivering data are live: a device sending a reading is doing it
+// now, so the check is against the time of the request, not against the
+// timestamps of data it has yet to produce. Checking a write against a data
+// window would ask whether a device may write a reading it has not taken.
 func ClassOf(ability string) AbilityClass {
 	switch {
-	case strings.HasPrefix(ability, "command:"), strings.HasPrefix(ability, "stream:"):
-		return Live
+	// Admin namespaces first: tag:write edits a tag, it does not write vehicle data.
 	case strings.HasPrefix(ability, "delegation:"), strings.HasPrefix(ability, "tag:"),
 		strings.HasPrefix(ability, "org:"), strings.HasPrefix(ability, "license:"):
 		return Admin
+	case strings.HasPrefix(ability, "command:"), strings.HasPrefix(ability, "stream:"),
+		strings.HasSuffix(ability, ":write"), strings.HasSuffix(ability, ":deliver"):
+		return Live
 	default:
 		return Historical
 	}
