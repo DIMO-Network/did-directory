@@ -61,8 +61,16 @@ type Record struct {
 	Purpose         string     `json:"purpose,omitempty"`
 	Terms           string     `json:"terms,omitempty"`
 	ClientAllowlist []string   `json:"clientAllowlist,omitempty"`
-	CreatedBy       string     `json:"createdBy,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
+	// Exclusive lists live abilities this record holds exclusively while it is
+	// live: nobody else, the controller included, may exercise them over the same
+	// vehicle. Custody uses it, because an operator must not immobilise a car
+	// somebody else is driving.
+	Exclusive []string `json:"exclusive,omitempty"`
+	// Recovery marks a record that may act despite someone else's exclusive hold.
+	// Every such use is reported so the issuer can log it.
+	Recovery  bool      `json:"recovery,omitempty"`
+	CreatedBy string    `json:"createdBy,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // Covers selects what a record applies to. Exactly one field is set.
@@ -86,6 +94,10 @@ type Redelegate struct {
 	Mode     string   `json:"mode"`
 	MaxDepth int      `json:"maxDepth,omitempty"`
 	Grantees []string `json:"grantees,omitempty"`
+	// Exclusive lets a child claim abilities exclusively (see Record.Exclusive).
+	// A host permits it once; the booking that claims it is time-bounded, so the
+	// host only loses control for the custody window.
+	Exclusive bool `json:"exclusive,omitempty"`
 }
 
 // AbilityClass determines how time applies to an ability.
@@ -198,6 +210,18 @@ func (r *Record) Validate() error {
 		}
 	}
 
+	for _, a := range r.Exclusive {
+		if !slices.Contains(r.Abilities, a) {
+			return fmt.Errorf("exclusive ability %s is not granted by this record", a)
+		}
+		if ClassOf(a) != Live {
+			return fmt.Errorf("only live abilities can be exclusive, got %s", a)
+		}
+	}
+	if r.Recovery && !slices.ContainsFunc(r.Abilities, func(a string) bool { return ClassOf(a) == Live }) {
+		return errors.New("recovery requires at least one live ability")
+	}
+
 	if r.Type == TypeRole {
 		if len(r.Basis) != 0 {
 			return errors.New("roles must not have a basis")
@@ -207,6 +231,9 @@ func (r *Record) Validate() error {
 		}
 		if r.revocableBy() != RevocableByFrom {
 			return errors.New("roles are revocable only by the org")
+		}
+		if len(r.Exclusive) != 0 || r.Recovery {
+			return errors.New("roles cannot be exclusive or recovery records")
 		}
 	}
 	return nil

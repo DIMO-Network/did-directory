@@ -71,31 +71,31 @@ func TestParseURI(t *testing.T) {
 
 func TestCheckCommit(t *testing.T) {
 	r := validRecord()
-	assert.NoError(t, CheckCommit(&r, CommitContext{FromKind: KindOrg, CoveredVehicles: 10}))
-	assert.ErrorIs(t, CheckCommit(&r, CommitContext{FromKind: KindOrg, CoveredVehicles: 501}), ErrApprovalRequired)
-	assert.NoError(t, CheckCommit(&r, CommitContext{FromKind: KindOrg, CoveredVehicles: 501, Approved: true}))
-	assert.NoError(t, CheckCommit(&r, CommitContext{FromKind: KindOrg, CoveredVehicles: 900, Threshold: 1000}))
+	assert.NoError(t, CheckCommit(&r, CommitContext{From: Party{Kind: KindOrg, Operator: true}, CoveredVehicles: 10}))
+	assert.ErrorIs(t, CheckCommit(&r, CommitContext{From: Party{Kind: KindOrg, Operator: true}, CoveredVehicles: 501}), ErrApprovalRequired)
+	assert.NoError(t, CheckCommit(&r, CommitContext{From: Party{Kind: KindOrg, Operator: true}, CoveredVehicles: 501, Approved: true}))
+	assert.NoError(t, CheckCommit(&r, CommitContext{From: Party{Kind: KindOrg, Operator: true}, CoveredVehicles: 900, Policy: Policy{Name: "big-fleet", VehicleApprovalThreshold: 1000}}))
 
 	live := validRecord()
 	live.Abilities = []string{"command:unlock"}
-	assert.ErrorIs(t, CheckCommit(&live, CommitContext{FromKind: KindOrg, CoveredVehicles: 1}), ErrApprovalRequired)
+	assert.ErrorIs(t, CheckCommit(&live, CommitContext{From: Party{Kind: KindOrg, Operator: true}, CoveredVehicles: 1}), ErrApprovalRequired)
 
 	lien := validRecord()
 	lien.RevocableBy = RevocableByTo
-	assert.ErrorIs(t, CheckCommit(&lien, CommitContext{FromKind: KindPerson, Approved: true}), ErrLienNotAllowed)
-	assert.ErrorIs(t, CheckCommit(&lien, CommitContext{FromKind: KindOrg}), ErrApprovalRequired)
-	assert.NoError(t, CheckCommit(&lien, CommitContext{FromKind: KindOrg, Approved: true}))
+	assert.ErrorIs(t, CheckCommit(&lien, CommitContext{From: Party{Kind: KindPerson, ConsumerProtected: true}, Approved: true}), ErrLienNotAllowed)
+	assert.ErrorIs(t, CheckCommit(&lien, CommitContext{From: Party{Kind: KindOrg, Operator: true}}), ErrApprovalRequired)
+	assert.NoError(t, CheckCommit(&lien, CommitContext{From: Party{Kind: KindOrg, Operator: true}, Approved: true}))
 
 	role := validRecord()
 	role.Type = TypeRole
 	role.To = alice
-	assert.Error(t, CheckCommit(&role, CommitContext{FromKind: KindPerson}))
+	assert.Error(t, CheckCommit(&role, CommitContext{From: Party{Kind: KindPerson, ConsumerProtected: true}}))
 }
 
 func TestCheckMembershipGrowth(t *testing.T) {
 	covering := []Record{validRecord()}
-	assert.NoError(t, CheckMembershipGrowth(covering, 500, false, 0))
-	assert.ErrorIs(t, CheckMembershipGrowth(covering, 501, false, 0), ErrApprovalRequired)
-	assert.NoError(t, CheckMembershipGrowth(covering, 501, true, 0))
-	assert.NoError(t, CheckMembershipGrowth(nil, 10_000, false, 0))
+	assert.NoError(t, CheckMembershipGrowth(covering, 500, false, Policy{}))
+	assert.ErrorIs(t, CheckMembershipGrowth(covering, 501, false, Policy{}), ErrApprovalRequired)
+	assert.NoError(t, CheckMembershipGrowth(covering, 501, true, Policy{}))
+	assert.NoError(t, CheckMembershipGrowth(nil, 10_000, false, Policy{}))
 }

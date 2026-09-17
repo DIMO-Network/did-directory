@@ -42,7 +42,7 @@ type memResolver struct {
 	roles       map[string][]Stored     // org|member
 	states      map[string]*control.State
 	openings    map[string]*control.Opening // vehicle|era|controller
-	kinds       map[string]Kind
+	parties     map[string]Party
 }
 
 func newResolver() *memResolver {
@@ -52,10 +52,20 @@ func newResolver() *memResolver {
 		roles:       map[string][]Stored{},
 		states:      map[string]*control.State{},
 		openings:    map[string]*control.Opening{},
-		kinds: map[string]Kind{
-			avis: KindOrg, fordCredit: KindOrg, fordPro: KindOrg, integrator: KindOrg, insurer: KindOrg,
-			dealer: KindOrg, rooftop: KindOrg, marketing: KindOrg,
-			alice: KindPerson, bob: KindPerson, fcAnalyst: KindPerson, owner: KindPerson, buyer: KindPerson,
+		parties: map[string]Party{
+			avis:       {Kind: KindOrg, Operator: true},
+			fordCredit: {Kind: KindOrg, Operator: true},
+			fordPro:    {Kind: KindOrg, Operator: true},
+			integrator: {Kind: KindOrg, Operator: true},
+			insurer:    {Kind: KindOrg, Operator: true},
+			dealer:     {Kind: KindOrg, Operator: true},
+			rooftop:    {Kind: KindOrg, Operator: true},
+			marketing:  {Kind: KindOrg, Operator: true},
+			alice:      {Kind: KindPerson, ConsumerProtected: true},
+			bob:        {Kind: KindPerson, ConsumerProtected: true},
+			fcAnalyst:  {Kind: KindPerson, ConsumerProtected: true},
+			owner:      {Kind: KindPerson, ConsumerProtected: true},
+			buyer:      {Kind: KindPerson, ConsumerProtected: true},
 		},
 	}
 }
@@ -87,8 +97,25 @@ func (m *memResolver) Opening(_ context.Context, vehicle string, era uint64, con
 	return m.openings[fmt.Sprintf("%s|%d|%s", vehicle, era, controller)], nil
 }
 
-func (m *memResolver) Kind(_ context.Context, did string) (Kind, error) {
-	return m.kinds[did], nil
+func (m *memResolver) Party(_ context.Context, did string) (Party, error) {
+	return m.parties[did], nil
+}
+
+// Exclusives mirrors what an org host's index does: scan live delegations that
+// claim exclusive live abilities over this vehicle.
+func (m *memResolver) Exclusives(_ context.Context, vehicle string, at time.Time) ([]ExclusiveHold, error) {
+	var holds []ExclusiveHold
+	for _, s := range m.records {
+		rec := &s.Record
+		if len(rec.Exclusive) == 0 || !m.coversVehicle(rec, vehicle, 0) {
+			continue
+		}
+		if !rec.Validity.Set().Contains(at) || revokedAt(rec, s.Tombstone, at) {
+			continue
+		}
+		holds = append(holds, ExclusiveHold{URI: s.URI, Holder: rec.To, Abilities: rec.Exclusive})
+	}
+	return holds, nil
 }
 
 // control gives controller era 0 of vehicle, starting at the beginning of time.
@@ -139,6 +166,25 @@ func (m *memResolver) join(tag, vehicle, author string, joined time.Time, left *
 	m.memberships[key] = append(m.memberships[key], Membership{
 		Tag: tag, Vehicle: vehicle, JoinedAt: joined, LeftAt: left, CreatedBy: author, CommittedAt: joined,
 	})
+}
+
+// coversVehicle resolves covers, following inherit up the basis chain.
+func (m *memResolver) coversVehicle(rec *Record, vehicle string, depth int) bool {
+	if depth > MaxChainDepth {
+		return false
+	}
+	switch {
+	case rec.Covers.Vehicle != "":
+		return rec.Covers.Vehicle == vehicle
+	case rec.Covers.Tag != "":
+		return len(m.memberships[rec.Covers.Tag+"|"+vehicle]) > 0
+	}
+	for _, b := range rec.Basis {
+		if s, ok := m.records[b]; ok && m.coversVehicle(&s.Record, vehicle, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 func uri(did, rkey string) string { return "at://" + did + "/" + TypeDelegation + "/" + rkey }

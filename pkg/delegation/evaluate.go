@@ -20,7 +20,9 @@ var (
 	ErrUnauthorized     = errors.New("caller is not authorized to use this delegation")
 	ErrClientNotAllowed = errors.New("client is not allowed to use this delegation")
 	ErrChainTooDeep     = errors.New("delegation chain is too deep")
-	ErrLienNotAllowed   = errors.New("only an org may issue a delegation revocable only by its recipient")
+	ErrLienNotAllowed   = errors.New("only an attested operator may issue a delegation revocable only by its recipient")
+	ErrSelfDealing      = errors.New("the author of a grant cannot be its recipient without a second approval")
+	ErrExclusiveHold    = errors.New("another party holds these abilities exclusively")
 )
 
 // Kind is the kind of principal behind a DID.
@@ -32,12 +34,43 @@ const (
 	KindOrg
 )
 
+// Party describes a principal for policy purposes.
+//
+// Entity type is a poor proxy for how someone is acting: a sole proprietor with
+// six cars on a peer-to-peer platform is an operator, and a large company
+// renting one car is a consumer in that transaction. People are routinely both,
+// in different agreements, at the same time. Policy therefore keys off attested
+// status, not off the shape of the DID.
+type Party struct {
+	Kind Kind
+	// Operator reports attested commercial-operator status: may hold staff roles
+	// and issue liens, and is governed by operator policy rather than consumer
+	// protection.
+	Operator bool
+	// ConsumerProtected reports that consumer rules apply to this party as a
+	// counterparty. It is jurisdictional, so the resolver supplies it.
+	ConsumerProtected bool
+}
+
+// CanHaveMembers reports whether principals may act as members of this party.
+func (p Party) CanHaveMembers() bool { return p.Kind == KindOrg || p.Operator }
+
+// ExclusiveHold is an active exclusive claim over a vehicle's live abilities.
+type ExclusiveHold struct {
+	URI       string
+	Holder    string
+	Abilities []string
+}
+
 // Stored is a committed record plus repository metadata.
 type Stored struct {
 	URI         string
 	Record      Record
 	CommittedAt time.Time
 	Tombstone   *Tombstone
+	// ApprovedBy lists principals who approved this write, beyond its author.
+	// Required for self-issued grants and for anything the policy gates.
+	ApprovedBy []string
 }
 
 // Tombstone marks a revoked record. By is the principal whose repository write
@@ -70,8 +103,10 @@ type Resolver interface {
 	// Opening returns controller's opening for the vehicle's era, or nil if the
 	// controller holds none.
 	Opening(ctx context.Context, vehicle string, era uint64, controller string) (*control.Opening, error)
-	// Kind returns the principal kind of a DID.
-	Kind(ctx context.Context, did string) (Kind, error)
+	// Party returns the policy attributes of a DID.
+	Party(ctx context.Context, did string) (Party, error)
+	// Exclusives returns exclusive holds active over the vehicle at time at.
+	Exclusives(ctx context.Context, vehicle string, at time.Time) ([]ExclusiveHold, error)
 }
 
 // Coverage is what a delegation grants over one vehicle at a point in time.
@@ -81,6 +116,12 @@ type Coverage struct {
 	Historical map[string]Set `json:"historical,omitempty"`
 	// Live lists live and admin abilities usable at the evaluation time.
 	Live []string `json:"live,omitempty"`
+	// Suspended lists live abilities this record holds but cannot exercise now,
+	// because another party holds them exclusively (custody).
+	Suspended []string `json:"suspended,omitempty"`
+	// RecoveryUsed reports that a recovery record overrode an exclusive hold.
+	// The issuer logs this.
+	RecoveryUsed bool `json:"recoveryUsed,omitempty"`
 	// Chain lists record URIs from the evaluated record to its root.
 	Chain []string `json:"chain"`
 }
@@ -96,9 +137,13 @@ const anyClient = "\x00any"
 // Evaluator resolves delegation chains into coverage.
 type Evaluator struct {
 	Resolver Resolver
-	// MaxDepth bounds chain length; zero means MaxChainDepth.
+	// MaxDepth bounds chain length; zero means the policy's depth.
 	MaxDepth int
+	// Policy holds the thresholds and rules in force; zero means DefaultPolicy.
+	Policy Policy
 }
+
+func (e *Evaluator) policy() Policy { return e.Policy.orDefault() }
 
 // Authorize checks that caller (optionally using clientID) may exercise the
 // delegation at uri over vehicle at time at, and returns the coverage filtered to
@@ -156,7 +201,7 @@ func (e *Evaluator) maxDepth() int {
 	if e.MaxDepth > 0 {
 		return e.MaxDepth
 	}
-	return MaxChainDepth
+	return e.policy().MaxChainDepth
 }
 
 func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID string, at time.Time, depth int, seen map[string]bool) (*Coverage, error) {
@@ -186,18 +231,20 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		return nil, ErrClientNotAllowed
 	}
 
-	fromKind, err := e.Resolver.Kind(ctx, rec.From)
+	from, err := e.Resolver.Party(ctx, rec.From)
 	if err != nil {
 		return nil, err
 	}
-	if rec.revocableBy() == RevocableByTo && fromKind != KindOrg {
+	if rec.revocableBy() == RevocableByTo && !from.Operator && !e.policy().AllowIrrevocableFromNonOperator {
 		return nil, ErrLienNotAllowed
 	}
 
-	// A member authoring on behalf of an org needs delegation:create over the scope.
+	// A member authoring on behalf of someone else needs delegation:create over
+	// the scope, and may not write a grant to themselves without a second
+	// approval — staff are customers too.
 	if rec.CreatedBy != "" && rec.CreatedBy != rec.From {
-		if fromKind != KindOrg {
-			return nil, fmt.Errorf("%s authored by %s, but %s is not an org", s.URI, rec.CreatedBy, rec.From)
+		if !from.CanHaveMembers() {
+			return nil, fmt.Errorf("%s authored by %s, but %s cannot have members", s.URI, rec.CreatedBy, rec.From)
 		}
 		need := append([]string{"delegation:create"}, rec.Abilities...)
 		ok, err := e.hasRole(ctx, rec.From, rec.CreatedBy, rec.Covers, need, s.CommittedAt)
@@ -206,6 +253,15 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		}
 		if !ok {
 			return nil, fmt.Errorf("%s: author %s lacked authority when committed", s.URI, rec.CreatedBy)
+		}
+		if rec.CreatedBy == rec.To {
+			ok, err := e.approvedByAnother(ctx, s, need)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, fmt.Errorf("%w: %s", ErrSelfDealing, s.URI)
+			}
 		}
 	}
 
@@ -240,10 +296,81 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		}
 	}
 	cov.Chain = append(cov.Chain, chain...)
+
+	// Exclusivity applies to the record being authorized, not to links inside its
+	// own chain: a custody hold must not suspend the grant it derives from.
+	if depth == 1 && len(cov.Live) > 0 {
+		if err := e.applyExclusives(ctx, rec, vehicle, at, cov); err != nil {
+			return nil, err
+		}
+	}
+
 	if cov.Empty() {
 		return nil, ErrNotCovered
 	}
 	return cov, nil
+}
+
+// applyExclusives removes live abilities another party holds exclusively over
+// this vehicle. A recovery record keeps them and is flagged instead.
+func (e *Evaluator) applyExclusives(ctx context.Context, rec *Record, vehicle string, at time.Time, cov *Coverage) error {
+	holds, err := e.Resolver.Exclusives(ctx, vehicle, at)
+	if err != nil {
+		return err
+	}
+
+	blocked := map[string]bool{}
+	for _, h := range holds {
+		// A hold never blocks its own holder, nor anything derived from it: the
+		// renter's booking inherits the platform's hold rather than fighting it.
+		if h.Holder == rec.To || slices.Contains(cov.Chain, h.URI) {
+			continue
+		}
+		for _, a := range h.Abilities {
+			blocked[a] = true
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+
+	var live []string
+	for _, a := range cov.Live {
+		if !blocked[a] {
+			live = append(live, a)
+			continue
+		}
+		if rec.Recovery {
+			live = append(live, a)
+			cov.RecoveryUsed = true
+			continue
+		}
+		cov.Suspended = append(cov.Suspended, a)
+	}
+	cov.Live = live
+	return nil
+}
+
+// approvedByAnother reports whether someone other than the author approved this
+// write and held the same authority at commit time.
+func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, need []string) (bool, error) {
+	rec := &s.Record
+	for _, approver := range s.ApprovedBy {
+		if approver == rec.CreatedBy || approver == rec.To {
+			continue
+		}
+		if approver == rec.From {
+			return true, nil
+		}
+		ok, err := e.hasRole(ctx, rec.From, approver, rec.Covers, need, s.CommittedAt)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // membership returns the data-time set over which rec covers vehicle, and whether
@@ -439,6 +566,11 @@ func narrows(child, parent *Record) error {
 			return fmt.Errorf("%w: ability %s not in basis", ErrNotNarrowing, a)
 		}
 	}
+	for _, a := range child.Exclusive {
+		if !parent.Redelegate.Exclusive && !slices.Contains(parent.Exclusive, a) {
+			return fmt.Errorf("%w: basis does not permit an exclusive claim over %s", ErrNotNarrowing, a)
+		}
+	}
 	if !windowWithin(child.DataWindow, parent.DataWindow) {
 		return fmt.Errorf("%w: dataWindow exceeds basis", ErrNotNarrowing)
 	}
@@ -473,8 +605,8 @@ func (e *Evaluator) hasRole(ctx context.Context, org, member string, scope Cover
 // useRole reports whether member may use delegations addressed to org for
 // vehicle with the given abilities.
 func (e *Evaluator) useRole(ctx context.Context, org, member, vehicle string, abilities []string, at time.Time) (bool, error) {
-	kind, err := e.Resolver.Kind(ctx, org)
-	if err != nil || kind != KindOrg {
+	party, err := e.Resolver.Party(ctx, org)
+	if err != nil || !party.CanHaveMembers() {
 		return false, err
 	}
 	roles, err := e.Resolver.Roles(ctx, org, member)
