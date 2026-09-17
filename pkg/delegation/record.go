@@ -68,9 +68,101 @@ type Record struct {
 	Exclusive []string `json:"exclusive,omitempty"`
 	// Recovery marks a record that may act despite someone else's exclusive hold.
 	// Every such use is reported so the issuer can log it.
-	Recovery  bool      `json:"recovery,omitempty"`
-	CreatedBy string    `json:"createdBy,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	Recovery bool `json:"recovery,omitempty"`
+	// NarrowToCustody intersects this record's historical coverage with the times
+	// its recipient actually held the vehicle (§12.3). A rental history grant sets
+	// it so a renter who returns the car early keeps only the days they drove.
+	// Live abilities are untouched: they are governed by validity and exclusivity.
+	NarrowToCustody bool `json:"narrowToCustody,omitempty"`
+	// Constraints bound the shape of what this role's holder may issue. Roles only.
+	Constraints *RoleConstraints `json:"constraints,omitempty"`
+	CreatedBy   string           `json:"createdBy,omitempty"`
+	CreatedAt   time.Time        `json:"createdAt"`
+}
+
+// RoleConstraints bound the shape of the grants a role's holder may author.
+//
+// A role's abilities say what its holder may do; they say nothing about the
+// shape of what it may hand out. A booking service needs delegation:create with
+// command:* over the whole fleet to issue a custody grant at every pickup,
+// unattended, thousands of times a day. Without a bound on shape, one
+// compromised booking service writes itself a fleet-wide, permanent,
+// command-bearing grant with exactly the authority it legitimately holds. These
+// are the dimensions that separate "issue one custody grant" from "take the
+// fleet".
+//
+// A nil RoleConstraints is unbounded, which is what every role that predates
+// this field means. Zero values inside it are likewise unbounded, so a
+// constraint is only ever a restriction someone chose.
+type RoleConstraints struct {
+	// MaxVehicles is the most vehicles a single issued record may cover. Zero is
+	// unlimited. Counted at evaluation time, because a tag that grows later would
+	// otherwise carry a grant past the limit it was issued under.
+	MaxVehicles int `json:"maxVehicles,omitempty"`
+	// MaxValidity is the longest validity window an issued record may have. Zero
+	// is unlimited; when set, an unbounded validity is refused, since "forever" is
+	// the shape being guarded against. JSON-encoded as nanoseconds.
+	MaxValidity time.Duration `json:"maxValidity,omitempty"`
+	// Abilities is the set an issued record may grant. Empty means any ability the
+	// role itself holds. It is narrower than the role's own abilities on purpose:
+	// a service that may read telemetry itself need not be able to hand that out.
+	Abilities []string `json:"abilities,omitempty"`
+	// AllowRedelegation lets issued records be redelegable. Off by default, so a
+	// grant this role issues is a leaf and cannot seed a chain the org never saw.
+	AllowRedelegation bool `json:"allowRedelegation,omitempty"`
+	// AllowExclusive lets issued records claim exclusivity, and with it recovery,
+	// its override. Custody grants need this; nothing else should have it.
+	AllowExclusive bool `json:"allowExclusive,omitempty"`
+}
+
+// validate checks the constraints against the abilities of the role carrying them.
+func (c *RoleConstraints) validate(roleAbilities []string) error {
+	if c.MaxVehicles < 0 {
+		return errors.New("constraints.maxVehicles must not be negative")
+	}
+	if c.MaxValidity < 0 {
+		return errors.New("constraints.maxValidity must not be negative")
+	}
+	for _, a := range c.Abilities {
+		if !slices.Contains(roleAbilities, a) {
+			return fmt.Errorf("constraints.abilities lists %s, which the role does not hold", a)
+		}
+	}
+	return nil
+}
+
+// check reports whether a record authored under this role stays inside it.
+// coveredVehicles is how many vehicles the record applies to. A nil receiver is
+// an unconstrained role and accepts everything.
+func (c *RoleConstraints) check(rec *Record, coveredVehicles int) error {
+	if c == nil {
+		return nil
+	}
+	if len(c.Abilities) > 0 {
+		for _, a := range rec.Abilities {
+			if !slices.Contains(c.Abilities, a) {
+				return fmt.Errorf("%w: may not issue %s", ErrExceedsRole, a)
+			}
+		}
+	}
+	if c.MaxVehicles > 0 && coveredVehicles > c.MaxVehicles {
+		return fmt.Errorf("%w: covers %d vehicles, limit %d", ErrExceedsRole, coveredVehicles, c.MaxVehicles)
+	}
+	if c.MaxValidity > 0 {
+		switch w := rec.Validity; {
+		case w.From == nil || w.To == nil:
+			return fmt.Errorf("%w: validity must be bounded at both ends, limit %s", ErrExceedsRole, c.MaxValidity)
+		case w.To.Sub(*w.From) > c.MaxValidity:
+			return fmt.Errorf("%w: validity of %s exceeds limit %s", ErrExceedsRole, w.To.Sub(*w.From), c.MaxValidity)
+		}
+	}
+	if !c.AllowRedelegation && rec.redelegateMode() != RedelegateNone {
+		return fmt.Errorf("%w: may not issue redelegable grants", ErrExceedsRole)
+	}
+	if !c.AllowExclusive && (len(rec.Exclusive) > 0 || rec.Recovery) {
+		return fmt.Errorf("%w: may not issue exclusive or recovery grants", ErrExceedsRole)
+	}
+	return nil
 }
 
 // Covers selects what a record applies to. Exactly one field is set.
@@ -222,9 +314,21 @@ func (r *Record) Validate() error {
 		return errors.New("recovery requires at least one live ability")
 	}
 
+	if r.Constraints != nil {
+		if r.Type != TypeRole {
+			return errors.New("only roles carry issue constraints")
+		}
+		if err := r.Constraints.validate(r.Abilities); err != nil {
+			return err
+		}
+	}
+
 	if r.Type == TypeRole {
 		if len(r.Basis) != 0 {
 			return errors.New("roles must not have a basis")
+		}
+		if r.NarrowToCustody {
+			return errors.New("roles are not narrowed by custody")
 		}
 		if r.redelegateMode() != RedelegateNone {
 			return errors.New("roles cannot be redelegated")

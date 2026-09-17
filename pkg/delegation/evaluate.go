@@ -23,6 +23,7 @@ var (
 	ErrLienNotAllowed   = errors.New("only an attested operator may issue a delegation revocable only by its recipient")
 	ErrSelfDealing      = errors.New("the author of a grant cannot be its recipient without a second approval")
 	ErrExclusiveHold    = errors.New("another party holds these abilities exclusively")
+	ErrExceedsRole      = errors.New("the grant exceeds the constraints of the role that authored it")
 )
 
 // Kind is the kind of principal behind a DID.
@@ -90,12 +91,31 @@ type Membership struct {
 	CommittedAt time.Time
 }
 
+// CustodyPeriod is one period during which a holder physically had a vehicle:
+// pickup to return, with a nil Until while the car is still out.
+//
+// It is written by the booking service at pickup and return, or signed by the
+// car's own device and synced later. Grants never wait on it (§12.3): the renter
+// opens the car by unlocking it, so requiring a custody record before access
+// would leave someone standing next to a locked car in a garage with no signal.
+// Custody narrows the data window afterwards instead.
+type CustodyPeriod struct {
+	Vehicle string
+	Holder  string
+	From    time.Time
+	Until   *time.Time
+}
+
 // Resolver supplies repository and directory data to the evaluator.
 type Resolver interface {
 	// Record returns a delegation or role record by URI.
 	Record(ctx context.Context, uri string) (*Stored, error)
 	// Memberships returns every membership interval of vehicle in tag.
 	Memberships(ctx context.Context, tag, vehicle string) ([]Membership, error)
+	// TagSize returns how many vehicles the tag holds at time at.
+	TagSize(ctx context.Context, tag string, at time.Time) (int, error)
+	// Custody returns every period in which holder had the vehicle, oldest first.
+	Custody(ctx context.Context, vehicle, holder string) ([]CustodyPeriod, error)
 	// Roles returns role records issued by org to member, including tombstoned ones.
 	Roles(ctx context.Context, org, member string) ([]Stored, error)
 	// ControlState returns the vehicle's control eras from the DID directory.
@@ -247,9 +267,9 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 			return nil, fmt.Errorf("%s authored by %s, but %s cannot have members", s.URI, rec.CreatedBy, rec.From)
 		}
 		need := append([]string{"delegation:create"}, rec.Abilities...)
-		ok, err := e.hasRole(ctx, rec.From, rec.CreatedBy, rec.Covers, need, s.CommittedAt)
+		ok, err := e.hasRole(ctx, rec.From, rec.CreatedBy, rec.Covers, need, s.CommittedAt, e.shapeCheck(ctx, s, at))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", s.URI, err)
 		}
 		if !ok {
 			return nil, fmt.Errorf("%s: author %s lacked authority when committed", s.URI, rec.CreatedBy)
@@ -284,6 +304,13 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 
 	cov := &Coverage{Vehicle: vehicle, Historical: map[string]Set{}, Chain: []string{s.URI}}
 	base := member.Intersect(rec.DataWindow.Set())
+	if rec.NarrowToCustody {
+		held, err := e.custody(ctx, vehicle, rec.To)
+		if err != nil {
+			return nil, err
+		}
+		base = base.Intersect(held)
+	}
 	for _, a := range rec.Abilities {
 		if ClassOf(a) == Historical {
 			if w := base.Intersect(authority[a]); !w.IsEmpty() {
@@ -351,6 +378,72 @@ func (e *Evaluator) applyExclusives(ctx context.Context, rec *Record, vehicle st
 	return nil
 }
 
+// custody returns the times the holder actually had the vehicle. An open period
+// has no end, because the car is still out and the window follows the holder
+// forward; closing it at return is what narrows the grant. A holder who never
+// picked the car up has no periods, so the record covers no data at all.
+func (e *Evaluator) custody(ctx context.Context, vehicle, holder string) (Set, error) {
+	periods, err := e.Resolver.Custody(ctx, vehicle, holder)
+	if err != nil {
+		return nil, err
+	}
+	var set Set
+	for _, p := range periods {
+		set = set.Union(Span(&p.From, p.Until))
+	}
+	return set, nil
+}
+
+// shapeCheck returns a check of this record's shape against a role's issue
+// constraints, for hasRole to apply to each candidate role. Counting the covered
+// vehicles costs a resolver call, so it is taken only once and only when a
+// constrained role is actually in play.
+func (e *Evaluator) shapeCheck(ctx context.Context, s *Stored, at time.Time) func(*RoleConstraints) error {
+	count, counted := 0, false
+	return func(c *RoleConstraints) error {
+		if c == nil {
+			return nil
+		}
+		if !counted {
+			n, err := e.coveredVehicles(ctx, &s.Record, at, 1)
+			if err != nil {
+				return err
+			}
+			count, counted = n, true
+		}
+		return c.check(&s.Record, count)
+	}
+}
+
+// coveredVehicles counts the vehicles a record applies to, following
+// covers.inherit up the basis chain to the selector that actually chooses them.
+// Inheriting from several bases is bounded below by the largest of them, which
+// is the best a count can do over a union of tags.
+func (e *Evaluator) coveredVehicles(ctx context.Context, rec *Record, at time.Time, depth int) (int, error) {
+	switch {
+	case rec.Covers.Vehicle != "":
+		return 1, nil
+	case rec.Covers.Tag != "":
+		return e.Resolver.TagSize(ctx, rec.Covers.Tag, at)
+	case depth >= e.maxDepth():
+		return 0, ErrChainTooDeep
+	}
+
+	most := 0
+	for _, uri := range rec.Basis {
+		p, err := e.Resolver.Record(ctx, uri)
+		if err != nil {
+			return 0, err
+		}
+		n, err := e.coveredVehicles(ctx, &p.Record, at, depth+1)
+		if err != nil {
+			return 0, err
+		}
+		most = max(most, n)
+	}
+	return most, nil
+}
+
 // approvedByAnother reports whether someone other than the author approved this
 // write and held the same authority at commit time.
 func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, need []string) (bool, error) {
@@ -362,7 +455,7 @@ func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, need []str
 		if approver == rec.From {
 			return true, nil
 		}
-		ok, err := e.hasRole(ctx, rec.From, approver, rec.Covers, need, s.CommittedAt)
+		ok, err := e.hasRole(ctx, rec.From, approver, rec.Covers, need, s.CommittedAt, nil)
 		if err != nil {
 			return false, err
 		}
@@ -402,7 +495,7 @@ func (e *Evaluator) membership(ctx context.Context, rec *Record, vehicle string,
 		// Tag edits widen every delegation over the tag, so they count only when the
 		// author could have granted these abilities at commit time.
 		if m.CreatedBy != "" && m.CreatedBy != org {
-			ok, err := e.hasRole(ctx, org, m.CreatedBy, Covers{Tag: rec.Covers.Tag}, need, m.CommittedAt)
+			ok, err := e.hasRole(ctx, org, m.CreatedBy, Covers{Tag: rec.Covers.Tag}, need, m.CommittedAt, nil)
 			if err != nil {
 				return nil, false, err
 			}
@@ -582,11 +675,20 @@ func narrows(child, parent *Record) error {
 
 // hasRole reports whether member held, at time at, a role in org covering scope
 // with every ability in need.
-func (e *Evaluator) hasRole(ctx context.Context, org, member string, scope Covers, need []string, at time.Time) (bool, error) {
+//
+// shape, when non-nil, additionally checks the shape of what is being authored
+// against each candidate role's issue constraints, so a constrained role cannot
+// authorize a grant wider than it permits. A member holding several roles is
+// authorized if any one of them allows both the abilities and the shape; when
+// none does, the shape rejection is returned rather than swallowed, because
+// "you may not issue this" and "you may not issue anything" are different
+// answers to the writer.
+func (e *Evaluator) hasRole(ctx context.Context, org, member string, scope Covers, need []string, at time.Time, shape func(*RoleConstraints) error) (bool, error) {
 	roles, err := e.Resolver.Roles(ctx, org, member)
 	if err != nil {
 		return false, err
 	}
+	var shapeErr error
 	for i := range roles {
 		r := &roles[i]
 		if !roleActive(r, org, member, at) {
@@ -595,11 +697,18 @@ func (e *Evaluator) hasRole(ctx context.Context, org, member string, scope Cover
 		if !roleScopeCovers(r.Record.Covers, scope) {
 			continue
 		}
-		if containsAll(r.Record.Abilities, need) {
-			return true, nil
+		if !containsAll(r.Record.Abilities, need) {
+			continue
 		}
+		if shape != nil {
+			if err := shape(r.Record.Constraints); err != nil {
+				shapeErr = err
+				continue
+			}
+		}
+		return true, nil
 	}
-	return false, nil
+	return false, shapeErr
 }
 
 // useRole reports whether member may use delegations addressed to org for
