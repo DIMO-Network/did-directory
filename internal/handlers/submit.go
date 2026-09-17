@@ -94,8 +94,13 @@ func (h *SubmitHandler) handleCreate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// Store the genesis operation.
-	if err := h.store.Append(c.Context(), didParam, cid, op); err != nil {
+	// Store the genesis operation, but only while the log is still empty.
+	if err := h.store.AppendAfter(c.Context(), didParam, "", cid, op); err != nil {
+		if store.IsHeadChanged(err) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "DID already exists",
+			})
+		}
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to store genesis operation")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to store operation",
@@ -175,8 +180,16 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// Store the operation.
-	if err := h.store.Append(c.Context(), didParam, cid, op); err != nil {
+	// Store the operation, but only if the head is still the one validated
+	// against. Everything above — the prev check, the signature, the transition —
+	// was decided from `current`, and a concurrent writer may have moved on since.
+	if err := h.store.AppendAfter(c.Context(), didParam, current.CID, cid, op); err != nil {
+		if store.IsHeadChanged(err) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error":    "prev CID does not match current head",
+				"expected": current.CID,
+			})
+		}
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to store update operation")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to store operation",

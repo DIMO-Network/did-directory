@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/did"
@@ -67,18 +68,41 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	return err
 }
 
-func (s *PostgresStore) Append(ctx context.Context, didStr string, cid string, op *did.Operation) error {
+func (s *PostgresStore) AppendAfter(ctx context.Context, didStr string, expectedHead string, cid string, op *did.Operation) error {
 	opJSON, err := json.Marshal(op)
 	if err != nil {
 		return fmt.Errorf("marshal operation: %w", err)
 	}
 
-	query := `INSERT INTO operations (did, cid, operation) VALUES ($1, $2, $3)`
-	_, err = s.pool.Exec(ctx, query, didStr, cid, opJSON)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize writers for this DID. The conflict is between two rows that do
+	// not exist yet, so no row lock — and no UNIQUE(did,cid), since the rival
+	// operations carry different CIDs — can catch it.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, didStr); err != nil {
+		return fmt.Errorf("lock did: %w", err)
+	}
+
+	var head string
+	err = tx.QueryRow(ctx, `SELECT cid FROM operations WHERE did = $1 ORDER BY seq DESC LIMIT 1`, didStr).Scan(&head)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("query head: %w", err)
+	}
+	if head != expectedHead {
+		return ErrHeadChanged
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO operations (did, cid, operation) VALUES ($1, $2, $3)`, didStr, cid, opJSON); err != nil {
 		return fmt.Errorf("insert operation: %w", err)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
 	return nil
 }
 
@@ -173,8 +197,13 @@ func (s *PostgresStore) Close() error {
 	return nil
 }
 
-// MemoryStore implements Store using in-memory maps. Useful for testing and prototyping.
+// MemoryStore implements Store using in-memory maps. It is the default when
+// DATABASE_URL is unset, so it is a production code path and not only a test
+// fixture: Fiber serves every request in its own goroutine, and mu is what keeps
+// concurrent appends from losing a sequence number or tripping Go's
+// unrecoverable "concurrent map writes".
 type MemoryStore struct {
+	mu      sync.RWMutex
 	records []OperationRecord
 	byDID   map[string][]int // did -> indices into records
 	seq     int64
@@ -188,11 +217,24 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-func (s *MemoryStore) Append(_ context.Context, didStr string, cid string, op *did.Operation) error {
+func (s *MemoryStore) AppendAfter(_ context.Context, didStr string, expectedHead string, cid string, op *did.Operation) error {
 	// Handlers pass Fiber params, which alias a reused request buffer; the store
 	// must own its copies.
 	didStr = strings.Clone(didStr)
 	cid = strings.Clone(cid)
+	expectedHead = strings.Clone(expectedHead)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var head string
+	if indices := s.byDID[didStr]; len(indices) > 0 {
+		head = s.records[indices[len(indices)-1]].CID
+	}
+	if head != expectedHead {
+		return ErrHeadChanged
+	}
+
 	s.seq++
 	rec := OperationRecord{
 		DID:       didStr,
@@ -208,6 +250,9 @@ func (s *MemoryStore) Append(_ context.Context, didStr string, cid string, op *d
 }
 
 func (s *MemoryStore) GetLatest(_ context.Context, didStr string) (*OperationRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	indices, ok := s.byDID[didStr]
 	if !ok || len(indices) == 0 {
 		return nil, errNotFound
@@ -217,6 +262,9 @@ func (s *MemoryStore) GetLatest(_ context.Context, didStr string) (*OperationRec
 }
 
 func (s *MemoryStore) GetLog(_ context.Context, didStr string) ([]OperationRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	indices, ok := s.byDID[didStr]
 	if !ok {
 		return []OperationRecord{}, nil
@@ -229,11 +277,17 @@ func (s *MemoryStore) GetLog(_ context.Context, didStr string) ([]OperationRecor
 }
 
 func (s *MemoryStore) Exists(_ context.Context, didStr string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	indices, ok := s.byDID[didStr]
 	return ok && len(indices) > 0, nil
 }
 
 func (s *MemoryStore) Export(_ context.Context, afterSeq int64, limit int) ([]OperationRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var records []OperationRecord
 	for _, rec := range s.records {
 		if rec.Seq > afterSeq {

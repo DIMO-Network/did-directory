@@ -78,11 +78,17 @@ func (e *Era) Revoked(t time.Time) bool {
 type State struct {
 	DID  string `json:"did"`
 	Eras []Era  `json:"eras"`
+	// Deactivated reports that the DID's operation log ends in a tombstone. A
+	// deactivated DID has no current era, so Current returns nil and every
+	// consumer of control state fails closed on a scrapped or stolen asset
+	// without having to know about tombstones.
+	Deactivated bool `json:"deactivated,omitempty"`
 }
 
-// Current returns the current era, or nil if the DID is not controlled.
+// Current returns the current era, or nil if the DID is not controlled or has
+// been deactivated.
 func (s *State) Current() *Era {
-	if s == nil || len(s.Eras) == 0 {
+	if s == nil || s.Deactivated || len(s.Eras) == 0 {
 		return nil
 	}
 	return &s.Eras[len(s.Eras)-1]

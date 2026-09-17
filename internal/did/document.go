@@ -2,6 +2,8 @@ package did
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
@@ -73,8 +75,11 @@ func GenerateDocument(did string, op *Operation, state *control.State) (*DIDDocu
 		}
 	}
 
-	// Build verification methods.
-	for vmID, didKey := range op.VerificationMethods {
+	// Build verification methods. Ranging over the map directly would randomise
+	// the order per resolve, which breaks any ETag or canonicalisation a relying
+	// party applies to the document, so sort by fragment id.
+	for _, vmID := range slices.Sorted(maps.Keys(op.VerificationMethods)) {
+		didKey := op.VerificationMethods[vmID]
 		pub, err := dimocrypto.DecodeDIDKey(didKey)
 		if err != nil {
 			return nil, fmt.Errorf("decode verification method %q: %w", vmID, err)
@@ -93,8 +98,9 @@ func GenerateDocument(did string, op *Operation, state *control.State) (*DIDDocu
 		})
 	}
 
-	// Build service endpoints.
-	for svcID, svc := range op.Services {
+	// Build service endpoints, sorted by fragment id for the same reason.
+	for _, svcID := range slices.Sorted(maps.Keys(op.Services)) {
+		svc := op.Services[svcID]
 		doc.Service = append(doc.Service, ServiceEntry{
 			ID:              "#" + svcID,
 			Type:            svc.Type,
