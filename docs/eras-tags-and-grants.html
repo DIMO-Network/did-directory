@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="How DIMO grants fleet access without signing as the car: controller of record, tags, eras and narrowing delegations.">
+<title>Eras, Tags and Grants</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  :root {
+    --ground: #f6f7f9;
+    --surface: #ffffff;
+    --raised: #eef1f4;
+    --ink: #151b23;
+    --muted: #5c6773;
+    --line: #ccd4dc;
+    --line-soft: #e3e8ed;
+    --accent: #10645c;
+    --accent-ink: #0c4a44;
+    --accent-soft: rgba(16, 100, 92, 0.10);
+    --warn: #a44b18;
+    --warn-soft: rgba(164, 75, 24, 0.10);
+    --serif: "IBM Plex Serif", Georgia, serif;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #10151a;
+      --surface: #19212a;
+      --raised: #212b35;
+      --ink: #e9eff5;
+      --muted: #9aa8b6;
+      --line: #32404c;
+      --line-soft: #232d37;
+      --accent: #57c9bb;
+      --accent-ink: #8fdcd2;
+      --accent-soft: rgba(87, 201, 187, 0.14);
+      --warn: #e79461;
+      --warn-soft: rgba(231, 148, 97, 0.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #10151a;
+    --surface: #19212a;
+    --raised: #212b35;
+    --ink: #e9eff5;
+    --muted: #9aa8b6;
+    --line: #32404c;
+    --line-soft: #232d37;
+    --accent: #57c9bb;
+    --accent-ink: #8fdcd2;
+    --accent-soft: rgba(87, 201, 187, 0.14);
+    --warn: #e79461;
+    --warn-soft: rgba(231, 148, 97, 0.14);
+  }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+    padding-inline: 20px;
+    padding-block: 40px 72px;
+  }
+  header.masthead {
+    border-bottom: 2px solid var(--ink);
+    padding-bottom: 22px;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(30px, 6vw, 46px);
+    line-height: 1.1;
+    margin: 0 0 12px;
+    text-wrap: balance;
+  }
+  .standfirst { max-width: 62ch; margin: 0; color: var(--muted); font-size: 17px; }
+  section { margin-top: 54px; }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(21px, 3.4vw, 27px);
+    line-height: 1.25;
+    margin: 0 0 10px;
+    text-wrap: balance;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 6px;
+  }
+  p, li { max-width: 68ch; }
+  p { margin: 0 0 14px; }
+  ul.prose { padding-left: 20px; margin: 0 0 16px; }
+  ul.prose li { margin-bottom: 7px; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--line-soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+    overflow-wrap: anywhere;
+  }
+  strong { font-weight: 600; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+
+  /* ---------- diagram primitives ---------- */
+  figure { margin: 24px 0 12px; }
+  .frame {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 18px;
+  }
+  figcaption { font-size: 14px; color: var(--muted); margin-top: 10px; max-width: 68ch; }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .cmp { display: grid; grid-template-columns: minmax(0, 116px) minmax(0, 1fr) minmax(0, 1fr); gap: 1px 14px; }
+  .cmp > .h {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-bottom: 8px;
+  }
+  .cmp > .h.now { color: var(--accent); }
+  .cmp > .rl {
+    font-size: 12.5px;
+    color: var(--muted);
+    text-align: right;
+    padding: 12px 0;
+    border-top: 1px solid var(--line-soft);
+  }
+  .cmp > .cell {
+    padding: 12px 0;
+    border-top: 1px solid var(--line-soft);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .cmp > .cell.now { color: var(--ink); }
+  .cmp > .cell .t { display: block; font-weight: 600; font-size: 13.5px; margin-bottom: 2px; }
+  .cmp > .cell.now .t { color: var(--accent); }
+  .cmp > .cell .d { display: block; color: var(--muted); }
+  .cmp > .cell.tot { border-top: 2px solid var(--line); }
+  .cmp > .rl.tot { border-top: 2px solid var(--line); }
+  .cmp .num { font-family: var(--mono); font-size: 14px; font-weight: 500; }
+  .cmp .num.now { color: var(--accent); }
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .panel { border: 1px solid var(--line-soft); border-radius: 4px; padding: 14px; background: var(--ground); }
+  .panel.lead { border-color: var(--accent); background: var(--accent-soft); }
+  .panel-title {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 12px;
+  }
+  .panel.lead .panel-title { color: var(--accent); }
+
+  .node {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 9px 11px;
+  }
+  .node.key { border-color: var(--accent); background: var(--accent-soft); }
+  .node.off { border-style: dashed; color: var(--muted); }
+  .node.bad { border-color: var(--warn); background: var(--warn-soft); }
+  .node .name { font-weight: 600; font-size: 14.5px; line-height: 1.3; display: block; }
+  .node .sub { display: block; font-size: 12.5px; color: var(--muted); line-height: 1.45; margin-top: 3px; }
+  .node .sub.mono { font-family: var(--mono); font-size: 11.5px; }
+  .node.bad .sub, .node.bad .name { color: var(--warn); }
+
+  .stack { display: grid; gap: 8px; align-content: start; }
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: center; }
+  .flow.wide { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.25fr) auto minmax(0, 1fr); align-items: stretch; }
+  .flow.wide .stack { align-content: stretch; }
+  .conn, .hop { display: grid; justify-items: center; gap: 2px; min-width: 76px; }
+  .conn .glyph, .hop .glyph { font-size: 20px; line-height: 1; color: var(--muted); }
+  .conn.hot .glyph, .hop.hot .glyph { color: var(--accent); }
+  .conn.no .glyph, .hop.no .glyph { color: var(--warn); }
+  .conn .cl, .hop .cl {
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--muted);
+    text-align: center;
+    max-width: 104px;
+  }
+  .conn.hot .cl, .hop.hot .cl { color: var(--accent); }
+  .conn.no .cl, .hop.no .cl { color: var(--warn); }
+
+  .tally { margin: 14px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line-soft); }
+  .tally .big { font-family: var(--mono); font-size: 14px; font-weight: 500; display: block; }
+  .tally .big.hot { color: var(--accent); }
+  .tally ul { list-style: none; padding: 0; margin: 6px 0 0; }
+  .tally li { font-size: 12.5px; color: var(--muted); margin-bottom: 2px; max-width: none; }
+
+  .chain { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; }
+  .chain .step { flex: 1 1 140px; min-width: 0; display: grid; }
+  .chain .step .node { height: 100%; }
+  .chain .hop { flex: 0 0 auto; align-self: center; min-width: 48px; }
+  .chain .hop .cl { max-width: 56px; }
+  .rule { display: grid; grid-template-columns: minmax(0, 190px) minmax(0, 1fr); gap: 16px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line-soft); font-size: 13px; }
+  .rule > span:first-child { font-family: var(--mono); font-size: 12px; }
+  .rule .what { color: var(--muted); }
+
+  .steps { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; counter-reset: s; }
+  .steps li {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 9px;
+    font-size: 13px;
+    line-height: 1.45;
+    max-width: none;
+  }
+  .steps li::before {
+    counter-increment: s;
+    content: counter(s);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 2px;
+    width: 17px;
+    height: 17px;
+    display: grid;
+    place-items: center;
+    margin-top: 2px;
+  }
+
+  /* ---------- timeline ---------- */
+  .tl { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
+  .tl-row { display: grid; grid-template-columns: minmax(0, 104px) minmax(0, 1fr); gap: 12px; align-items: center; }
+  .tl-name { font-size: 13px; text-align: right; color: var(--ink); line-height: 1.3; }
+  .tl-name.hot { color: var(--accent); font-weight: 600; }
+  .tl-track { position: relative; height: 34px; background: var(--raised); border-radius: 3px; }
+  .tl-track::after {
+    content: "";
+    position: absolute;
+    left: 75%;
+    top: -6px;
+    bottom: -6px;
+    border-left: 2px dashed var(--warn);
+  }
+  .tl-track.no-mark::after { display: none; }
+  .tl-bar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--from) * 1%);
+    width: calc((var(--to) - var(--from)) * 1%);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    padding-inline: 9px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .tl-bar.hot { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); font-weight: 500; }
+  .tl-bar.dim { background: var(--line-soft); color: var(--muted); }
+  .tl-bar span { overflow: hidden; text-overflow: ellipsis; }
+  .tl-axis { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .tl-mark { display: grid; grid-template-columns: minmax(0, 104px) minmax(0, 1fr); gap: 12px; }
+  .tl-mark span {
+    grid-column: 2;
+    font-size: 11.5px;
+    color: var(--warn);
+    margin-left: 75%;
+    transform: translateX(-5px);
+    line-height: 1.3;
+    white-space: nowrap;
+  }
+
+  /* ---------- case study ---------- */
+  .case { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: 18px; align-items: start; }
+  .case-list { display: grid; gap: 8px; }
+  .case-item {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    border-left: 2px solid var(--line);
+    padding: 7px 0 7px 12px;
+  }
+  .case-item.hot { border-left-color: var(--accent); }
+  .case-item.bad { border-left-color: var(--warn); }
+  .case-item .who { display: block; font-weight: 600; font-size: 14px; }
+  .case-item .how { display: block; font-size: 12.5px; color: var(--muted); line-height: 1.45; margin-top: 2px; }
+  .case-item.bad .who, .case-item.bad .how { color: var(--warn); }
+
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; margin: 6px 0 18px; }
+  th, td { text-align: left; padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  td:first-child { font-family: var(--mono); font-size: 13px; padding-right: 18px; }
+
+  .note { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 12px 16px; border-radius: 0 4px 4px 0; margin: 18px 0; }
+  .note.open { border-left-color: var(--warn); background: var(--warn-soft); }
+  .note p:last-child { margin-bottom: 0; }
+  .note .tag {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 4px;
+    color: var(--accent);
+  }
+  .note.open .tag { color: var(--warn); }
+
+  footer { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
+
+  @media (max-width: 900px) {
+    .panels, .case { grid-template-columns: 1fr; }
+    .cmp { grid-template-columns: minmax(0, 1fr); gap: 0; }
+    .cmp > .h { display: none; }
+    .cmp > .rl {
+      text-align: left;
+      padding: 14px 0 0;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .cmp > .cell { border-top: 0; padding: 6px 0 0; }
+    .cmp > .cell.now { padding-bottom: 12px; }
+    .cmp > .cell::before {
+      content: "today · ";
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--muted);
+    }
+    .cmp > .cell.now::before { content: "now · "; color: var(--accent); }
+    .chain { flex-direction: column; }
+    .chain .step { flex: 1 1 auto; }
+    .hop .glyph, .conn .glyph { transform: rotate(90deg); }
+    .hop .cl, .conn .cl { max-width: none; }
+    .flow, .flow.wide { grid-template-columns: minmax(0, 1fr); }
+    .conn { min-width: 0; }
+    .conn .glyph { transform: rotate(90deg); }
+    .conn .cl { max-width: none; }
+    .tl-row { grid-template-columns: 1fr; gap: 3px; }
+    .tl-name { text-align: left; }
+    .tl-mark { grid-template-columns: minmax(0, 1fr); }
+    .tl-mark span { grid-column: 1; margin-left: 0; transform: none; white-space: normal; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <p class="kicker">DIMO 3.0 · identity &amp; permissions</p>
+    <h1>Eras, Tags and Grants</h1>
+    <p class="standfirst">One rental car, six parties who need access to it. How we grant that without signing as the car, and without one grant per car per partner.</p>
+  </header>
+
+  <section>
+    <p class="eyebrow">The move</p>
+    <h2>From one NFT grant per car to one grant per relationship</h2>
+    <p>Today a permission is an on-chain record. The owner's smart account signs a SACD document, we pin it to IPFS, and a <code>PermissionRecord</code> lands on Polygon against one Vehicle ID NFT. For one person with one car that is the right shape.</p>
+    <p>A rental fleet pays for it once per car, per partner, in gas and in bookkeeping. Their whole fleet is also readable on a block explorer.</p>
+    <p>We keep the two-tier token flow. The grant itself moves off-chain: the <strong>controller of record</strong> signs, and it points at a <strong>tag</strong>, a named set of cars that changes over time.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="cmp">
+          <span class="h"></span>
+          <span class="h">Today — on-chain</span>
+          <span class="h now">Now — DID-native</span>
+
+          <span class="rl">the car</span>
+          <span class="cell"><span class="t">Vehicle ID NFT</span><span class="d">ERC-721 on Polygon, owner is the user's account-abstraction wallet. Ownership, and therefore fleet composition, is public.</span></span>
+          <span class="cell now"><span class="t">Vehicle DID</span><span class="d">No signing key at all. A hash commitment names the controller privately, so the fleet cannot be enumerated.</span></span>
+
+          <span class="rl">the device</span>
+          <span class="cell"><span class="t">Aftermarket / Synthetic Device NFT</span><span class="d">Paired to the vehicle node by an on-chain transaction through the registry.</span></span>
+          <span class="cell now"><span class="t">Device DID plus a grant</span><span class="d">Pairing is a grant to write data, issued and revoked like any other.</span></span>
+
+          <span class="rl">the grant</span>
+          <span class="cell"><span class="t">SACD record + IPFS document</span><span class="d">Signed by the owner, pinned to IPFS, written on-chain per vehicle, per grantee, with a bitmask of privileges 1–8 and an expiry.</span></span>
+          <span class="cell now"><span class="t">One signed record in the org's store</span><span class="d">Covers a vehicle or a tag, carries abilities, a validity period and a separate data window. No chain, no IPFS.</span></span>
+
+          <span class="rl">enforcement</span>
+          <span class="cell"><span class="t">Token Exchange → Vehicle JWT</span><span class="d">Validates the SACD and mints a 10-minute token. If the caller is the owner, the check is skipped entirely.</span></span>
+          <span class="cell now"><span class="t">Issuer → key-bound token</span><span class="d">Resolves the chain once and mints a token carrying per-car time windows. The owner shortcut is removed for org-held cars.</span></span>
+
+          <span class="rl">who may act</span>
+          <span class="cell"><span class="t">Whoever holds the wallet</span><span class="d">No roles: a fleet operator shares one key, and nothing records which employee granted what.</span></span>
+          <span class="cell now"><span class="t">Roles inside the org</span><span class="d">Grants are acts of the organization, with the author recorded and their departure changing nothing.</span></span>
+
+          <span class="rl tot">10,000 cars,<br>3 partners</span>
+          <span class="cell tot"><span class="num">30,000 on-chain grants</span><span class="d">add a car → 3 transactions · drop a partner → 10,000 revocations</span></span>
+          <span class="cell now tot"><span class="num now">3 grants</span><span class="d">add a car → one row in a tag · drop a partner → one revocation</span></span>
+        </div>
+      </div>
+      <figcaption><b>The count is the argument.</b> When the fleet grows, nothing about a partner's access changes. Only tag membership does. What stays the same: a short-lived scoped token at the edge, privileges map one for one onto abilities, and every grant is still signed and auditable. By the org instead of by a chain.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="eyebrow">Where things live</p>
+    <h2>Public identity, private relationships</h2>
+    <p>The directory holds what has to be globally verifiable: the car's keys and its control history.</p>
+    <p>Everything that shows commercial structure stays in the org's own store. Who controls what, which cars are grouped, who works for whom. A competitor reading the chain today gets all three for free.</p>
+    <p>The link between the two is a <strong>commitment</strong>: <code>sha256(controllerDID ‖ era ‖ salt)</code>. Anyone can see the car has a controller. Only someone holding the salt can show who it is.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="panels">
+          <div class="panel">
+            <p class="panel-title">Public directory — anyone can read</p>
+            <div class="stack">
+              <div class="node">
+                <span class="name">Vehicle DID document</span>
+                <span class="sub mono">rotationKeys: [ custody key ]</span>
+                <span class="sub mono">verificationMethod: none</span>
+                <span class="sub mono">dimoControl: { era 1, sha256:9f2c… }</span>
+                <span class="sub">no key that can sign a grant</span>
+              </div>
+              <div class="node">
+                <span class="name">Operation log</span>
+                <span class="sub mono">genesis · transfer · revoke-since</span>
+                <span class="sub">era history is derived from this log, not stored as a counter</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel lead">
+            <p class="panel-title">Org record store — private</p>
+            <div class="stack">
+              <div class="node key">
+                <span class="name">vehicleControl</span>
+                <span class="sub mono">{ controller, era, salt }</span>
+                <span class="sub">opens the commitment — proof Avis controls this car</span>
+              </div>
+              <div class="node">
+                <span class="name">tag &amp; membership</span>
+                <span class="sub">which cars, joined when, left when</span>
+              </div>
+              <div class="node">
+                <span class="name">roles &amp; grants</span>
+                <span class="sub">who at Avis may do what; what each partner gets</span>
+              </div>
+            </div>
+            <div class="tally">
+              <ul>
+                <li>every record signed by one org key</li>
+                <li>a grant holds because the store signed it, not because its author is still employed</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>Fleet composition never goes public.</b> Two Avis cars carry different commitments because each has its own salt, which is also what makes each car's genesis record, and its DID, unique.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="eyebrow">Time</p>
+    <h2>Two clocks: when a grant works, and which data it reaches</h2>
+    <p>Every grant separates <strong>validity</strong>, when it can be used, from the <strong>data window</strong>, which timestamps it can read. Coverage is the overlap of all four. The answer is a set of intervals, not one range.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="tl">
+          <div class="tl-row">
+            <span class="tl-name">control era</span>
+            <div class="tl-track">
+              <div class="tl-bar" style="--from:0; --to:75"><span>era 0 · Avis controls</span></div>
+              <div class="tl-bar dim" style="--from:75; --to:100"><span>era 1 · buyer</span></div>
+            </div>
+          </div>
+          <div class="tl-row">
+            <span class="tl-name">in the tag</span>
+            <div class="tl-track"><div class="tl-bar" style="--from:17; --to:100"><span>joined Mar 1</span></div></div>
+          </div>
+          <div class="tl-row">
+            <span class="tl-name">data window</span>
+            <div class="tl-track"><div class="tl-bar" style="--from:8; --to:100"><span>from Feb 1</span></div></div>
+          </div>
+          <div class="tl-row">
+            <span class="tl-name">grant validity</span>
+            <div class="tl-track"><div class="tl-bar" style="--from:0; --to:100"><span>Jan 1 → Dec 31</span></div></div>
+          </div>
+          <div class="tl-row">
+            <span class="tl-name hot">covered data</span>
+            <div class="tl-track"><div class="tl-bar hot" style="--from:17; --to:75"><span>Mar 1 → Oct 1</span></div></div>
+          </div>
+          <div class="tl-row">
+            <span class="tl-name" aria-hidden="true"></span>
+            <div class="tl-axis"><span>Jan</span><span>Apr</span><span>Jul</span><span>Oct</span><span>Dec</span></div>
+          </div>
+          <div class="tl-mark"><span>↑ sale — transfer, era 1 begins</span></div>
+        </div>
+      </div>
+      <figcaption><b>The insurer keeps its claim history and gains nothing new.</b> Data from before the car joined the tag was never covered. Data after the sale belongs to the buyer. Live abilities like unlock need the current era to be the issuer's, so they stop at the sale. A car that leaves and rejoins gives you two windows.</figcaption>
+    </figure>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Operation</th><th>Means</th><th>Effect on existing grants</th></tr></thead>
+        <tbody>
+          <tr><td>transfer</td><td>the car changed hands</td><td>New era. Live access ends; history from the issuer's own era is kept or dropped per the grant. The buyer cannot read earlier eras.</td></tr>
+          <tr><td>revoke-since</td><td>a custody key may be stolen</td><td>Records a window <code>[since, issued]</code>. Grants made inside it are dead; grants before and after stay valid. Rotates the key in the same operation.</td></tr>
+          <tr><td>rotate</td><td>routine key hygiene</td><td>None — that key never signed grants.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Delegation</p>
+    <h2>Every hop can only narrow</h2>
+    <p>Control, liens, consent, partner agreements, sub-orgs, device pairing: same record. A grant with no parent is a <strong>root</strong>, and it is only valid if the issuer can open that car's commitment. Everything below it has to be a subset.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="chain">
+          <div class="step">
+            <div class="node key">
+              <span class="name">Avis</span>
+              <span class="sub mono">telemetry:read</span>
+              <span class="sub mono">location:precise</span>
+              <span class="sub mono">command:lock / unlock</span>
+              <span class="sub">root — controls the car</span>
+            </div>
+          </div>
+          <div class="hop conn hot"><span class="glyph">→</span><span class="cl">covers tag</span></div>
+          <div class="step">
+            <div class="node">
+              <span class="name">Ford Pro</span>
+              <span class="sub mono">telemetry:read</span>
+              <span class="sub mono">command:lock</span>
+              <span class="sub">may pass on once</span>
+            </div>
+          </div>
+          <div class="hop conn"><span class="glyph">→</span><span class="cl">narrows</span></div>
+          <div class="step">
+            <div class="node">
+              <span class="name">Integrator</span>
+              <span class="sub mono">telemetry:read</span>
+              <span class="sub">inherits Ford Pro's coverage</span>
+            </div>
+          </div>
+          <div class="hop conn no"><span class="glyph">→</span><span class="cl">rejected</span></div>
+          <div class="step">
+            <div class="node bad">
+              <span class="name">Marketing vendor</span>
+              <span class="sub">depth exhausted — Ford Pro could pass it on once, and did</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:16px">
+          <p class="panel-title" style="margin-bottom:4px">Checked at every hop</p>
+          <div class="rule"><span>abilities</span><span class="what">must be a subset of the parent's</span></div>
+          <div class="rule"><span>data window &amp; validity</span><span class="what">cannot exceed the parent's</span></div>
+          <div class="rule"><span>redelegation</span><span class="what">only if the parent allows it, within its depth</span></div>
+          <div class="rule"><span>chain depth</span><span class="what">5 hops maximum</span></div>
+          <div class="rule"><span>revoking a parent</span><span class="what">kills everything below it</span></div>
+          <div class="rule"><span>a lien</span><span class="what">only the lender can release it — and only an org may issue one</span></div>
+        </div>
+      </div>
+      <figcaption><b>Consent bounds re-sharing.</b> A dealer's authority comes from the owner's consent record. The allowlist on that consent is what stops the dealer handing a customer's data to a vendor the owner never saw.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="eyebrow">At request time</p>
+    <h2>The issuer does the work once; the data services check one token</h2>
+    <p>Chains, tags, openings and revocation windows all get resolved when the token is minted. dq and fetch never walk a chain. They match a subject and clamp the query to the windows in the token.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="flow wide">
+          <div class="stack">
+            <div class="node">
+              <span class="name">Ford Credit</span>
+              <span class="sub">service account with its own key</span>
+              <span class="sub">asks for location on car 1</span>
+            </div>
+          </div>
+          <div class="conn"><span class="glyph">→</span><span class="cl">asks for access</span></div>
+          <div class="stack">
+            <div class="node key">
+              <span class="name">Issuer (dauth)</span>
+              <ol class="steps" style="margin-top:8px">
+                <li>resolve the chain to a root</li>
+                <li>open the control commitment</li>
+                <li>intersect membership, data window and eras</li>
+                <li>apply revocation windows</li>
+                <li>check the caller's role and app</li>
+              </ol>
+            </div>
+          </div>
+          <div class="conn hot"><span class="glyph">→</span><span class="cl">token bound to the caller's key</span></div>
+          <div class="stack">
+            <div class="node">
+              <span class="name">dq / fetch</span>
+              <span class="sub mono">subject: did:dimo:car1</span>
+              <span class="sub mono">abilities: [location:precise]</span>
+              <span class="sub mono">windows: [[Mar 1, Oct 1]]</span>
+              <span class="sub">query clamped to those windows</span>
+            </div>
+          </div>
+        </div>
+        <div class="tally">
+          <ul>
+            <li>15 minutes for commands, 2 hours for reads</li>
+            <li>a fleet token carries a reference, not 10,000 subjects — dq resolves it against its own copy of tag membership</li>
+            <li>revocation lag is bounded by the token's lifetime</li>
+          </ul>
+        </div>
+      </div>
+      <figcaption><b>Complexity sits in one service.</b> The edge check stays a signature plus a time comparison. That is what keeps this shippable inside dq's existing auth path.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="eyebrow">Case study</p>
+    <h2>One Avis car, six relationships</h2>
+
+    <figure>
+      <div class="frame">
+        <div class="case">
+          <div class="node key">
+            <span class="name">Avis</span>
+            <span class="sub">controller of record</span>
+            <span class="sub mono">tags: fl-fleet · ford-pro-enrolled · financed-fc · tx-franchise</span>
+            <span class="sub">issues every grant below, and can move a car between groups without anyone countersigning</span>
+          </div>
+          <div class="case-list">
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Sub-organization</span><span class="how">covers the tx-franchise tag; its staff get roles, not their own grants</span></span>
+            </div>
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Ford Pro</span><span class="how">telemetry and commands over ford-pro-enrolled; may pass a narrower grant to its integrator</span></span>
+            </div>
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Ford Credit</span><span class="how">lien over financed-fc; Avis cannot revoke it, and it drops at the sale</span></span>
+            </div>
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Insurer</span><span class="how">telemetry over fl-fleet; keeps its era history after the car is defleeted</span></span>
+            </div>
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Utility company renting cars</span><span class="how">one car for the contract term, no re-sharing; its employees use it through roles</span></span>
+            </div>
+            <div class="case-item bad">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Individual renter</span><span class="how">outside the protocol for v1 — the Avis app authenticates the renter and its backend passes commands through</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>Six relationships, six records, one controller.</b> Employees never show up in a public document. They hold roles inside their own org.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <p class="eyebrow">Status</p>
+    <h2>Where this stands</h2>
+    <p>Honest part: the org store, dauth and dq are not built. The directory layer is, the tests pass, and the demo runs end to end.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Piece</th><th>State</th></tr></thead>
+        <tbody>
+          <tr><td>commitments, eras, revocation windows</td><td>Built — <code>pkg/control</code>, directory operations, <code>GET /:did/control</code></td></tr>
+          <tr><td>grants, narrowing, coverage</td><td>Built — <code>pkg/delegation</code>, about 87% test coverage</td></tr>
+          <tr><td>single-car grants (SACD v3)</td><td>Built — controller-signed, era-bound, carries a control proof</td></tr>
+          <tr><td>org record store</td><td>Not built — commits, coverage proofs, the internal stream</td></tr>
+          <tr><td>dauth exchange, dq windows</td><td>Not built — next agent</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note open">
+      <span class="tag">Open thread · permissions format</span>
+      <p>Fixed choices say ODRL with a DIMO profile. What is built uses a plain record. Proposal: ODRL is the wire format, the record is the parsed form. <code>assigner</code> and <code>assignee</code> map to from and to, <code>target</code> (an AssetCollection) to a tag, <code>action</code> to abilities, dateTime constraints to validity. ODRL <strong>duties</strong> carry what code can't enforce: retention, refunds, Stripe.</p>
+    </div>
+
+    <div class="note open">
+      <span class="tag">Open thread · device data as a grant</span>
+      <p>A device writing data is a grant to the device DID. That works today, except the evaluator treats <code>telemetry:write</code> as historical and checks it against data timestamps instead of request time. One line fix in the ability classifier.</p>
+    </div>
+
+    <div class="note">
+      <span class="tag">Decided</span>
+      <p>Liens irrevocable for fleets only, consumer loans revocable by either side. Controller links are hash commitments, not plain pointers. Countersigning optional, required only where contract terms are attached. Approval above 500 vehicles. Renters stay out of the protocol for v1.</p>
+    </div>
+  </section>
+
+  <footer>
+    Implementation: <a href="https://github.com/DIMO-Network/did-directory/pull/6">did-directory PR #6</a> · design spec <code>2026-09-16-dimo-orgs-fleets-delegation-design.md</code>
+  </footer>
+</div>
+
+</body>
+</html>
