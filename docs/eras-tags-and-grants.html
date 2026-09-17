@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="How DIMO grants fleet access without signing as the car: controller of record, tags, eras and narrowing delegations.">
+<meta name="description" content="How DIMO grants fleet access without signing as the car: controller of record, tags, eras, narrowing delegations and rental checkout.">
 <title>Eras, Tags and Grants</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -252,6 +252,15 @@
     margin-top: 2px;
   }
 
+  .life { display: flex; flex-wrap: nowrap; gap: 8px; align-items: stretch; }
+  .life .st { flex: 1 1 0; min-width: 0; border: 1px solid var(--line); border-radius: 3px; padding: 9px 11px; background: var(--surface); }
+  .life .st.on { border-color: var(--accent); background: var(--accent-soft); }
+  .life .st.off { border-style: dashed; }
+  .life .st .s { display: block; font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .life .st.on .s { color: var(--accent); }
+  .life .st .g { display: block; font-size: 12.5px; margin-top: 4px; line-height: 1.4; }
+  .life .tick { flex: 0 0 auto; align-self: center; color: var(--muted); font-size: 18px; }
+
   /* ---------- timeline ---------- */
   .tl { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
   .tl-row { display: grid; grid-template-columns: minmax(0, 104px) minmax(0, 1fr); gap: 12px; align-items: center; }
@@ -367,7 +376,8 @@
       color: var(--muted);
     }
     .cmp > .cell.now::before { content: "now · "; color: var(--accent); }
-    .chain { flex-direction: column; }
+    .chain, .life { flex-direction: column; }
+    .life .tick { transform: rotate(90deg); }
     .chain .step { flex: 1 1 auto; }
     .hop .glyph, .conn .glyph { transform: rotate(90deg); }
     .hop .cl, .conn .cl { max-width: none; }
@@ -602,6 +612,92 @@
   </section>
 
   <section>
+    <p class="eyebrow">Checkout</p>
+    <h2>The renter bought a service, and the purchase is the grant</h2>
+    <p>A renter is not staff and not a partner. They paid for something, and the purchase is what creates the access. So the record is the agreement, and the grants are compiled from it.</p>
+    <p>Avis writes thousands of bookings a day. Nobody signs a delegation by hand.</p>
+
+    <figure>
+      <div class="frame">
+        <div class="life">
+          <div class="st"><span class="s">booked</span><span class="g">nothing yet</span></div>
+          <span class="tick" aria-hidden="true">→</span>
+          <div class="st"><span class="s">paid</span><span class="g">the duty is met, so grants become mintable</span></div>
+          <span class="tick" aria-hidden="true">→</span>
+          <div class="st on"><span class="s">picked up</span><span class="g">custody starts; commands work; the data window opens</span></div>
+          <span class="tick" aria-hidden="true">→</span>
+          <div class="st"><span class="s">returned</span><span class="g">commands stop; the history stays</span></div>
+          <span class="tick" aria-hidden="true">→</span>
+          <div class="st off"><span class="s">closed</span><span class="g">retention runs out</span></div>
+        </div>
+        <div class="tally">
+          <ul>
+            <li>unpaid grants nothing — the purchase is what creates the access</li>
+            <li>cancelled before pickup grants nothing; cancelled mid-rental stops the commands and keeps the days they drove</li>
+            <li>a car is assigned at pickup, not at booking, so nothing compiles until the desk hands over a key</li>
+            <li>grants activate on the <strong>booking</strong> window; custody records narrow the data window afterwards — the renter opens the car by unlocking it, so access cannot wait on a record written at pickup</li>
+          </ul>
+        </div>
+      </div>
+      <figcaption><b>Duties gate the output.</b> A rental is an ODRL agreement whose duties — payment, return by a date, retention — decide what may be minted. Nothing is granted before its duty is met.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="frame">
+        <div class="case">
+          <div class="node key">
+            <span class="name">One booking</span>
+            <span class="sub mono">rental · waiver · roadside</span>
+            <span class="sub">compiles to four grants, not one. Keys are stable, so a booking service updates them rather than piling up a new set at every state change.</span>
+          </div>
+          <div class="case-list">
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Custody → the renter</span><span class="how">unlock, lock, fuel or charge · valid for the booking · holds the commands exclusively · dies at return</span></span>
+            </div>
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">History → the renter</span><span class="how">telemetry, narrowed to the days they actually drove · outlives the rental · separately revocable</span></span>
+            </div>
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Insurer → the waiver they bought</span><span class="how">driving events, custody only · absent if no waiver was purchased</span></span>
+            </div>
+            <div class="case-item hot">
+              <span class="glyph" aria-hidden="true">→</span>
+              <span><span class="who">Roadside → the responder</span><span class="how">location, only while an incident is open</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <figcaption><b>Custody and history are two grants on purpose.</b> Custody dies at return. The renter keeps the window they drove, because that record is about them — and it is the evidence both sides reach for when a rental ends in a dispute. The renter's purchase also grants parties they never talk to, which is why the agreement bounds it.</figcaption>
+    </figure>
+
+    <figure>
+      <div class="frame">
+        <div class="flow">
+          <div class="stack">
+            <div class="node key"><span class="name">Renter</span><span class="sub mono">command:unlock · command:lock</span><span class="sub">holds them exclusively while driving</span></div>
+          </div>
+          <div class="conn no"><span class="glyph">→</span><span class="cl">suspended</span></div>
+          <div class="stack">
+            <div class="node bad"><span class="name">Operator</span><span class="sub">cannot lock or immobilise a car somebody else is driving</span><span class="sub">still reads its own telemetry</span></div>
+            <div class="node"><span class="name">Recovery</span><span class="sub">acts anyway, and every use is logged</span></div>
+          </div>
+        </div>
+        <div class="tally">
+          <ul>
+            <li>a suspended grant is told so, never "you were not granted this"</li>
+            <li>the hold ends with custody, and control is whole again</li>
+            <li>a booking that never ends is refused outright, so a device that never syncs its return cannot lock a renter out forever</li>
+          </ul>
+        </div>
+      </div>
+      <figcaption><b>Immobilising a moving car is a safety question, not a permissions question.</b> A host permits exclusivity once at listing; the booking that claims it is time-bounded, so control comes back on its own.</figcaption>
+    </figure>
+  </section>
+
+  <section>
     <p class="eyebrow">At request time</p>
     <h2>The issuer does the work once; the data services check one token</h2>
     <p>Chains, tags, openings and revocation windows all get resolved when the token is minted. dq and fetch never walk a chain. They match a subject and clamp the query to the windows in the token.</p>
@@ -686,9 +782,9 @@
               <span class="glyph" aria-hidden="true">→</span>
               <span><span class="who">Utility company renting cars</span><span class="how">one car for the contract term, no re-sharing; its employees use it through roles</span></span>
             </div>
-            <div class="case-item bad">
+            <div class="case-item hot">
               <span class="glyph" aria-hidden="true">→</span>
-              <span><span class="who">Individual renter</span><span class="how">outside the protocol for v1 — the Avis app authenticates the renter and its backend passes commands through</span></span>
+              <span><span class="who">Individual renter</span><span class="how">their booking compiles to custody and history; commands are theirs alone while they drive</span></span>
             </div>
           </div>
         </div>
@@ -700,7 +796,7 @@
   <section>
     <p class="eyebrow">Status</p>
     <h2>Where this stands</h2>
-    <p>Honest part: the org store, dauth and dq are not built. The directory layer is, the tests pass, and the demo runs end to end.</p>
+    <p>Honest part: the org store, dauth and dq are not built. The directory layer, the grant engine, the rental compiler and the ODRL format are, the tests pass, and the demo runs end to end.</p>
     <div class="tablewrap">
       <table>
         <thead><tr><th>Piece</th><th>State</th></tr></thead>
@@ -708,25 +804,33 @@
           <tr><td>commitments, eras, revocation windows</td><td>Built — <code>pkg/control</code>, directory operations, <code>GET /:did/control</code></td></tr>
           <tr><td>grants, narrowing, coverage</td><td>Built — <code>pkg/delegation</code>, about 87% test coverage</td></tr>
           <tr><td>single-car grants (SACD v3)</td><td>Built — controller-signed, era-bound, carries a control proof</td></tr>
+          <tr><td>role constraints, custody narrowing</td><td>Built — an unattended booking service can issue one rental and not the fleet</td></tr>
+          <tr><td>agreements, duties, the compiler</td><td>Built — <code>pkg/agreement</code>, 97% test coverage</td></tr>
+          <tr><td>ODRL wire format</td><td>Built — <code>pkg/odrl</code>, lossless both ways</td></tr>
           <tr><td>org record store</td><td>Not built — commits, coverage proofs, the internal stream</td></tr>
           <tr><td>dauth exchange, dq windows</td><td>Not built — next agent</td></tr>
         </tbody>
       </table>
     </div>
 
-    <div class="note open">
-      <span class="tag">Open thread · permissions format</span>
-      <p>Fixed choices say ODRL with a DIMO profile. What is built uses a plain record. Proposal: ODRL is the wire format, the record is the parsed form. <code>assigner</code> and <code>assignee</code> map to from and to, <code>target</code> (an AssetCollection) to a tag, <code>action</code> to abilities, dateTime constraints to validity. ODRL <strong>duties</strong> carry what code can't enforce: retention, refunds, Stripe.</p>
+    <div class="note">
+      <span class="tag">Decided · permissions format</span>
+      <p>ODRL with the DIMO profile is the wire format; the record is its parsed form. <code>assigner</code> and <code>assignee</code> are from and to, <code>target</code> is the vehicle or the tag as an AssetCollection, <code>action</code> carries the abilities, dateTime constraints carry validity, and <strong>duties</strong> carry what code can't enforce: payment, retention, refunds. Delegation, exclusivity and custody have no ODRL equivalent, so they stay profile terms rather than bent ODRL. An unknown constraint is refused — dropping one silently would grant more than the policy says — and durations cross as seconds, not Go nanoseconds.</p>
     </div>
 
-    <div class="note open">
-      <span class="tag">Open thread · device data as a grant</span>
-      <p>A device writing data is a grant to the device DID. That works today, except the evaluator treats <code>telemetry:write</code> as historical and checks it against data timestamps instead of request time. One line fix in the ability classifier.</p>
+    <div class="note">
+      <span class="tag">Decided · one person, two hats</span>
+      <p>Someone can be staff and a renter over the same car at the same moment. The caller names the grant they are exercising, and the token records that chain. One request, one capacity, one answer to "under what authority did she unlock it?" — the issuer does not infer a hat the caller did not claim.</p>
+    </div>
+
+    <div class="note">
+      <span class="tag">Decided · device data as a grant</span>
+      <p>A device writing data is a grant to the device DID. Writes and deliveries are live, checked at the time of the request: a device sending a reading is doing it now, and checking that against a data window would ask whether it may write a reading it has not taken. Approval and custody key off <em>actuation</em> instead, so pairing a device does not need two admins and does not stop while somebody is driving.</p>
     </div>
 
     <div class="note">
       <span class="tag">Decided</span>
-      <p>Liens irrevocable for fleets only, consumer loans revocable by either side. Controller links are hash commitments, not plain pointers. Countersigning optional, required only where contract terms are attached. Approval above 500 vehicles. Renters stay out of the protocol for v1.</p>
+      <p>Liens irrevocable for fleets only, consumer loans revocable by either side. Controller links are hash commitments, not plain pointers. Countersigning optional, required only where contract terms are attached. Approval above 500 vehicles, and for unattended issuing it sits once at the fleet delegation rather than on every unlock. Policy keys off attested operator status, never off whether a DID is a person or a company. Cancellation ends custody and keeps the drive.</p>
     </div>
   </section>
 
