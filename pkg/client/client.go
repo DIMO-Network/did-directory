@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/did"
+	"github.com/DIMO-Network/did-directory/pkg/control"
 )
 
 // Client is a Go client for the DID Directory service.
@@ -160,6 +161,35 @@ func (c *Client) Resolve(ctx context.Context, didStr string) (*did.DIDDocument, 
 	}
 
 	return &doc, nil
+}
+
+// Control fetches the control era history for a DID.
+func (c *Client) Control(ctx context.Context, didStr string) (*control.State, error) {
+	url := c.baseURL + "/" + didStr + "/control"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	status, respBody, err := c.do(req, nil)
+	if err != nil {
+		return nil, fmt.Errorf("do request: %w", err)
+	}
+
+	if status == http.StatusNotFound {
+		return nil, fmt.Errorf("DID not found: %s", didStr)
+	}
+
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("control lookup failed (status %d): %s", status, string(respBody))
+	}
+
+	var state control.State
+	if err := json.Unmarshal(respBody, &state); err != nil {
+		return nil, fmt.Errorf("decode control state: %w", err)
+	}
+
+	return &state, nil
 }
 
 // AuditLog fetches the full operation log for a DID.

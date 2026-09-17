@@ -5,9 +5,12 @@ set -euo pipefail
 # DIMO v2 Identity System — End-to-End Demo
 #
 # Demonstrates the complete flow:
-#   Vehicle Owner → Vehicle DID → Device DID (pairing via SACD)
-#   → Developer DID → Access Grant → Auth → JWT → Emergency Revocation
+#   Owner DID → Vehicle DID (controlled, no signing key) → Device DID
+#   (pairing SACD signed by the owner) → Developer access → Auth → JWT
+#   → Compromise window (revoke-since) → Sale (transfer to a new era)
 #
+# The vehicle never signs anything. Its controller of record signs as itself,
+# and the vehicle document only carries a commitment to who that is.
 # Zero on-chain transactions. Pure DID + SACD + signature verification.
 # ============================================================================
 
@@ -102,7 +105,7 @@ done
 
 header "Step 1: Create Vehicle Owner DID"
 info "The vehicle owner is a person (identified by a passkey/secp256r1 key)."
-info "This DID will have authority over the vehicle DID."
+info "This DID will be the vehicle's controller of record."
 
 OWNER_OUTPUT=$($DIMOCLI create \
     -server "$DIRECTORY_URL" \
@@ -113,19 +116,16 @@ OWNER_DID=$(echo "$OWNER_OUTPUT" | extract_did)
 if [ -z "$OWNER_DID" ]; then fail "Failed to create owner DID"; exit 1; fi
 success "Owner DID: $OWNER_DID"
 
-# Get the owner's public key (will be used as rotation key for vehicle DID)
-OWNER_PUBKEY=$($DIMOCLI pubkey "$OWNER_DID")
-info "Owner public key: $OWNER_PUBKEY"
-
 # ── Step 2: Create Vehicle DID ───────────────────────────────────────────
 
-header "Step 2: Create Vehicle DID (Owned by Vehicle Owner)"
-info "The vehicle is a separate DID, but the owner's key is the rotation key."
-info "This means the owner can manage the vehicle's identity and SACDs."
+header "Step 2: Create Vehicle DID (Controlled by the Owner)"
+info "The vehicle DID has no signing key. A per-vehicle custody key held by the"
+info "owner authorizes identity updates, and the document carries only a hash"
+info "commitment to the controller, so the owner is not published."
 
 VEHICLE_OUTPUT=$($DIMOCLI create \
     -server "$DIRECTORY_URL" \
-    -rotation-key "$OWNER_PUBKEY" \
+    -controller "$OWNER_DID" \
     -alias "vin-1HGCM82633A004352.dimo.zone" \
     -service "storage=DimoStorageNode:https://node7.dimo.zone" 2>&1)
 echo "$VEHICLE_OUTPUT"
@@ -157,13 +157,14 @@ success "Device DID: $DEVICE_DID"
 # ── Step 4: Pair Device to Vehicle (via SACD) ────────────────────────────
 
 header "Step 4: Pair Device to Vehicle via SACD"
-info "Instead of an on-chain pairing transaction, the vehicle owner signs"
-info "an SACD granting the device permission to write telemetry data."
-info "Revoking this SACD = unpairing the device."
+info "Instead of an on-chain pairing transaction, the owner (not the vehicle)"
+info "signs an SACD over the vehicle granting the device permission to write"
+info "telemetry. The SACD carries a proof that the owner controls the vehicle."
 
 $DIMOCLI sacd-grant \
     -server "$DIRECTORY_URL" \
-    -grantor "$VEHICLE_DID" \
+    -grantor "$OWNER_DID" \
+    -asset "$VEHICLE_DID" \
     -grantee "$DEVICE_DID" \
     -permissions "telemetry:write,telemetry:contribute,data:raw" \
     -out "$DEVICE_SACD"
@@ -198,7 +199,8 @@ info "Vehicle owner grants the developer permission to read telemetry."
 
 $DIMOCLI sacd-grant \
     -server "$DIRECTORY_URL" \
-    -grantor "$VEHICLE_DID" \
+    -grantor "$OWNER_DID" \
+    -asset "$VEHICLE_DID" \
     -grantee "$DEV_DID" \
     -permissions "telemetry:read,telemetry:history,location:approximate" \
     -out "$DEV_SACD"
@@ -226,26 +228,23 @@ AUTH_OUTPUT=$($DIMOCLI auth \
 echo "$AUTH_OUTPUT"
 success "JWT issued — developer can now query telemetry-api"
 
-# ── Step 8: Emergency Revocation ─────────────────────────────────────────
+# ── Step 8: Compromise Window ────────────────────────────────────────────
 
-header "Step 8: Emergency Revocation (Vehicle Compromised)"
-info "The vehicle owner suspects a security breach."
-info "Bumping the SACD epoch invalidates ALL outstanding SACDs at once."
-info "Both the device pairing and developer access will be revoked."
+header "Step 8: Compromise Window (Custody Key Suspected Stolen)"
+info "The owner records a revocation window starting before the grants were"
+info "issued and rotates the custody key in the same operation. Grants issued"
+info "inside the window are invalid; grants issued afterwards are valid again."
 
-step "Current vehicle epoch:"
-$DIMOCLI resolve -server "$DIRECTORY_URL" "$VEHICLE_DID" | grep -i epoch || true
-
-echo ""
-step "Bumping SACD epoch..."
-$DIMOCLI revoke-all -server "$DIRECTORY_URL" -did "$VEHICLE_DID"
+sleep 1
+COMPROMISE_SINCE=$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
+$DIMOCLI revoke-since -server "$DIRECTORY_URL" -did "$VEHICLE_DID" -since "$COMPROMISE_SINCE"
 
 echo ""
-step "New vehicle epoch:"
-$DIMOCLI resolve -server "$DIRECTORY_URL" "$VEHICLE_DID" | grep -i epoch || true
+step "Vehicle control state:"
+curl -s "$DIRECTORY_URL/$VEHICLE_DID/control" | python3 -m json.tool 2>/dev/null || true
 
 echo ""
-step "Verifying device SACD (should FAIL — epoch invalidated)..."
+step "Verifying device SACD (should FAIL — issued inside the window)..."
 if $DIMOCLI sacd-verify -server "$DIRECTORY_URL" -file "$DEVICE_SACD" 2>&1; then
     fail "Device SACD should have been invalidated!"
     exit 1
@@ -253,62 +252,84 @@ else
     success "Device SACD correctly invalidated (device unpaired)"
 fi
 
+sleep 1
 echo ""
-step "Verifying developer SACD (should FAIL — epoch invalidated)..."
-if $DIMOCLI sacd-verify -server "$DIRECTORY_URL" -file "$DEV_SACD" 2>&1; then
-    fail "Developer SACD should have been invalidated!"
-    exit 1
-else
-    success "Developer SACD correctly invalidated (access revoked)"
-fi
-
-# ── Step 9: Re-grant After Revocation ────────────────────────────────────
-
-header "Step 9: Re-grant Access at New Epoch"
-info "After resolving the security issue, the vehicle owner re-grants access."
-info "New SACDs are signed at the new epoch."
-
-step "Re-granting device pairing..."
+step "Re-pairing the device after the window..."
 $DIMOCLI sacd-grant \
     -server "$DIRECTORY_URL" \
-    -grantor "$VEHICLE_DID" \
+    -grantor "$OWNER_DID" \
+    -asset "$VEHICLE_DID" \
     -grantee "$DEVICE_DID" \
     -permissions "telemetry:write,telemetry:contribute,data:raw" \
     -out "$DEVICE_SACD"
-
 $DIMOCLI sacd-verify -server "$DIRECTORY_URL" -file "$DEVICE_SACD"
-success "Device re-paired at new epoch"
+success "Device re-paired"
+
+# ── Step 9: Sale (Transfer of Control) ───────────────────────────────────
+
+header "Step 9: Sell the Vehicle (New Control Era)"
+info "A transfer starts a new era with a new controller and custody key."
+info "Grants from the previous era stop working; the buyer starts clean."
+
+BUYER_OUTPUT=$($DIMOCLI create -server "$DIRECTORY_URL" -alias "bob.dimo.zone" 2>&1)
+echo "$BUYER_OUTPUT"
+BUYER_DID=$(echo "$BUYER_OUTPUT" | extract_did)
+if [ -z "$BUYER_DID" ]; then fail "Failed to create buyer DID"; exit 1; fi
+success "Buyer DID: $BUYER_DID"
 
 echo ""
-step "Re-granting developer access..."
+$DIMOCLI transfer -server "$DIRECTORY_URL" -did "$VEHICLE_DID" -to "$BUYER_DID"
+
+echo ""
+step "Verifying the previous owner's device SACD (should FAIL — previous era)..."
+if $DIMOCLI sacd-verify -server "$DIRECTORY_URL" -file "$DEVICE_SACD" 2>&1; then
+    fail "Previous-era SACD should be invalid!"
+    exit 1
+else
+    success "Previous-era SACD correctly invalid"
+fi
+
+echo ""
+step "Previous owner tries to grant again (should FAIL — no longer controller)..."
+if $DIMOCLI sacd-grant -server "$DIRECTORY_URL" -grantor "$OWNER_DID" -asset "$VEHICLE_DID" \
+    -grantee "$DEV_DID" -permissions "telemetry:read" -out "$DEV_SACD" 2>&1; then
+    fail "Previous owner should not be able to grant!"
+    exit 1
+else
+    success "Previous owner correctly refused"
+fi
+
+echo ""
+step "Buyer grants the developer access in the new era..."
 $DIMOCLI sacd-grant \
     -server "$DIRECTORY_URL" \
-    -grantor "$VEHICLE_DID" \
+    -grantor "$BUYER_DID" \
+    -asset "$VEHICLE_DID" \
     -grantee "$DEV_DID" \
     -permissions "telemetry:read,telemetry:history,location:approximate" \
     -out "$DEV_SACD"
-
 $DIMOCLI sacd-verify -server "$DIRECTORY_URL" -file "$DEV_SACD"
-success "Developer access re-granted at new epoch"
+success "Buyer's grant is valid"
 
 # ── Summary ──────────────────────────────────────────────────────────────
 
 header "Demo Complete"
 
 echo -e "  ${GREEN}Owner DID:${NC}     $OWNER_DID"
+echo -e "  ${GREEN}Buyer DID:${NC}     $BUYER_DID"
 echo -e "  ${GREEN}Vehicle DID:${NC}   $VEHICLE_DID"
 echo -e "  ${GREEN}Device DID:${NC}    $DEVICE_DID"
 echo -e "  ${GREEN}Developer DID:${NC} $DEV_DID"
 echo ""
 echo -e "  ${BOLD}What we demonstrated:${NC}"
 echo -e "    1. Vehicle owner created their DID (passkey-based identity)"
-echo -e "    2. Vehicle got its own DID, controlled by the owner's rotation key"
+echo -e "    2. Vehicle got a DID with no signing key and a private controller commitment"
 echo -e "    3. Aftermarket device got a DID with metadata (serial, firmware)"
-echo -e "    4. Device paired to vehicle via SACD (replaces on-chain pairing)"
+echo -e "    4. Owner (never the vehicle) paired the device via SACD with a control proof"
 echo -e "    5. Developer granted read access via SACD (replaces on-chain privileges)"
 echo -e "    6. Developer authenticated and received a JWT with asset permissions"
-echo -e "    7. Emergency revocation via epoch bump invalidated ALL SACDs at once"
-echo -e "    8. Re-granted access at the new epoch after resolving the issue"
+echo -e "    7. Compromise window invalidated grants issued inside it; re-grant works after"
+echo -e "    8. Sale started a new era: old grants and the old owner lost authority"
 echo ""
 echo -e "  ${BOLD}Zero on-chain transactions. Pure cryptographic authorization.${NC}"
 echo ""

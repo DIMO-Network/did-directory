@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/internal/store"
@@ -116,7 +117,7 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// Get the full operation log to resolve current state including sacdEpoch.
+	// Get the full operation log to resolve current state and control eras.
 	records, err := h.store.GetLog(c.Context(), didParam)
 	if err != nil {
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get operation log")
@@ -131,6 +132,12 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 	}
 
 	current := records[len(records)-1]
+
+	if current.Operation.IsTombstone() {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "invalid transition: DID has been deactivated",
+		})
+	}
 
 	// The prev field must reference the CID of the current latest operation.
 	if op.Prev == nil || *op.Prev != current.CID {
@@ -147,16 +154,16 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// Validate sacdEpoch if being changed.
+	// Validate the operation against the current state and control eras.
 	ops := make([]did.Operation, len(records))
 	for i, r := range records {
 		ops[i] = r.Operation
 	}
-	currentEpoch := did.ResolveSacdEpoch(ops)
+	state := did.ResolveControlState(didParam, ops)
 
-	if err := did.ValidateSacdEpoch(op, currentEpoch); err != nil {
+	if err := did.ValidateTransition(&current.Operation, state, op, time.Now().UTC()); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fmt.Sprintf("invalid sacdEpoch: %v", err),
+			"error": fmt.Sprintf("invalid transition: %v", err),
 		})
 	}
 

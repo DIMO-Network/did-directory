@@ -108,7 +108,7 @@ func (h *Handler) HandleAuth(c *fiber.Ctx) error {
 			})
 		}
 
-		storage := StorageFromDoc(ctx, h.dirClient, sacdDoc.Grantor)
+		storage := StorageFromDoc(ctx, h.dirClient, sacdDoc.Asset)
 
 		assets = append(assets, AssetClaim{
 			DID:         sacdDoc.Asset,

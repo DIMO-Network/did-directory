@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/DIMO-Network/did-directory/pkg/control"
 )
 
 // KeyEntry represents a stored key in the keystore.
@@ -108,4 +110,39 @@ func LoadKey(did string) (*ecdsa.PrivateKey, error) {
 	}
 
 	return nil, fmt.Errorf("unable to parse private key")
+}
+
+func openingFilePath(did string) string {
+	name := strings.TrimPrefix(did, "did:dimo:")
+	return filepath.Join(keystoreDir(), name+".control.json")
+}
+
+// SaveOpening stores the private opening of a controlled DID's commitment.
+// It stands in for the controller's network.dimo.org.vehicleControl record.
+func SaveOpening(did string, o control.Opening) error {
+	if err := os.MkdirAll(keystoreDir(), 0700); err != nil {
+		return fmt.Errorf("create keystore dir: %w", err)
+	}
+	data, err := json.MarshalIndent(o, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal opening: %w", err)
+	}
+	if err := os.WriteFile(openingFilePath(did), data, 0600); err != nil {
+		return fmt.Errorf("write opening file: %w", err)
+	}
+	return nil
+}
+
+// LoadOpening reads the private opening of a controlled DID's commitment.
+func LoadOpening(did string) (*control.Opening, error) {
+	path := openingFilePath(did)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read opening file %s: %w", path, err)
+	}
+	var o control.Opening
+	if err := json.Unmarshal(data, &o); err != nil {
+		return nil, fmt.Errorf("unmarshal opening: %w", err)
+	}
+	return &o, nil
 }

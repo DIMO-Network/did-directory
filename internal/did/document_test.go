@@ -1,7 +1,6 @@
 package did
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,7 +25,7 @@ func TestGenerateDocument(t *testing.T) {
 		},
 	}
 
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
+	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "did:dimo:testidentifier12345678", doc.ID)
@@ -54,7 +53,7 @@ func TestGenerateDocument_Tombstone(t *testing.T) {
 		Type: OpTypeTombstone,
 	}
 
-	_, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
+	_, err := GenerateDocument("did:dimo:testidentifier12345678", op, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "deactivated")
 }
@@ -72,7 +71,7 @@ func TestGenerateDocument_EmptyAliases(t *testing.T) {
 		Services:     map[string]Service{},
 	}
 
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
+	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, nil)
 	require.NoError(t, err)
 
 	// Should be an empty slice, not nil.
@@ -95,56 +94,9 @@ func TestGenerateDocument_MultipleVerificationMethods(t *testing.T) {
 		Services:     map[string]Service{},
 	}
 
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
+	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, nil)
 	require.NoError(t, err)
 
 	assert.Len(t, doc.VerificationMethod, 2)
 }
 
-func TestGenerateDocument_SacdEpochZero(t *testing.T) {
-	_, didKey := generateTestKey(t)
-
-	op := &Operation{
-		Type:         OpTypeCreate,
-		RotationKeys: []string{didKey},
-		VerificationMethods: map[string]string{
-			"signing": didKey,
-		},
-		AlsoKnownAs: []string{},
-		Services:     map[string]Service{},
-	}
-
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
-	require.NoError(t, err)
-
-	assert.Equal(t, uint64(0), doc.DimoSacdEpoch)
-	assert.Contains(t, doc.Context, "https://schema.dimo.zone/did/v1")
-
-	// Verify the JSON output includes the field.
-	data, err := json.Marshal(doc)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), `"dimoSacdEpoch":0`)
-}
-
-func TestGenerateDocument_SacdEpochBumped(t *testing.T) {
-	_, didKey := generateTestKey(t)
-
-	op := &Operation{
-		Type:         OpTypeCreate,
-		RotationKeys: []string{didKey},
-		VerificationMethods: map[string]string{
-			"signing": didKey,
-		},
-		AlsoKnownAs: []string{},
-		Services:     map[string]Service{},
-	}
-
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 5)
-	require.NoError(t, err)
-
-	assert.Equal(t, uint64(5), doc.DimoSacdEpoch)
-
-	data, err := json.Marshal(doc)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), `"dimoSacdEpoch":5`)
-}

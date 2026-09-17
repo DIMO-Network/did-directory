@@ -11,37 +11,57 @@ import (
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/pkg/client"
+	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/sacd"
 )
 
 func runSACDGrant(args []string) {
 	fs := flag.NewFlagSet("sacd-grant", flag.ExitOnError)
 	server := fs.String("server", defaultServer(), "directory server URL")
-	grantor := fs.String("grantor", "", "grantor DID (required)")
+	grantor := fs.String("grantor", "", "grantor DID: the asset's controller of record, or the asset itself if uncontrolled (required)")
 	grantee := fs.String("grantee", "", "grantee DID (required)")
+	asset := fs.String("asset", "", "asset DID being shared (required)")
 	permissions := fs.String("permissions", "telemetry:read", "permissions (comma-separated)")
 	expires := fs.String("expires", "", "expiration time (RFC3339, default: 24h from now)")
 	out := fs.String("out", "", "output file (default: stdout)")
 	fs.Parse(args)
 
-	if *grantor == "" || *grantee == "" {
-		fmt.Fprintf(os.Stderr, "Error: --grantor and --grantee are required\n")
+	if *grantor == "" || *grantee == "" || *asset == "" {
+		fmt.Fprintf(os.Stderr, "Error: --grantor, --grantee and --asset are required\n")
 		os.Exit(1)
 	}
 
-	// Load grantor's key.
+	// Load grantor's key. A controlled asset has no signing key of its own.
 	privKey, err := LoadKey(*grantor)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading grantor key: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Resolve grantor DID to get current sacdEpoch.
 	c := client.New(*server)
 	c.SetVerbose(isVerbose())
-	doc, err := c.Resolve(context.Background(), *grantor)
+	state, err := c.Control(context.Background(), *asset)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error resolving grantor DID: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error resolving asset control state: %v\n", err)
+		os.Exit(1)
+	}
+
+	var era uint64
+	var proof *control.Opening
+	if cur := state.Current(); cur != nil {
+		opening, err := LoadOpening(*asset)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %s is a controlled asset and no control opening is available: %v\n", *asset, err)
+			os.Exit(1)
+		}
+		if opening.Controller != *grantor || opening.Era != cur.Number {
+			fmt.Fprintf(os.Stderr, "Error: %s is not the controller of record for %s in era %d\n", *grantor, *asset, cur.Number)
+			os.Exit(1)
+		}
+		era = cur.Number
+		proof = opening
+	} else if *asset != *grantor {
+		fmt.Fprintf(os.Stderr, "Error: %s is not a controlled DID; only it can grant access to itself\n", *asset)
 		os.Exit(1)
 	}
 
@@ -51,17 +71,16 @@ func runSACDGrant(args []string) {
 		expiresAt = *expires
 	}
 
-	// Build SACD document.
 	sacdDoc := &sacd.Document{
-		Type:        "dimo.sacd.v2",
-		Grantor:     *grantor,
-		Grantee:     *grantee,
-		Asset:       *grantor,
-		SacdEpoch:   doc.DimoSacdEpoch,
-		Permissions: strings.Split(*permissions, ","),
-		EffectiveAt: time.Now().UTC().Format(time.RFC3339),
-		ExpiresAt:   expiresAt,
-		Signature:   "",
+		Type:         sacd.DocumentType,
+		Grantor:      *grantor,
+		Grantee:      *grantee,
+		Asset:        *asset,
+		Era:          era,
+		Permissions:  strings.Split(*permissions, ","),
+		EffectiveAt:  time.Now().UTC().Format(time.RFC3339),
+		ExpiresAt:    expiresAt,
+		ControlProof: proof,
 	}
 
 	// Sign the SACD data (everything except signature field).

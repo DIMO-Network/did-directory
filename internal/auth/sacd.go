@@ -3,29 +3,32 @@ package auth
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/sacd"
 )
 
 // ValidateSACD verifies an SACD document against the directory.
-// It resolves the grantor DID, verifies the signature, checks the epoch, and checks time bounds.
+// It resolves the grantor's keys and the asset's control state, then checks
+// control, era, revocation windows, time bounds and the signature.
 func ValidateSACD(ctx context.Context, c *client.Client, doc *sacd.Document) error {
-	// Resolve the grantor DID.
 	grantorDoc, err := c.Resolve(ctx, doc.Grantor)
 	if err != nil {
 		return fmt.Errorf("resolve grantor DID %s: %w", doc.Grantor, err)
 	}
 
-	if len(grantorDoc.VerificationMethod) == 0 {
-		return fmt.Errorf("grantor DID %s has no verification methods", doc.Grantor)
+	keys := make([]string, 0, len(grantorDoc.VerificationMethod))
+	for _, vm := range grantorDoc.VerificationMethod {
+		keys = append(keys, "did:key:"+vm.PublicKeyMultibase)
 	}
 
-	// Use the first verification method's key.
-	grantorDIDKey := "did:key:" + grantorDoc.VerificationMethod[0].PublicKeyMultibase
+	assetState, err := c.Control(ctx, doc.Asset)
+	if err != nil {
+		return fmt.Errorf("resolve asset control state %s: %w", doc.Asset, err)
+	}
 
-	// Verify the SACD using the shared package.
-	if err := doc.Verify(grantorDIDKey, grantorDoc.DimoSacdEpoch); err != nil {
+	if err := doc.Verify(keys, assetState, time.Now().UTC()); err != nil {
 		return fmt.Errorf("sacd verification failed: %w", err)
 	}
 
@@ -40,7 +43,7 @@ func StorageFromDoc(ctx context.Context, c *client.Client, did string) string {
 	}
 
 	for _, svc := range doc.Service {
-		if svc.Type == "StorageNode" || svc.Type == "storage" {
+		if svc.Type == "StorageNode" || svc.Type == "storage" || svc.Type == "DimoStorageNode" {
 			return svc.ServiceEndpoint
 		}
 	}

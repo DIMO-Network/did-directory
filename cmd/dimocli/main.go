@@ -41,8 +41,10 @@ func main() {
 		runUpdate(args)
 	case "rotate":
 		runRotate(args)
-	case "revoke-all":
-		runRevokeAll(args)
+	case "transfer":
+		runTransfer(args)
+	case "revoke-since":
+		runRevokeSince(args)
 	case "sacd-grant":
 		runSACDGrant(args)
 	case "sacd-verify":
@@ -65,12 +67,13 @@ Usage:
   dimocli <command> [flags]
 
 Commands:
-  create       Create a new DID
+  create       Create a new DID (--controller for a controlled asset such as a vehicle)
   resolve      Resolve a DID to its document
   update       Update a DID's service endpoints
   rotate       Rotate a DID's keys
-  revoke-all   Bump SACD epoch to invalidate all grants
-  sacd-grant   Create and sign an SACD document
+  transfer     Transfer a controlled DID to a new controller (starts a new era)
+  revoke-since Record a compromise window and rotate the custody key
+  sacd-grant   Create and sign an SACD as the asset's controller
   sacd-verify  Verify an SACD document
   auth         Authenticate and get a JWT
   pubkey       Print the did:key public key for a local DID

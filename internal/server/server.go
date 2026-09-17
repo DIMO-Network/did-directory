@@ -43,6 +43,7 @@ func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 	app.Post("/:did", submitHandler.Handle)
 	app.Get("/:did", resolveHandler.HandleResolve)
 	app.Get("/:did/data", resolveHandler.HandleData)
+	app.Get("/:did/control", resolveHandler.HandleControl)
 	app.Get("/:did/log/audit", auditHandler.Handle)
 
 	return app

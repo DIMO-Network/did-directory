@@ -2,18 +2,29 @@ package did
 
 import (
 	"fmt"
+	"time"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
+	"github.com/DIMO-Network/did-directory/pkg/control"
 )
 
 // DIDDocument represents a W3C DID Document.
 type DIDDocument struct {
-	Context            []string                 `json:"@context"`
-	ID                 string                   `json:"id"`
-	AlsoKnownAs        []string                 `json:"alsoKnownAs"`
+	Context            []string                  `json:"@context"`
+	ID                 string                    `json:"id"`
+	AlsoKnownAs        []string                  `json:"alsoKnownAs"`
 	VerificationMethod []VerificationMethodEntry `json:"verificationMethod"`
-	Service            []ServiceEntry           `json:"service,omitempty"`
-	DimoSacdEpoch      uint64                   `json:"dimoSacdEpoch"`
+	Service            []ServiceEntry            `json:"service,omitempty"`
+	DimoControl        *ControlSummary           `json:"dimoControl,omitempty"`
+}
+
+// ControlSummary is the current control era of a controlled DID. The full era
+// history is served at GET /:did/control.
+type ControlSummary struct {
+	Era               uint64               `json:"era"`
+	EraStart          *time.Time           `json:"eraStart"`
+	ControlCommitment string               `json:"controlCommitment"`
+	Revocations       []control.Revocation `json:"revocations,omitempty"`
 }
 
 // VerificationMethodEntry represents a verification method in a DID Document.
@@ -32,7 +43,8 @@ type ServiceEntry struct {
 }
 
 // GenerateDocument generates a W3C DID Document from the current DID state.
-func GenerateDocument(did string, op *Operation, sacdEpoch uint64) (*DIDDocument, error) {
+// state may be nil for uncontrolled DIDs.
+func GenerateDocument(did string, op *Operation, state *control.State) (*DIDDocument, error) {
 	if op.IsTombstone() {
 		return nil, fmt.Errorf("DID %s has been deactivated", did)
 	}
@@ -44,13 +56,21 @@ func GenerateDocument(did string, op *Operation, sacdEpoch uint64) (*DIDDocument
 			"https://w3id.org/security/suites/secp256k1-2019/v1",
 			"https://schema.dimo.zone/did/v1",
 		},
-		ID:            did,
-		AlsoKnownAs:   op.AlsoKnownAs,
-		DimoSacdEpoch: sacdEpoch,
+		ID:          did,
+		AlsoKnownAs: op.AlsoKnownAs,
 	}
 
 	if doc.AlsoKnownAs == nil {
 		doc.AlsoKnownAs = []string{}
+	}
+
+	if cur := state.Current(); cur != nil {
+		doc.DimoControl = &ControlSummary{
+			Era:               cur.Number,
+			EraStart:          cur.Start,
+			ControlCommitment: cur.Commitment,
+			Revocations:       cur.Revocations,
+		}
 	}
 
 	// Build verification methods.

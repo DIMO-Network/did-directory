@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/did"
@@ -188,6 +189,10 @@ func NewMemoryStore() *MemoryStore {
 }
 
 func (s *MemoryStore) Append(_ context.Context, didStr string, cid string, op *did.Operation) error {
+	// Handlers pass Fiber params, which alias a reused request buffer; the store
+	// must own its copies.
+	didStr = strings.Clone(didStr)
+	cid = strings.Clone(cid)
 	s.seq++
 	rec := OperationRecord{
 		DID:       didStr,
