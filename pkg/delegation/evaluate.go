@@ -62,6 +62,13 @@ type ExclusiveHold struct {
 	URI       string
 	Holder    string
 	Abilities []string
+	// Since is when the hold took effect: the claiming record's validity start,
+	// or its commit time when the validity is open at the front. Two live holds
+	// over the same ability is an issuing mistake the evaluator cannot referee,
+	// and the newer one is the one in force — a returned booking whose device
+	// never synced must not lock the next renter out of the car they are standing
+	// next to (§12.5). A resolver that leaves it zero gets the tie rule below.
+	Since time.Time
 }
 
 // Stored is a committed record plus repository metadata.
@@ -69,6 +76,18 @@ type Stored struct {
 	URI         string
 	Record      Record
 	CommittedAt time.Time
+	// CommittedBy is the principal the repository authenticated for this write,
+	// which is the only trustworthy answer to "who authored this". Record.CreatedBy
+	// sits inside the signed bytes, so a member who wants to escape the role that
+	// bounds them need only leave it out; authority therefore comes from here and
+	// CreatedBy stays the audit copy it claims to be.
+	//
+	// Empty means the repository recorded no separate author, which is honest only
+	// for a record the issuing principal wrote itself. It is read that way, and a
+	// record whose CreatedBy contradicts it — claiming an author the repository
+	// never witnessed — is refused rather than believed. Hosts must populate it;
+	// this is the fail-closed reading of a field that gates authority.
+	CommittedBy string
 	Tombstone   *Tombstone
 	// ApprovedBy lists principals who approved this write, beyond its author.
 	// Required for self-issued grants and for anything the policy gates.
@@ -201,7 +220,14 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 		return nil, err
 	}
 
-	filtered := &Coverage{Vehicle: vehicle, Historical: map[string]Set{}, Chain: cov.Chain}
+	// The filtered coverage narrows what was granted to what was asked for; it
+	// does not drop the audit facts attached to the answer. RecoveryUsed in
+	// particular is the record of the one operation that overrides a renter's
+	// custody, and Authorize is the path an issuer actually calls.
+	filtered := &Coverage{
+		Vehicle: vehicle, Historical: map[string]Set{},
+		RecoveryUsed: cov.RecoveryUsed, Chain: cov.Chain,
+	}
 	for _, a := range abilities {
 		if w, ok := cov.Historical[a]; ok && !w.IsEmpty() {
 			filtered.Historical[a] = w
@@ -209,13 +235,13 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 		if slices.Contains(cov.Live, a) {
 			filtered.Live = append(filtered.Live, a)
 		}
+		if slices.Contains(cov.Suspended, a) {
+			filtered.Suspended = append(filtered.Suspended, a)
+		}
 	}
 	if filtered.Empty() {
-		for _, a := range abilities {
-			if slices.Contains(cov.Suspended, a) {
-				filtered.Suspended = cov.Suspended
-				return nil, fmt.Errorf("%w: %s", ErrExclusiveHold, strings.Join(filtered.Suspended, ", "))
-			}
+		if len(filtered.Suspended) > 0 {
+			return nil, fmt.Errorf("%w: %s", ErrExclusiveHold, strings.Join(filtered.Suspended, ", "))
 		}
 		return nil, ErrNotCovered
 	}
@@ -274,23 +300,27 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		return nil, ErrLienNotAllowed
 	}
 
+	author, err := committedBy(s)
+	if err != nil {
+		return nil, err
+	}
 	// A member authoring on behalf of someone else needs delegation:create over
 	// the scope, and may not write a grant to themselves without a second
 	// approval — staff are customers too.
-	if rec.CreatedBy != "" && rec.CreatedBy != rec.From {
+	if author != rec.From {
 		if !from.CanHaveMembers() {
-			return nil, fmt.Errorf("%s authored by %s, but %s cannot have members", s.URI, rec.CreatedBy, rec.From)
+			return nil, fmt.Errorf("%s authored by %s, but %s cannot have members", s.URI, author, rec.From)
 		}
 		need := append([]string{"delegation:create"}, rec.Abilities...)
-		ok, err := e.hasRole(ctx, rec.From, rec.CreatedBy, rec.Covers, need, s.CommittedAt, e.shapeCheck(ctx, s, at))
+		ok, err := e.hasRole(ctx, rec.From, author, rec.Covers, need, s.CommittedAt, e.shapeCheck(ctx, s, at))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", s.URI, err)
 		}
 		if !ok {
-			return nil, fmt.Errorf("%s: author %s lacked authority when committed", s.URI, rec.CreatedBy)
+			return nil, fmt.Errorf("%s: author %s lacked authority when committed", s.URI, author)
 		}
-		if rec.CreatedBy == rec.To {
-			ok, err := e.approvedByAnother(ctx, s, need)
+		if author == rec.To {
+			ok, err := e.approvedByAnother(ctx, s, author, need)
 			if err != nil {
 				return nil, err
 			}
@@ -342,7 +372,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 	// Exclusivity applies to the record being authorized, not to links inside its
 	// own chain: a custody hold must not suspend the grant it derives from.
 	if depth == 1 && len(cov.Live) > 0 {
-		if err := e.applyExclusives(ctx, rec, vehicle, at, cov); err != nil {
+		if err := e.applyExclusives(ctx, s, vehicle, at, cov); err != nil {
 			return nil, err
 		}
 	}
@@ -360,13 +390,38 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 	return cov, nil
 }
 
+// committedBy returns the principal whose authority this record was written
+// under: what the repository witnessed, never what the record says about itself.
+//
+// Record.CreatedBy is inside the signed bytes, so gating the role, shape and
+// self-dealing checks on it lets an author escape every one of them by leaving
+// it out. It survives as the audit copy §5 describes it as, and the only thing
+// it is consulted for here is honesty: a record claiming an author the
+// repository never witnessed is refused, because believing it would hand
+// authorship back to whoever wrote the record.
+func committedBy(s *Stored) (string, error) {
+	rec := &s.Record
+	if s.CommittedBy == "" {
+		if rec.CreatedBy != "" && rec.CreatedBy != rec.From {
+			return "", fmt.Errorf("%s: createdBy claims %s but the repository witnessed no author", s.URI, rec.CreatedBy)
+		}
+		return rec.From, nil
+	}
+	if rec.CreatedBy != "" && rec.CreatedBy != s.CommittedBy {
+		return "", fmt.Errorf("%s: createdBy says %s but the repository witnessed %s", s.URI, rec.CreatedBy, s.CommittedBy)
+	}
+	return s.CommittedBy, nil
+}
+
 // applyExclusives removes live abilities another party holds exclusively over
 // this vehicle. A recovery record keeps them and is flagged instead.
-func (e *Evaluator) applyExclusives(ctx context.Context, rec *Record, vehicle string, at time.Time, cov *Coverage) error {
+func (e *Evaluator) applyExclusives(ctx context.Context, s *Stored, vehicle string, at time.Time, cov *Coverage) error {
+	rec := &s.Record
 	holds, err := e.Resolver.Exclusives(ctx, vehicle, at)
 	if err != nil {
 		return err
 	}
+	own := holdStart(s)
 
 	blocked := map[string]bool{}
 	for _, h := range holds {
@@ -376,6 +431,14 @@ func (e *Evaluator) applyExclusives(ctx context.Context, rec *Record, vehicle st
 			continue
 		}
 		for _, a := range h.Abilities {
+			// Where this record claims the same ability exclusively, only a strictly
+			// newer hold supersedes it. Suspending both sides of an overlap would
+			// lock two parties out of a car one of them is driving, which is the
+			// lockout §12.5 exists to prevent, and the operator — the party
+			// exclusivity is actually aimed at — is still blocked by both.
+			if slices.Contains(rec.Exclusive, a) && !h.Since.After(own) {
+				continue
+			}
 			blocked[a] = true
 		}
 	}
@@ -398,6 +461,16 @@ func (e *Evaluator) applyExclusives(ctx context.Context, rec *Record, vehicle st
 	}
 	cov.Live = live
 	return nil
+}
+
+// holdStart is when this record's own exclusive claim took effect, on the same
+// footing a resolver reports ExclusiveHold.Since: the validity start, or the
+// commit when the validity is open at the front.
+func holdStart(s *Stored) time.Time {
+	if s.Record.Validity.From != nil {
+		return *s.Record.Validity.From
+	}
+	return s.CommittedAt
 }
 
 // custody returns the times the holder actually had the vehicle. An open period
@@ -468,10 +541,10 @@ func (e *Evaluator) coveredVehicles(ctx context.Context, rec *Record, at time.Ti
 
 // approvedByAnother reports whether someone other than the author approved this
 // write and held the same authority at commit time.
-func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, need []string) (bool, error) {
+func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, author string, need []string) (bool, error) {
 	rec := &s.Record
 	for _, approver := range s.ApprovedBy {
-		if approver == rec.CreatedBy || approver == rec.To {
+		if approver == author || approver == rec.To {
 			continue
 		}
 		if approver == rec.From {
@@ -630,11 +703,16 @@ func (e *Evaluator) parents(ctx context.Context, s *Stored, vehicle, clientID st
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		// drop keeps only the era in force. With no era in force — the car left
+		// DIMO, or sits between eras — there is nothing to keep, and quietly
+		// retaining the whole history is the opposite of what the record asked
+		// for. Live abilities are unaffected: the parent already ended them.
+		var current Set
 		if cur := state.EraAt(at); cur != nil {
-			current := Span(cur.Start, cur.End)
-			for a, w := range hist {
-				hist[a] = w.Intersect(current)
-			}
+			current = Span(cur.Start, cur.End)
+		}
+		for a, w := range hist {
+			hist[a] = w.Intersect(current)
 		}
 	}
 	return hist, live, chain, nil
@@ -653,12 +731,6 @@ func narrows(child, parent *Record) error {
 	case RedelegateNone:
 		return fmt.Errorf("%w: basis does not allow redelegation", ErrNotNarrowing)
 	case RedelegateAttenuated:
-		if child.redelegateMode() != RedelegateNone && parent.Redelegate.MaxDepth < 2 {
-			return fmt.Errorf("%w: redelegation depth exhausted", ErrNotNarrowing)
-		}
-		if child.redelegateMode() == RedelegateAttenuated && child.Redelegate.MaxDepth > parent.Redelegate.MaxDepth-1 {
-			return fmt.Errorf("%w: maxDepth exceeds basis", ErrNotNarrowing)
-		}
 	case RedelegateAllowlist:
 		if !slices.Contains(parent.Redelegate.Grantees, child.To) {
 			return fmt.Errorf("%w: %s is not on the basis allowlist", ErrNotNarrowing, child.To)
@@ -676,6 +748,20 @@ func narrows(child, parent *Record) error {
 		}
 	}
 
+	// The depth budget is checked the same way whatever mode spends it. An
+	// allowlist bounds who, not how many, so one that names no depth is unbounded
+	// and cannot narrow a basis that paid for a fixed number of hops: without
+	// this, "attenuated, maxDepth 2" becomes an unbounded chain the moment a
+	// child switches modes.
+	if budget, bounded := depthBudget(parent); bounded && child.redelegateMode() != RedelegateNone {
+		if budget < 2 {
+			return fmt.Errorf("%w: redelegation depth exhausted", ErrNotNarrowing)
+		}
+		if cb, ok := depthBudget(child); !ok || cb > budget-1 {
+			return fmt.Errorf("%w: maxDepth exceeds basis", ErrNotNarrowing)
+		}
+	}
+
 	for _, a := range child.Abilities {
 		if !slices.Contains(parent.Abilities, a) {
 			return fmt.Errorf("%w: ability %s not in basis", ErrNotNarrowing, a)
@@ -686,6 +772,13 @@ func narrows(child, parent *Record) error {
 			return fmt.Errorf("%w: basis does not permit an exclusive claim over %s", ErrNotNarrowing, a)
 		}
 	}
+	// Recovery is exclusivity's override: it acts through somebody else's hold,
+	// so it cannot be cheaper to claim than the hold itself. A basis that never
+	// permitted an exclusive claim must not be redelegable into a record that
+	// beats one.
+	if child.Recovery && !parent.Redelegate.Exclusive && !parent.Recovery {
+		return fmt.Errorf("%w: basis does not permit recovery", ErrNotNarrowing)
+	}
 	if !windowWithin(child.DataWindow, parent.DataWindow) {
 		return fmt.Errorf("%w: dataWindow exceeds basis", ErrNotNarrowing)
 	}
@@ -693,6 +786,21 @@ func narrows(child, parent *Record) error {
 		return fmt.Errorf("%w: validity exceeds basis", ErrNotNarrowing)
 	}
 	return nil
+}
+
+// depthBudget returns how many further hops a record pays for, and whether it
+// bounds them at all. An allowlist carries a budget only when it names one,
+// because naming who may receive says nothing about how many times.
+func depthBudget(r *Record) (int, bool) {
+	switch r.redelegateMode() {
+	case RedelegateAttenuated:
+		return r.Redelegate.MaxDepth, true
+	case RedelegateAllowlist:
+		if r.Redelegate.MaxDepth > 0 {
+			return r.Redelegate.MaxDepth, true
+		}
+	}
+	return 0, false
 }
 
 // hasRole reports whether member held, at time at, a role in org covering scope
@@ -753,8 +861,14 @@ func (e *Evaluator) useRole(ctx context.Context, org, member, vehicle string, ab
 		if !roleActive(r, org, member, at) {
 			continue
 		}
-		c := r.Record.Covers
-		if !c.Inherit && c.Vehicle != vehicle {
+		// Scope is resolved the same way hasRole resolves it, or a tag-scoped
+		// role could author a grant over a car (see roleScopeCovers) and then be
+		// unable to exercise one addressed to its own org.
+		ok, err := e.roleScopeCovers(ctx, r.Record.Covers, Covers{Vehicle: vehicle}, at)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
 			continue
 		}
 		if containsAll(r.Record.Abilities, abilities) {

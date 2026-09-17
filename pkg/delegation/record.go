@@ -89,7 +89,12 @@ type Record struct {
 // compromised booking service writes itself a fleet-wide, permanent,
 // command-bearing grant with exactly the authority it legitimately holds. These
 // are the dimensions that separate "issue one custody grant" from "take the
-// fleet".
+// fleet": how many cars, for how long, which abilities, whether the grant can
+// seed a chain or lock the operator out — and how far back in time it reaches.
+// Reach backwards is the one that is easy to miss, because it is invisible in
+// every dimension the others measure: the narrowest role the design offers, one
+// car for one booking with telemetry:read, still hands out every trip every
+// prior renter took unless the data window is bounded too.
 //
 // A nil RoleConstraints is unbounded, which is what every role that predates
 // this field means. Zero values inside it are likewise unbounded, so a
@@ -103,6 +108,16 @@ type RoleConstraints struct {
 	// is unlimited; when set, an unbounded validity is refused, since "forever" is
 	// the shape being guarded against. JSON-encoded as nanoseconds.
 	MaxValidity time.Duration `json:"maxValidity,omitempty"`
+	// MaxDataReach bounds how far before its own validity an issued record's data
+	// window may reach back. Zero is unlimited; when set, a data window with no
+	// start is refused, and so is a record whose validity has no start to measure
+	// the reach against — "everything, from the beginning of time" is the shape
+	// being guarded against, and an unbounded end is how it is usually written.
+	//
+	// It is measured against the record's own validity rather than a clock so the
+	// answer is a property of the record and does not change between the commit
+	// check and the evaluation weeks later. JSON-encoded as nanoseconds.
+	MaxDataReach time.Duration `json:"maxDataReach,omitempty"`
 	// Abilities is the set an issued record may grant. Empty means any ability the
 	// role itself holds. It is narrower than the role's own abilities on purpose:
 	// a service that may read telemetry itself need not be able to hand that out.
@@ -122,6 +137,9 @@ func (c *RoleConstraints) validate(roleAbilities []string) error {
 	}
 	if c.MaxValidity < 0 {
 		return errors.New("constraints.maxValidity must not be negative")
+	}
+	if c.MaxDataReach < 0 {
+		return errors.New("constraints.maxDataReach must not be negative")
 	}
 	for _, a := range c.Abilities {
 		if !slices.Contains(roleAbilities, a) {
@@ -154,6 +172,16 @@ func (c *RoleConstraints) check(rec *Record, coveredVehicles int) error {
 			return fmt.Errorf("%w: validity must be bounded at both ends, limit %s", ErrExceedsRole, c.MaxValidity)
 		case w.To.Sub(*w.From) > c.MaxValidity:
 			return fmt.Errorf("%w: validity of %s exceeds limit %s", ErrExceedsRole, w.To.Sub(*w.From), c.MaxValidity)
+		}
+	}
+	if c.MaxDataReach > 0 {
+		switch d, v := rec.DataWindow, rec.Validity; {
+		case d.From == nil:
+			return fmt.Errorf("%w: dataWindow must have a start, limit %s of reach back", ErrExceedsRole, c.MaxDataReach)
+		case v.From == nil:
+			return fmt.Errorf("%w: validity must have a start to measure dataWindow reach against", ErrExceedsRole)
+		case v.From.Sub(*d.From) > c.MaxDataReach:
+			return fmt.Errorf("%w: dataWindow reaches %s before validity, limit %s", ErrExceedsRole, v.From.Sub(*d.From), c.MaxDataReach)
 		}
 	}
 	if !c.AllowRedelegation && rec.redelegateMode() != RedelegateNone {

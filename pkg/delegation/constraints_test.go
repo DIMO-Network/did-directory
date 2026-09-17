@@ -44,7 +44,9 @@ func bookingFleet(t *testing.T) (*memResolver, *Evaluator, *Stored) {
 func issue(r *memResolver, rkey string, rec Record) (string, *Stored) {
 	rec.CreatedBy = booking
 	u := uri(avis, rkey)
-	return u, r.put(u, rec, day(2))
+	s := r.put(u, rec, day(2))
+	s.CommittedBy = booking // what the org host authenticated for the write
+	return u, s
 }
 
 // The hole: a role bounds which abilities its holder may hand out, but not the
@@ -105,6 +107,7 @@ func TestRoleConstraints_InheritedCoverageIsStillCounted(t *testing.T) {
 	grab.CreatedBy = booking
 	gu := uri(fordPro, "grab")
 	s := r.put(gu, grab, day(2))
+	s.CommittedBy = booking
 
 	_, err := e.Coverage(ctx, gu, car, day(10))
 	assert.ErrorIs(t, err, ErrExceedsRole)
@@ -261,7 +264,7 @@ func TestRoleScope_TagScopedRoleAuthorsPerVehicleGrant(t *testing.T) {
 	custody.CreatedBy = bob
 	custody.Validity = Window{From: tp(day(2)), To: tp(day(4))}
 	cu := uri(avis, "tag-scoped-custody")
-	r.put(cu, custody, day(2))
+	r.put(cu, custody, day(2)).CommittedBy = bob
 
 	e := &Evaluator{Resolver: r}
 	cov, err := e.Coverage(ctx, cu, car, day(3))
@@ -272,7 +275,7 @@ func TestRoleScope_TagScopedRoleAuthorsPerVehicleGrant(t *testing.T) {
 	outside := custody
 	outside.Covers = Covers{Vehicle: otherCar}
 	ou := uri(avis, "outside-tag")
-	r.put(ou, outside, day(2))
+	r.put(ou, outside, day(2)).CommittedBy = bob
 	_, err = e.Coverage(ctx, ou, otherCar, day(3))
 	assert.ErrorContains(t, err, "lacked authority")
 }

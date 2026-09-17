@@ -138,7 +138,9 @@ func (m *memResolver) Exclusives(_ context.Context, vehicle string, at time.Time
 		if !rec.Validity.Set().Contains(at) || revokedAt(rec, s.Tombstone, at) {
 			continue
 		}
-		holds = append(holds, ExclusiveHold{URI: s.URI, Holder: rec.To, Abilities: rec.Exclusive})
+		holds = append(holds, ExclusiveHold{
+			URI: s.URI, Holder: rec.To, Abilities: rec.Exclusive, Since: holdStart(s),
+		})
 	}
 	return holds, nil
 }
@@ -328,6 +330,7 @@ func TestTag_OwnedByAnotherOrgRejected(t *testing.T) {
 func TestAuthor_DepartureDoesNotInvalidate(t *testing.T) {
 	r, e, u := avisFleet(t)
 	r.records[u].Record.CreatedBy = alice
+	r.records[u].CommittedBy = alice
 	role := r.role(avis, alice, Covers{Tag: flTag},
 		[]string{"delegation:create", "telemetry:read", "location:precise", "command:unlock"}, day(1))
 
@@ -342,6 +345,7 @@ func TestAuthor_DepartureDoesNotInvalidate(t *testing.T) {
 func TestAuthor_WithoutRoleRejected(t *testing.T) {
 	r, e, u := avisFleet(t)
 	r.records[u].Record.CreatedBy = bob
+	r.records[u].CommittedBy = bob
 	_, err := e.Coverage(ctx, u, car, day(10))
 	assert.ErrorContains(t, err, "lacked authority")
 
