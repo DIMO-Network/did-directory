@@ -163,7 +163,43 @@ func (o *Offer) validate() error {
 	if !o.PerOpenIncident && (o.Validity == ScopeIncident || o.DataWindow == ScopeIncident) {
 		return fmt.Errorf("offer %s: an incident scope requires perOpenIncident", o.Name)
 	}
+	// The fields that map straight onto the delegation record are checked here
+	// too. They are checked again when a record is built, but by then a typo in a
+	// product definition has become a failure at the rental desk; a catalog is
+	// validated once at startup so it can be wrong exactly once, in a deploy.
+	switch mode := orDefault(o.Redelegate.Mode, delegation.RedelegateNone); mode {
+	case delegation.RedelegateNone:
+	case delegation.RedelegateAttenuated:
+		if o.Redelegate.MaxDepth < 1 {
+			return fmt.Errorf("offer %s: attenuated redelegation requires maxDepth >= 1", o.Name)
+		}
+	case delegation.RedelegateAllowlist:
+		if len(o.Redelegate.Grantees) == 0 {
+			return fmt.Errorf("offer %s: allowlist redelegation requires grantees", o.Name)
+		}
+	default:
+		return fmt.Errorf("offer %s: unknown redelegate mode %q", o.Name, mode)
+	}
+	if r := orDefault(o.RevocableBy, delegation.RevocableByFrom); !slices.Contains(
+		[]string{delegation.RevocableByFrom, delegation.RevocableByTo, delegation.RevocableByEither}, r) {
+		return fmt.Errorf("offer %s: unknown revocableBy %q", o.Name, o.RevocableBy)
+	}
+	for _, v := range []string{
+		orDefault(o.AfterRemoval, delegation.RetainHistory),
+		orDefault(o.AfterTransfer, delegation.RetainHistory),
+	} {
+		if v != delegation.RetainHistory && v != delegation.Drop {
+			return fmt.Errorf("offer %s: unknown history policy %q", o.Name, v)
+		}
+	}
 	return nil
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 // Abilities returns every ability the catalog can grant, plus delegation:create,

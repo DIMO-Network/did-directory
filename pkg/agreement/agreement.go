@@ -331,10 +331,10 @@ func (a *Agreement) Drove() bool { return len(a.Custody) > 0 }
 // live grants activate on. A return-by duty caps it: the contract's deadline
 // wins over a window someone typed.
 func (a *Agreement) BookingWindow() (delegation.Window, error) {
-	w := a.Window
+	w := copyWindow(a.Window)
 	if d := a.duty(DutyReturn); d != nil && d.DueBy != nil {
 		if w.To == nil || d.DueBy.Before(*w.To) {
-			w.To = d.DueBy
+			w.To = copyTime(d.DueBy)
 		}
 	}
 	if w.To == nil {
@@ -343,43 +343,44 @@ func (a *Agreement) BookingWindow() (delegation.Window, error) {
 	return w, nil
 }
 
-// ReturnedAt reports when custody ended, or nil while the customer still holds
+// ReturnedAt reports when the rental ended, or nil while the customer still has
 // the vehicle.
 //
-// Custody events are authoritative because the vehicle signs them. A state of
-// returned or closed with no synced event falls back to the end of the booking
-// window, which is the operator's own claim about when the car was due back —
-// never later, so a device that never syncs cannot extend a renter's window.
+// Two facts decide it, and neither is enough alone. An open custody leg means
+// the customer physically has the car, whatever the lifecycle claims: the
+// vehicle signs those events. Closed legs say where the car has been, never that
+// the rental is over — a valet drop-off or an overnight garage hand-back closes
+// a leg in the middle of a booking and the renter takes the car again the next
+// morning. So the rental ends when the lifecycle says it ended and no leg is
+// still open, and it ends at the last synced return.
+//
+// A returned or closed booking with no synced event at all falls back to the end
+// of the booking window, which is the operator's own claim about when the car was
+// due back — never later, so a device that never syncs cannot extend a renter's
+// window.
 func (a *Agreement) ReturnedAt() *time.Time {
 	// A cancellation mid-rental ends custody there and then, even if no return
 	// event ever syncs: the car is no longer rented, whatever the device says.
 	if a.Cancelled() && a.Timestamps.CancelledAt != nil {
 		if end := a.custodyEnd(); end != nil {
-			return end
+			return copyTime(end)
 		}
-		return a.Timestamps.CancelledAt
+		return copyTime(a.Timestamps.CancelledAt)
 	}
-	if len(a.Custody) > 0 {
-		var last *time.Time
-		for i := range a.Custody {
-			c := &a.Custody[i]
-			if c.End == nil {
-				return nil
-			}
-			if last == nil || c.End.After(*last) {
-				last = c.End
-			}
-		}
-		return last
+	if len(a.Custody) > 0 && a.custodyEnd() == nil {
+		return nil
 	}
-	if a.State == StateReturned || a.State == StateClosed {
-		w, err := a.BookingWindow()
-		if err != nil {
-			return nil
-		}
-		return w.To
+	if a.State != StateReturned && a.State != StateClosed {
+		return nil
 	}
-	return nil
+	if end := a.custodyEnd(); end != nil {
+		return copyTime(end)
+	}
+	w, err := a.BookingWindow()
+	if err != nil {
+		return nil
+	}
+	return w.To
 }
 
 // custodyEnd is the last synced return, or nil while any period is still open.
@@ -413,11 +414,11 @@ func (a *Agreement) CustodyWindow() (delegation.Window, error) {
 	w := booking
 	for i := range a.Custody {
 		if s := a.Custody[i].Start; w.From == nil || s.Before(*w.From) {
-			w.From = &a.Custody[i].Start
+			w.From = copyTime(&s)
 		}
 	}
 	if end := a.ReturnedAt(); end != nil {
-		w.To = end
+		w.To = copyTime(end)
 	}
 	return w, nil
 }
@@ -426,6 +427,12 @@ func (a *Agreement) CustodyWindow() (delegation.Window, error) {
 // opens with custody and closes when the retention duty says. With no retention
 // duty declared it is open-ended, which is a choice the operator's contract
 // makes, not one this package makes for them.
+//
+// A retention duty may state a term, a deadline, or both. Both are ceilings on
+// how long the provider keeps the customer's data, so when both are stated the
+// earlier one ends the grant: a term measured from the end of custody does not
+// run past the contract's deadline, and a deadline does not extend a term that
+// expires sooner. Neither branch shadows the other.
 func (a *Agreement) RetentionWindow() (delegation.Window, error) {
 	custody, err := a.CustodyWindow()
 	if err != nil {
@@ -436,14 +443,30 @@ func (a *Agreement) RetentionWindow() (delegation.Window, error) {
 	if d == nil {
 		return w, nil
 	}
-	switch {
-	case d.Term > 0 && custody.To != nil:
+	if d.Term > 0 && custody.To != nil {
 		end := custody.To.Add(d.Term)
 		w.To = &end
-	case d.DueBy != nil:
-		w.To = d.DueBy
+	}
+	if d.DueBy != nil && (w.To == nil || d.DueBy.Before(*w.To)) {
+		w.To = copyTime(d.DueBy)
 	}
 	return w, nil
+}
+
+// copyTime and copyWindow keep the agreement's own fields out of the records
+// this package hands back. A compiled record is validated once and then
+// committed; a window pointing into a caller-mutable agreement would let a later
+// edit to the booking rewrite a record an org host has already accepted.
+func copyTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	out := *t
+	return &out
+}
+
+func copyWindow(w delegation.Window) delegation.Window {
+	return delegation.Window{From: copyTime(w.From), To: copyTime(w.To)}
 }
 
 func ordered(w delegation.Window) bool {

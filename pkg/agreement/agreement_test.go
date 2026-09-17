@@ -173,6 +173,52 @@ func TestRetentionWindow(t *testing.T) {
 	assert.ErrorIs(t, err, ErrUnboundedBooking)
 }
 
+// A retention duty may carry both a term and a deadline. Neither may be
+// exceeded, so whichever comes first ends the grant — a term that would run past
+// the contract's deadline does not, and a deadline does not extend a shorter
+// term.
+func TestRetentionTermAndDeadlineTogether(t *testing.T) {
+	returned := func(retention Duty) *Agreement {
+		a := booking()
+		a.Custody = []Custody{{Start: day(10), End: tp(day(12))}}
+		a.State = StateReturned
+		a.Duties[2] = retention
+		return &a
+	}
+
+	t.Run("the deadline caps the term", func(t *testing.T) {
+		w, err := returned(Duty{Action: DutyRetention, Term: 30 * 24 * time.Hour, DueBy: tp(day(14))}).RetentionWindow()
+		require.NoError(t, err)
+		assert.Equal(t, day(14), *w.To)
+	})
+
+	t.Run("the term caps the deadline", func(t *testing.T) {
+		w, err := returned(Duty{Action: DutyRetention, Term: 2 * 24 * time.Hour, DueBy: tp(day(200))}).RetentionWindow()
+		require.NoError(t, err)
+		assert.Equal(t, day(14), *w.To, "custody ended on day 12")
+	})
+
+	t.Run("a deadline still binds while the car is out", func(t *testing.T) {
+		a := booking()
+		a.Custody = []Custody{{Start: day(10)}}
+		a.State = StatePickedUp
+		a.Duties[2] = Duty{Action: DutyRetention, Term: 30 * 24 * time.Hour, DueBy: tp(day(14))}
+		w, err := a.RetentionWindow()
+		require.NoError(t, err)
+		assert.Equal(t, day(14), *w.To)
+	})
+}
+
+// offerWith is a sound offer with one thing wrong with it.
+func offerWith(mutate func(*Offer)) Offer {
+	o := Offer{
+		Name: "x", To: ToCustomer, Abilities: []string{"telemetry:read"},
+		Validity: ScopeBooking, DataWindow: ScopeCustody,
+	}
+	mutate(&o)
+	return o
+}
+
 func TestCatalogValidate(t *testing.T) {
 	assert.NoError(t, RentalCatalog().Validate())
 
@@ -194,6 +240,15 @@ func TestCatalogValidate(t *testing.T) {
 			{Name: "x", To: ToCustomer, Abilities: []string{"telemetry:read"}, Validity: ScopeBooking, DataWindow: ScopeCustody},
 			{Name: "x", To: ToCustomer, Abilities: []string{"events:read"}, Validity: ScopeBooking, DataWindow: ScopeCustody},
 		},
+		// A typo in a product definition must fail at startup, not at the desk.
+		"unknown redelegate mode":  {offerWith(func(o *Offer) { o.Redelegate = delegation.Redelegate{Mode: "anyone"} })},
+		"attenuated without depth": {offerWith(func(o *Offer) { o.Redelegate = delegation.Redelegate{Mode: delegation.RedelegateAttenuated} })},
+		"allowlist without grantees": {offerWith(func(o *Offer) {
+			o.Redelegate = delegation.Redelegate{Mode: delegation.RedelegateAllowlist}
+		})},
+		"unknown revocableBy":   {offerWith(func(o *Offer) { o.RevocableBy = "the lawyer" })},
+		"unknown afterRemoval":  {offerWith(func(o *Offer) { o.AfterRemoval = "keep" })},
+		"unknown afterTransfer": {offerWith(func(o *Offer) { o.AfterTransfer = "keep" })},
 	}
 	for name, offers := range cases {
 		t.Run(name, func(t *testing.T) {
