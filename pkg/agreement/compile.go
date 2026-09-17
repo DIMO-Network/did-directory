@@ -54,17 +54,21 @@ func Compile(a *Agreement, cat Catalog, now time.Time) ([]Grant, error) {
 
 	// Duty gating, before anything else is computed.
 	//
-	// Cancelled means nothing: the customer never drove the car, so there is no
-	// history to keep either. Unpaid means nothing: the purchase is what creates
-	// the access, and an unfulfilled payment duty means nothing was purchased
-	// yet. No assigned vehicle means nothing: a renter books a class and a grant
-	// has to name the car it opens, so the booking compiles to an empty set until
-	// the desk hands over a key.
-	if a.Cancelled() || !a.Paid() || a.Target.Vehicle == "" {
+	// Unpaid means nothing: the purchase is what creates the access, and an
+	// unfulfilled payment duty means nothing was purchased yet. No assigned
+	// vehicle means nothing: a renter books a class and a grant has to name the
+	// car it opens, so the booking compiles to an empty set until the desk hands
+	// over a key. Cancelled before pickup means nothing either — no custody, so
+	// no history to keep.
+	if !a.Paid() || a.Target.Vehicle == "" {
+		return nil, nil
+	}
+	if a.Cancelled() && !a.Drove() {
 		return nil, nil
 	}
 
-	returned := a.ReturnedAt() != nil
+	// Cancellation mid-rental is a return: custody stops, history stays.
+	returned := a.ReturnedAt() != nil || a.Cancelled()
 	keys := map[string]bool{}
 	var grants []Grant
 

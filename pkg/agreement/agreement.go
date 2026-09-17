@@ -313,9 +313,19 @@ func (a *Agreement) Paid() bool {
 	return d == nil || d.fulfilled()
 }
 
-// Cancelled reports whether the agreement was cancelled. A cancelled booking
-// compiles to nothing, including history: the customer never drove the car.
+// Cancelled reports whether the agreement was cancelled.
+//
+// Cancellation is a return, not an erasure. Before pickup it compiles to
+// nothing, because there is no custody to cover and no data to keep. Cancelled
+// mid-rental it ends custody at the cancellation — the commands stop — and the
+// customer keeps the history of the days they actually drove. That record is
+// about them, and it is the evidence both sides reach for in the damage or
+// billing dispute that usually follows a mid-rental cancellation.
 func (a *Agreement) Cancelled() bool { return a.State == StateCancelled }
+
+// Drove reports whether the customer ever took the car, which is what separates
+// a cancellation from a cancellation with a drive behind it.
+func (a *Agreement) Drove() bool { return len(a.Custody) > 0 }
 
 // BookingWindow is when the customer is entitled to the car, which is what the
 // live grants activate on. A return-by duty caps it: the contract's deadline
@@ -341,6 +351,14 @@ func (a *Agreement) BookingWindow() (delegation.Window, error) {
 // window, which is the operator's own claim about when the car was due back —
 // never later, so a device that never syncs cannot extend a renter's window.
 func (a *Agreement) ReturnedAt() *time.Time {
+	// A cancellation mid-rental ends custody there and then, even if no return
+	// event ever syncs: the car is no longer rented, whatever the device says.
+	if a.Cancelled() && a.Timestamps.CancelledAt != nil {
+		if end := a.custodyEnd(); end != nil {
+			return end
+		}
+		return a.Timestamps.CancelledAt
+	}
 	if len(a.Custody) > 0 {
 		var last *time.Time
 		for i := range a.Custody {
@@ -362,6 +380,24 @@ func (a *Agreement) ReturnedAt() *time.Time {
 		return w.To
 	}
 	return nil
+}
+
+// custodyEnd is the last synced return, or nil while any period is still open.
+func (a *Agreement) custodyEnd() *time.Time {
+	if len(a.Custody) == 0 {
+		return nil
+	}
+	var last *time.Time
+	for i := range a.Custody {
+		c := &a.Custody[i]
+		if c.End == nil {
+			return nil
+		}
+		if last == nil || c.End.After(*last) {
+			last = c.End
+		}
+	}
+	return last
 }
 
 // CustodyWindow is the range the customer actually held the vehicle.

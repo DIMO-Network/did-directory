@@ -86,14 +86,51 @@ func TestUnpaidBookingCompilesNothing(t *testing.T) {
 	assert.Len(t, compile(t, &a, day(10)), 2)
 }
 
-// A cancelled booking compiles to nothing at all, history included: the customer
-// never drove the car.
-func TestCancelledBookingCompilesNothing(t *testing.T) {
+// Cancelled before pickup compiles to nothing at all, history included: there is
+// no custody to cover and no drive to keep.
+func TestCancelledBeforePickupCompilesNothing(t *testing.T) {
 	a := booking()
 	a.State = StateCancelled
 	a.Timestamps.CancelledAt = tp(day(9))
 	assert.Empty(t, compile(t, &a, day(10)))
 	assert.Empty(t, compile(t, &a, day(30)))
+}
+
+// Cancelled mid-rental is a return, not an erasure. The commands stop at the
+// cancellation; the customer keeps the days they drove, which is the evidence
+// both sides reach for in the dispute that follows.
+func TestCancelledAfterPickupKeepsTheDrive(t *testing.T) {
+	a := booking()
+	a.Custody = []Custody{{Start: day(10), End: tp(day(11))}}
+	a.State = StateCancelled
+	a.Timestamps.CancelledAt = tp(day(11))
+
+	grants := compile(t, &a, day(12))
+	require.NotEmpty(t, grants, "the drive survives the cancellation")
+	assert.NotContains(t, keys(grants), a.ID+"/custody", "the commands stop at the cancellation")
+
+	history, ok := grants[a.ID+"/history"]
+	require.True(t, ok, "the renter keeps the days they drove")
+	assert.Equal(t, day(10), *history.DataWindow.From)
+	assert.Equal(t, day(11), *history.DataWindow.To)
+	assert.True(t, history.NarrowToCustody)
+}
+
+// A cancellation while the car is still out ends custody there, even if no
+// return event ever syncs from the device.
+func TestCancelledWithCarStillOutEndsCustody(t *testing.T) {
+	a := booking()
+	a.Custody = []Custody{{Start: day(10)}}
+	a.State = StateCancelled
+	a.Timestamps.CancelledAt = tp(day(11))
+
+	require.NotNil(t, a.ReturnedAt())
+	assert.Equal(t, day(11), *a.ReturnedAt())
+
+	assert.NotContains(t, keys(compile(t, &a, day(12))), a.ID+"/custody")
+	window, err := a.CustodyWindow()
+	require.NoError(t, err)
+	assert.Equal(t, day(11), *window.To)
 }
 
 // A renter books a class and gets a specific car, often minutes before pickup.
