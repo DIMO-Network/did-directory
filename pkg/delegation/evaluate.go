@@ -694,7 +694,11 @@ func (e *Evaluator) hasRole(ctx context.Context, org, member string, scope Cover
 		if !roleActive(r, org, member, at) {
 			continue
 		}
-		if !roleScopeCovers(r.Record.Covers, scope) {
+		ok, err := e.roleScopeCovers(ctx, r.Record.Covers, scope, at)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
 			continue
 		}
 		if !containsAll(r.Record.Abilities, need) {
@@ -749,17 +753,41 @@ func roleActive(r *Stored, org, member string, at time.Time) bool {
 	return !revokedAt(rec, r.Tombstone, at)
 }
 
-// roleScopeCovers reports whether a role's scope includes the target scope.
-func roleScopeCovers(role, target Covers) bool {
+// roleScopeCovers reports whether a role's scope includes the target scope at
+// time at.
+//
+// A tag-scoped role covers a single vehicle that was in its tag at that time.
+// Without this, a booking service scoped to the Florida fleet could not author
+// the per-car custody grant a rental needs (§12.1) — the scope check would fail
+// before constraints were consulted, and the only workable role would be an
+// org-wide one. Membership is read raw here: whether the author of a membership
+// held authority is a question for coverage, not for scope, and asking it here
+// would recurse.
+func (e *Evaluator) roleScopeCovers(ctx context.Context, role, target Covers, at time.Time) (bool, error) {
 	switch {
 	case role.Inherit:
-		return true
+		return true, nil
 	case target.Inherit:
-		return false
+		return false, nil
 	case role.Tag != "":
-		return role.Tag == target.Tag
+		if role.Tag == target.Tag {
+			return true, nil
+		}
+		if target.Vehicle == "" {
+			return false, nil
+		}
+		memberships, err := e.Resolver.Memberships(ctx, role.Tag, target.Vehicle)
+		if err != nil {
+			return false, err
+		}
+		for _, m := range memberships {
+			if !at.Before(m.JoinedAt) && (m.LeftAt == nil || at.Before(*m.LeftAt)) {
+				return true, nil
+			}
+		}
+		return false, nil
 	default:
-		return role.Vehicle != "" && role.Vehicle == target.Vehicle
+		return role.Vehicle != "" && role.Vehicle == target.Vehicle, nil
 	}
 }
 

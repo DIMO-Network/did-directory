@@ -242,3 +242,37 @@ func TestRoleConstraints_Validation(t *testing.T) {
 	grant.Constraints = &RoleConstraints{MaxVehicles: 1}
 	assert.ErrorContains(t, grant.Validate(), "only roles carry issue constraints")
 }
+
+// A booking service scoped to one fleet must be able to author the per-car
+// custody grant a rental needs. Broad scope with a tight shape is the alternative
+// nobody should be forced into.
+func TestRoleScope_TagScopedRoleAuthorsPerVehicleGrant(t *testing.T) {
+	r := newResolver()
+	r.control(t, car, avis)
+	r.control(t, otherCar, avis)
+	r.join(flTag, car, avis, day(1), nil)
+
+	r.role(avis, bob, Covers{Tag: flTag},
+		[]string{"delegation:create", "command:unlock"}, day(1)).
+		Record.Constraints = &RoleConstraints{MaxVehicles: 1, AllowExclusive: true}
+
+	custody := delegation(avis, "did:dimo:renter-x", Covers{Vehicle: car}, "command:unlock")
+	custody.Exclusive = []string{"command:unlock"}
+	custody.CreatedBy = bob
+	custody.Validity = Window{From: tp(day(2)), To: tp(day(4))}
+	cu := uri(avis, "tag-scoped-custody")
+	r.put(cu, custody, day(2))
+
+	e := &Evaluator{Resolver: r}
+	cov, err := e.Coverage(ctx, cu, car, day(3))
+	require.NoError(t, err, "the car is in the role's tag")
+	assert.Equal(t, []string{"command:unlock"}, cov.Live)
+
+	// A car outside the role's tag is not in scope, constraints or not.
+	outside := custody
+	outside.Covers = Covers{Vehicle: otherCar}
+	ou := uri(avis, "outside-tag")
+	r.put(ou, outside, day(2))
+	_, err = e.Coverage(ctx, ou, otherCar, day(3))
+	assert.ErrorContains(t, err, "lacked authority")
+}
