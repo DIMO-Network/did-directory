@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/pkg/control"
@@ -189,6 +190,14 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 
 	cov, err := e.evaluate(ctx, s, vehicle, clientID, at, 1, map[string]bool{})
 	if err != nil {
+		// A suspended grant answers "somebody else is driving" only to a caller
+		// asking for something this grant actually carries. Asking for an ability
+		// it never had is simply not covered.
+		if errors.Is(err, ErrExclusiveHold) && !slices.ContainsFunc(abilities, func(a string) bool {
+			return slices.Contains(s.Record.Abilities, a)
+		}) {
+			return nil, ErrNotCovered
+		}
 		return nil, err
 	}
 
@@ -202,6 +211,12 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 		}
 	}
 	if filtered.Empty() {
+		for _, a := range abilities {
+			if slices.Contains(cov.Suspended, a) {
+				filtered.Suspended = cov.Suspended
+				return nil, fmt.Errorf("%w: %s", ErrExclusiveHold, strings.Join(filtered.Suspended, ", "))
+			}
+		}
 		return nil, ErrNotCovered
 	}
 	return filtered, nil
@@ -333,6 +348,13 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 	}
 
 	if cov.Empty() {
+		// Suspended is not the same answer as never granted: §12.2 wants the
+		// operator to see that somebody is driving their car, and the issuer to
+		// log it. Saying "not covered" here would hide a custody hold behind the
+		// same error as a missing grant.
+		if len(cov.Suspended) > 0 {
+			return nil, fmt.Errorf("%w: %s", ErrExclusiveHold, strings.Join(cov.Suspended, ", "))
+		}
 		return nil, ErrNotCovered
 	}
 	return cov, nil

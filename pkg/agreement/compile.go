@@ -163,23 +163,27 @@ func (a *Agreement) grant(off *Offer, svc *Service, inc *Incident, now time.Time
 	}
 
 	rec := delegation.Record{
-		Type:          delegation.TypeDelegation,
-		From:          a.Assigner,
-		To:            to,
-		Basis:         clone(a.Basis),
-		Covers:        delegation.Covers{Vehicle: a.Target.Vehicle},
-		Abilities:     clone(off.Abilities),
-		DataWindow:    dataWindow,
-		Validity:      validity,
-		Redelegate:    off.Redelegate,
-		RevocableBy:   off.RevocableBy,
-		AfterRemoval:  off.AfterRemoval,
-		AfterTransfer: off.AfterTransfer,
-		Purpose:       off.purpose(),
-		Terms:         terms,
-		Exclusive:     clone(off.Exclusive),
-		CreatedBy:     a.CreatedBy,
-		CreatedAt:     now,
+		Type:       delegation.TypeDelegation,
+		From:       a.Assigner,
+		To:         to,
+		Basis:      clone(a.Basis),
+		Covers:     delegation.Covers{Vehicle: a.Target.Vehicle},
+		Abilities:  clone(off.Abilities),
+		DataWindow: dataWindow,
+		// A custody-scoped data window is a hull: one Window cannot express a car
+		// handed back and re-taken. NarrowToCustody makes the evaluator intersect
+		// the real intervals, so the hull is only ever an outer bound.
+		NarrowToCustody: off.DataWindow == ScopeCustody,
+		Validity:        validity,
+		Redelegate:      off.Redelegate,
+		RevocableBy:     off.RevocableBy,
+		AfterRemoval:    off.AfterRemoval,
+		AfterTransfer:   off.AfterTransfer,
+		Purpose:         off.purpose(),
+		Terms:           terms,
+		Exclusive:       clone(off.Exclusive),
+		CreatedBy:       a.CreatedBy,
+		CreatedAt:       now,
 	}
 	if err := rec.Validate(); err != nil {
 		return nil, fmt.Errorf("offer %s: %w", off.Name, err)

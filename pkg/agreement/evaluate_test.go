@@ -21,6 +21,15 @@ type fleet struct {
 	state   *control.State
 	opening *control.Opening
 	vehicle string
+	custody []delegation.CustodyPeriod
+}
+
+// hold records that a holder physically had the car, the way a booking service
+// or the car's own device would once a pickup or return syncs.
+func (f *fleet) hold(holder string, from time.Time, until *time.Time) {
+	f.custody = append(f.custody, delegation.CustodyPeriod{
+		Vehicle: f.vehicle, Holder: holder, From: from, Until: until,
+	})
 }
 
 func newFleet(t *testing.T, vehicle, controller string) *fleet {
@@ -71,6 +80,20 @@ func (f *fleet) role(org, member string, abilities []string, at time.Time) {
 		},
 		CommittedAt: at,
 	})
+}
+
+// TagSize and Custody complete the Resolver interface. This fleet holds one car
+// and records custody as the booking's own custody events.
+func (f *fleet) TagSize(context.Context, string, time.Time) (int, error) { return 1, nil }
+
+func (f *fleet) Custody(_ context.Context, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
+	var out []delegation.CustodyPeriod
+	for _, c := range f.custody {
+		if c.Vehicle == vehicle && c.Holder == holder {
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }
 
 func (f *fleet) Roles(_ context.Context, org, member string) ([]delegation.Stored, error) {
@@ -135,6 +158,9 @@ func TestCompiledGrantsEvaluate(t *testing.T) {
 
 	a := booking()
 	a.Custody = []Custody{{Start: day(10), End: tp(day(12))}}
+	// The same pickup and return, as the fleet's own custody records: the history
+	// grant narrows to these, so the window is the drive rather than the booking.
+	f.hold(renter, day(10), tp(day(12)))
 	a.State = StateReturned
 	returnedGrants := mustCompile(t, &a, day(13))
 	require.Len(t, returnedGrants, 1)
@@ -166,7 +192,8 @@ func TestCompiledGrantsEvaluate(t *testing.T) {
 
 	t.Run("the operator's commands are suspended while somebody is driving", func(t *testing.T) {
 		_, err := ev.Authorize(ctx, valetURI, valet, "", car, []string{"command:unlock"}, day(11))
-		assert.ErrorIs(t, err, delegation.ErrNotCovered)
+		assert.ErrorIs(t, err, delegation.ErrExclusiveHold,
+			"the operator is told somebody is driving, not that they were never granted this")
 
 		cov, err := ev.Coverage(ctx, valetURI, car, day(11))
 		require.NoError(t, err)

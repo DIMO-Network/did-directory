@@ -289,3 +289,39 @@ func TestExclusiveValidation(t *testing.T) {
 	assert.NoError(t, ok.Validate())
 	_ = time.Now
 }
+
+// A grant whose every ability is suspended must not look like a grant that was
+// never made: the operator is told somebody is driving their car.
+func TestSuspendedIsNotUncovered(t *testing.T) {
+	r := newResolver()
+	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.control(t, car, avis)
+
+	custody := delegation(avis, renter, Covers{Vehicle: car}, "command:unlock")
+	custody.Exclusive = []string{"command:unlock"}
+	custody.Validity = Window{From: tp(day(2)), To: tp(day(5))}
+	r.put(uri(avis, "custody"), custody, day(1))
+
+	// Commands only: nothing is left once they are suspended.
+	ops := delegation(avis, fordPro, Covers{Vehicle: car}, "command:unlock")
+	ou := uri(avis, "ops-commands-only")
+	r.put(ou, ops, day(1))
+
+	e := &Evaluator{Resolver: r}
+	_, err := e.Coverage(ctx, ou, car, day(3))
+	assert.ErrorIs(t, err, ErrExclusiveHold)
+	assert.ErrorContains(t, err, "command:unlock")
+	assert.NotErrorIs(t, err, ErrNotCovered)
+
+	_, err = e.Authorize(ctx, ou, fordPro, "", car, []string{"command:unlock"}, day(3))
+	assert.ErrorIs(t, err, ErrExclusiveHold)
+
+	// An ability nobody holds exclusively still reads as not covered.
+	_, err = e.Authorize(ctx, ou, fordPro, "", car, []string{"telemetry:read"}, day(3))
+	assert.ErrorIs(t, err, ErrNotCovered)
+
+	// And once custody ends the operator is simply authorized again.
+	cov, err := e.Authorize(ctx, ou, fordPro, "", car, []string{"command:unlock"}, day(6))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"command:unlock"}, cov.Live)
+}
