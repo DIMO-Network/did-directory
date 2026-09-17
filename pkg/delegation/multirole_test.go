@@ -73,6 +73,7 @@ func TestSelfDealing(t *testing.T) {
 	rec.CreatedBy = alice
 	u := uri(avis, "self")
 	s := r.put(u, rec, day(2))
+	s.CommittedBy = alice
 
 	e := &Evaluator{Resolver: r}
 	_, err := e.Coverage(ctx, u, car, day(3))
@@ -95,7 +96,7 @@ func TestSelfDealing(t *testing.T) {
 	assert.ErrorIs(t, err, ErrSelfDealing)
 
 	// And the commit-time check flags it before it is ever written.
-	assert.ErrorIs(t, CheckCommit(&rec, CommitContext{From: r.parties[avis], CoveredVehicles: 1}), ErrApprovalRequired)
+	assert.ErrorIs(t, CheckCommit(&rec, CommitContext{From: r.parties[avis], CommittedBy: alice, CoveredVehicles: 1}), ErrApprovalRequired)
 }
 
 // Custody suspends the operator's commands over that car, with a logged
