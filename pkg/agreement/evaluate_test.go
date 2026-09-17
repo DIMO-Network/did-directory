@@ -50,7 +50,10 @@ func newFleet(t *testing.T, vehicle, controller string) *fleet {
 
 func (f *fleet) commit(key string, rec delegation.Record, at time.Time) string {
 	uri := "at://" + rec.From + "/" + delegation.TypeDelegation + "/" + key
-	f.records[uri] = &delegation.Stored{URI: uri, Record: rec, CommittedAt: at}
+	// CommittedBy is what the repository authenticated. A real org host sets it
+	// from the principal it authenticated; the record's own createdBy is only the
+	// audit copy, and one that names an unwitnessed author is refused.
+	f.records[uri] = &delegation.Stored{URI: uri, Record: rec, CommittedAt: at, CommittedBy: rec.CreatedBy}
 	return uri
 }
 
