@@ -146,14 +146,24 @@ func TestValidateTransition_RevokeSince(t *testing.T) {
 	revoke.Type = OpTypeRevokeSince
 	revoke.Prev = ptr("cid")
 	revoke.RotationKeys = []string{newKey}
+	// Same controller, next era: the revocation ends the era it revokes in.
+	revoke.ControlCommitment = ptr(testCommitment(t, "did:dimo:avis", 1))
 	revoke.RevokeSince = ptr(now.Add(-24 * time.Hour).Format(time.RFC3339))
 	revoke.EffectiveAt = ptr(now.Format(time.RFC3339))
 	require.NoError(t, ValidateUpdate(&revoke))
-	assert.NoError(t, ValidateTransition(head, state, &revoke, now), "rotating custody keys is allowed")
+	assert.NoError(t, ValidateTransition(head, state, &revoke, now), "rotating custody and re-committing is allowed")
 
 	inverted := revoke
 	inverted.RevokeSince = ptr(now.Add(time.Hour).Format(time.RFC3339))
 	assert.ErrorContains(t, ValidateUpdate(&inverted), "before effectiveAt")
+
+	uncommitted := revoke
+	uncommitted.ControlCommitment = nil
+	assert.ErrorContains(t, ValidateUpdate(&uncommitted), "new controlCommitment")
+
+	sameEra := revoke
+	sameEra.ControlCommitment = head.ControlCommitment
+	assert.ErrorContains(t, ValidateTransition(head, state, &sameEra, now), "different controlCommitment")
 
 	stale := revoke
 	stale.EffectiveAt = ptr(now.Add(-time.Hour).Format(time.RFC3339))
@@ -163,9 +173,13 @@ func TestValidateTransition_RevokeSince(t *testing.T) {
 	aliased.AlsoKnownAs = []string{"at://other"}
 	assert.ErrorContains(t, ValidateTransition(head, state, &aliased, now), "only rotate")
 
-	recommitted := revoke
-	recommitted.ControlCommitment = ptr(testCommitment(t, "did:dimo:attacker", 0))
-	assert.ErrorContains(t, ValidateTransition(head, state, &recommitted, now), "only rotate")
+	// The commitment is opaque, so the directory cannot tell a re-commit under the
+	// same controller from a covert handover. It does not have to: whoever holds
+	// the custody key could already transfer, and a grantee learns which happened
+	// from the opening it is given for the new era.
+	shaped := revoke
+	shaped.VerificationMethods = map[string]string{"signing": newKey}
+	assert.ErrorContains(t, ValidateUpdate(&shaped), "must not have verification methods")
 }
 
 func TestValidateTransition_RevokeSinceBoundedToCurrentEra(t *testing.T) {
@@ -181,6 +195,7 @@ func TestValidateTransition_RevokeSinceBoundedToCurrentEra(t *testing.T) {
 
 	revoke := transfer
 	revoke.Type = OpTypeRevokeSince
+	revoke.ControlCommitment = ptr(testCommitment(t, "did:dimo:buyer", 2))
 	revoke.EffectiveAt = ptr(now.Format(time.RFC3339))
 	revoke.RevokeSince = ptr(eraStart.Add(-time.Hour).Format(time.RFC3339))
 	assert.ErrorContains(t, ValidateTransition(&transfer, state, &revoke, now), "current era")
@@ -203,35 +218,129 @@ func TestResolveControlState_Eras(t *testing.T) {
 	transfer1.EffectiveAt = ptr(t1.Format(time.RFC3339))
 
 	issued := t1.Add(96 * time.Hour)
-	revokeA := transfer1
-	revokeA.Type = OpTypeRevokeSince
-	revokeA.EffectiveAt = ptr(issued.Format(time.RFC3339))
-	revokeA.RevokeSince = ptr(t1.Add(72 * time.Hour).Format(time.RFC3339))
-
-	revokeB := revokeA
-	revokeB.RevokeSince = ptr(t1.Add(24 * time.Hour).Format(time.RFC3339))
+	revoke := transfer1
+	revoke.Type = OpTypeRevokeSince
+	revoke.ControlCommitment = ptr(testCommitment(t, "did:dimo:hertz", 2))
+	revoke.EffectiveAt = ptr(issued.Format(time.RFC3339))
+	revoke.RevokeSince = ptr(t1.Add(72 * time.Hour).Format(time.RFC3339))
 
 	transfer2 := transfer1
-	transfer2.ControlCommitment = ptr(testCommitment(t, "did:dimo:buyer", 2))
+	transfer2.Type = OpTypeTransfer
+	transfer2.ControlCommitment = ptr(testCommitment(t, "did:dimo:buyer", 3))
 	transfer2.EffectiveAt = ptr(t2.Format(time.RFC3339))
 
-	state := ResolveControlState("did:dimo:veh", []Operation{*genesis, transfer1, revokeA, revokeB, transfer2})
-	require.Len(t, state.Eras, 3)
+	state := ResolveControlState("did:dimo:veh", []Operation{*genesis, transfer1, revoke, transfer2})
+	require.Len(t, state.Eras, 4)
 
 	assert.Nil(t, state.Eras[0].Start)
 	assert.Equal(t, t1, *state.Eras[0].End)
 	assert.Equal(t, *genesis.ControlCommitment, state.Eras[0].Commitment)
 
+	// The revocation closes the era it was issued in and records the window.
 	assert.Equal(t, t1, *state.Eras[1].Start)
-	assert.Equal(t, t2, *state.Eras[1].End)
-	require.Len(t, state.Eras[1].Revocations, 2)
-	assert.True(t, state.Eras[1].Revoked(t1.Add(48*time.Hour)))
-	assert.False(t, state.Eras[1].Revoked(issued.Add(time.Second)), "grants after the revocation are valid")
-	assert.False(t, state.Eras[1].Revoked(t1.Add(time.Hour)), "grants before the compromise are valid")
+	assert.Equal(t, issued, *state.Eras[1].End)
+	require.Len(t, state.Eras[1].Revocations, 1)
+	assert.True(t, state.Eras[1].Revoked(t1.Add(80*time.Hour)))
+	assert.False(t, state.Eras[1].Revoked(t1.Add(time.Hour)), "delegations committed before the compromise are valid")
 
-	assert.Equal(t, uint64(2), state.Current().Number)
+	// The new era starts where the window ends, under the same controller, and
+	// carries the window forward: the window filters on commit time, so a
+	// delegation committed inside it must stay void in the era that follows.
+	assert.Equal(t, uint64(2), state.Eras[2].Number)
+	assert.Equal(t, issued, *state.Eras[2].Start)
+	assert.Equal(t, t2, *state.Eras[2].End)
+	require.Len(t, state.Eras[2].Revocations, 1)
+	assert.True(t, state.Eras[2].Revoked(t1.Add(80*time.Hour)))
+	assert.False(t, state.Eras[2].Revoked(issued.Add(time.Second)), "grants after the revocation are valid")
+
+	assert.Equal(t, uint64(3), state.Current().Number)
 	assert.Nil(t, state.Current().End)
 	assert.Empty(t, state.Current().Revocations)
+	assert.False(t, state.Deactivated)
+}
+
+// A revocation window cannot be enforced against a timestamp the signer chooses.
+// A stolen key backdates effectiveAt to before the window, or forward past it,
+// and the SACD verifies either way — so ending the era is what has to revoke it.
+func TestResolveControlState_RevokeSinceEndsTheEra(t *testing.T) {
+	compromise := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	issued := compromise.Add(24 * time.Hour)
+	genesis := controlledGenesis(t)
+
+	revoke := *genesis
+	revoke.Type = OpTypeRevokeSince
+	revoke.ControlCommitment = ptr(testCommitment(t, "did:dimo:avis", 1))
+	revoke.RevokeSince = ptr(compromise.Format(time.RFC3339))
+	revoke.EffectiveAt = ptr(issued.Format(time.RFC3339))
+
+	state := ResolveControlState("did:dimo:veh", []Operation{*genesis, revoke})
+
+	require.Len(t, state.Eras, 2)
+	assert.Equal(t, uint64(1), state.Current().Number)
+	assert.Equal(t, *revoke.ControlCommitment, state.Current().Commitment)
+	assert.Equal(t, issued, *state.Eras[0].End, "the revoked era is closed, not left open")
+	assert.NotEqual(t, *genesis.ControlCommitment, state.Current().Commitment,
+		"an opening for the revoked era must not open the new one")
+}
+
+func TestResolveControlState_TombstoneClosesTheEra(t *testing.T) {
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	genesis := controlledGenesis(t)
+	tomb := Operation{Type: OpTypeTombstone, Prev: ptr("cid"), EffectiveAt: ptr(at.Format(time.RFC3339)), Sig: "sig"}
+
+	state := ResolveControlState("did:dimo:veh", []Operation{*genesis, tomb})
+
+	assert.True(t, state.Deactivated)
+	assert.Nil(t, state.Current(), "a deactivated DID has no controller of record")
+	require.Len(t, state.Eras, 1)
+	assert.Equal(t, at, *state.Eras[0].End, "the final era must not stay open")
+}
+
+func TestValidateTransition_TombstoneOfControlledDIDNeedsATimestamp(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	head := controlledGenesis(t)
+	state := ResolveControlState("did:dimo:veh", []Operation{*head})
+
+	bare := &Operation{Type: OpTypeTombstone, Prev: ptr("cid"), Sig: "sig"}
+	assert.ErrorContains(t, ValidateTransition(head, state, bare, now), "requires effectiveAt")
+
+	timed := *bare
+	timed.EffectiveAt = ptr(now.Format(time.RFC3339))
+	require.NoError(t, ValidateUpdate(&timed))
+	assert.NoError(t, ValidateTransition(head, state, &timed, now))
+
+	backdated := *bare
+	backdated.EffectiveAt = ptr(now.Add(-time.Hour).Format(time.RFC3339))
+	assert.ErrorContains(t, ValidateTransition(head, state, &backdated, now), "within")
+
+	// An uncontrolled DID has no era to close, so it needs no timestamp.
+	_, k := generateTestKey(t)
+	person := &Operation{Type: OpTypeCreate, RotationKeys: []string{k}, VerificationMethods: map[string]string{"signing": k}}
+	assert.NoError(t, ValidateTransition(person, ResolveControlState("did:dimo:person", []Operation{*person}), bare, now))
+}
+
+// Resolution runs over whatever the store holds. A hand-inserted row, a restore
+// or a future relaxation of validation must not panic GET /:did, /:did/data,
+// /:did/control and POST /:did, all of which resolve control state.
+func TestResolveControlState_MalformedRowsDoNotPanic(t *testing.T) {
+	genesis := controlledGenesis(t)
+	at := ptr(time.Now().UTC().Format(time.RFC3339))
+
+	transferNoCommitment := Operation{Type: OpTypeTransfer, EffectiveAt: at, Prev: ptr("cid")}
+	revokeNoCommitment := Operation{
+		Type:        OpTypeRevokeSince,
+		EffectiveAt: at,
+		RevokeSince: ptr(time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)),
+		Prev:        ptr("cid"),
+	}
+	unknown := Operation{Type: "dimo_something_new", Prev: ptr("cid")}
+
+	assert.NotPanics(t, func() {
+		state := ResolveControlState("did:dimo:veh", []Operation{
+			*genesis, transferNoCommitment, revokeNoCommitment, unknown,
+		})
+		assert.Equal(t, uint64(0), state.Current().Number, "malformed rows are ignored, not applied")
+	})
 }
 
 func TestResolveControlState_Uncontrolled(t *testing.T) {

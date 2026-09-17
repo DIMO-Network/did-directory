@@ -21,10 +21,20 @@ const (
 	// starts a new control era at EffectiveAt.
 	OpTypeTransfer = "dimo_transfer"
 
-	// OpTypeRevokeSince records a compromise window [RevokeSince, EffectiveAt] in
-	// the current era: every grant or delegation rooted in this era's control and
-	// committed inside the window is invalid. It may rotate the custody keys in the
-	// same operation; nothing else about the DID state may change.
+	// OpTypeRevokeSince records a compromise window [RevokeSince, EffectiveAt] and
+	// closes the current era: every grant or delegation rooted in this era's
+	// control and committed inside the window is invalid, and every SACD bound to
+	// the closed era stops verifying.
+	//
+	// It ends the era because an SACD is a bearer document with no
+	// repository-witnessed commit time: its effectiveAt is chosen by whoever holds
+	// the signing key, so a thief can place a stolen grant on either side of any
+	// window. Delegations, which do carry a witnessed CommittedAt, keep their
+	// pre-window history through the era intervals they already resolve.
+	//
+	// The operation re-commits control for the next era under the same controller
+	// and may rotate the custody keys at the same time; nothing else about the DID
+	// state may change.
 	OpTypeRevokeSince = "dimo_revoke_since"
 )
 
@@ -189,6 +199,9 @@ func ValidateUpdate(op *Operation) error {
 		if len(op.RotationKeys) == 0 {
 			return errors.New("revoke_since must keep at least one rotation key")
 		}
+		if op.ControlCommitment == nil {
+			return errors.New("revoke_since must set a new controlCommitment: it starts a new era")
+		}
 		since, err := parseTimestamp(op.RevokeSince, "revokeSince")
 		if err != nil {
 			return err
@@ -202,6 +215,14 @@ func ValidateUpdate(op *Operation) error {
 		}
 		return validateStateShape(op)
 	case OpTypeTombstone:
+		if op.RevokeSince != nil {
+			return errors.New("tombstone must not set revokeSince")
+		}
+		if op.EffectiveAt != nil {
+			if _, err := parseTimestamp(op.EffectiveAt, "effectiveAt"); err != nil {
+				return err
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown operation type %q", op.Type)
@@ -244,8 +265,11 @@ func ValidateTransition(head *Operation, state *control.State, op *Operation, no
 		if cur == nil || !head.IsControlled() {
 			return errors.New("revoke_since requires a controlled DID")
 		}
-		if !sameStateExceptRotationKeys(head, op) {
-			return errors.New("revoke_since may only rotate rotationKeys")
+		if !sameStateExceptCustody(head, op) {
+			return errors.New("revoke_since may only rotate rotationKeys and re-commit control")
+		}
+		if *op.ControlCommitment == *head.ControlCommitment {
+			return errors.New("revoke_since must set a different controlCommitment: it starts a new era")
 		}
 		issued, _ := parseTimestamp(op.EffectiveAt, "effectiveAt")
 		if err := withinSkew(issued, now, "effectiveAt"); err != nil {
@@ -258,6 +282,22 @@ func ValidateTransition(head *Operation, state *control.State, op *Operation, no
 		return nil
 
 	case OpTypeTombstone:
+		// A controlled DID must timestamp its deactivation, so that resolution can
+		// close the final era. Without an end the era reads as live forever, and
+		// grants over a scrapped or stolen asset keep verifying.
+		if head.IsControlled() {
+			at, err := parseTimestamp(op.EffectiveAt, "effectiveAt")
+			if err != nil {
+				return fmt.Errorf("deactivating a controlled DID requires effectiveAt: %w", err)
+			}
+			if err := withinSkew(at, now, "effectiveAt"); err != nil {
+				return err
+			}
+			cur := state.Current()
+			if cur != nil && cur.Start != nil && at.Before(*cur.Start) {
+				return fmt.Errorf("effectiveAt must be within the current era (starts %s)", cur.Start.Format(time.RFC3339))
+			}
+		}
 		return nil
 
 	default:
@@ -279,7 +319,10 @@ func ResolveControlState(didStr string, ops []Operation) *control.State {
 		case OpTypeTransfer:
 			cur := state.Current()
 			at, err := parseTimestamp(op.EffectiveAt, "effectiveAt")
-			if cur == nil || err != nil {
+			// Submission validation requires a commitment, but resolution runs over
+			// whatever the store holds: a hand-inserted row or a restore must not
+			// panic every read of this DID.
+			if cur == nil || err != nil || op.ControlCommitment == nil {
 				continue
 			}
 			cur.End = &at
@@ -292,10 +335,33 @@ func ResolveControlState(didStr string, ops []Operation) *control.State {
 			cur := state.Current()
 			since, err1 := parseTimestamp(op.RevokeSince, "revokeSince")
 			issued, err2 := parseTimestamp(op.EffectiveAt, "effectiveAt")
-			if cur == nil || err1 != nil || err2 != nil {
+			if cur == nil || err1 != nil || err2 != nil || op.ControlCommitment == nil {
 				continue
 			}
 			cur.Revocations = append(cur.Revocations, control.Revocation{From: since, To: issued})
+			cur.End = &issued
+			// The window travels into the new era as well. It filters on commit
+			// time, not on which era a record names, so a delegation committed
+			// inside the window must stay void even though the controller has
+			// published an opening for the era that follows it.
+			state.Eras = append(state.Eras, control.Era{
+				Number:      cur.Number + 1,
+				Start:       &issued,
+				Commitment:  *op.ControlCommitment,
+				Revocations: slices.Clone(cur.Revocations),
+			})
+		case OpTypeTombstone:
+			// Deactivation is terminal: close the final era so nothing reads as
+			// live, and mark the state so State.Current reports no controller.
+			if cur := state.Current(); cur != nil && cur.End == nil {
+				if at, err := parseTimestamp(op.EffectiveAt, "effectiveAt"); err == nil {
+					cur.End = &at
+				}
+			}
+			state.Deactivated = true
+		default:
+			// Unknown types never reach the store: ValidateCreate and ValidateUpdate
+			// reject them on submission. Ignoring one here keeps resolution total.
 		}
 	}
 	return state
@@ -352,9 +418,12 @@ func equalCommitment(a, b *string) bool {
 	return *a == *b
 }
 
-func sameStateExceptRotationKeys(a, b *Operation) bool {
+// sameStateExceptCustody reports whether two operations describe the same DID
+// state apart from the custody material — the rotation keys and the control
+// commitment — which dimo_revoke_since is allowed to replace.
+func sameStateExceptCustody(a, b *Operation) bool {
 	return maps.Equal(a.VerificationMethods, b.VerificationMethods) &&
 		slices.Equal(a.AlsoKnownAs, b.AlsoKnownAs) &&
 		maps.Equal(a.Services, b.Services) &&
-		equalCommitment(a.ControlCommitment, b.ControlCommitment)
+		(a.ControlCommitment == nil) == (b.ControlCommitment == nil)
 }

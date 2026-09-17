@@ -6,9 +6,12 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,13 +143,15 @@ func TestControlFlow(t *testing.T) {
 	status, _ = f.submit(vehicle, stale)
 	assert.Equal(t, http.StatusBadRequest, status)
 
-	// Buyer's key is compromised: record a window and rotate custody.
+	// Buyer's key is compromised: record a window, re-commit control for the next
+	// era under the same controller, and rotate custody in the same operation.
 	rotated, rotatedDIDKey := f.key()
 	issued := time.Now().UTC().Truncate(time.Second).Add(time.Second)
+	era2Commitment := f.commitment("did:dimo:buyer", 2)
 	revoke := f.sign(buyerCustody, &did.Operation{
 		Type:              did.OpTypeRevokeSince,
 		RotationKeys:      []string{rotatedDIDKey},
-		ControlCommitment: transfer.ControlCommitment,
+		ControlCommitment: &era2Commitment,
 		RevokeSince:       ptr(transferAt.Format(time.RFC3339)),
 		EffectiveAt:       ptr(issued.Format(time.RFC3339)),
 		Prev:              &headCID,
@@ -155,28 +160,141 @@ func TestControlFlow(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, body)
 	headCID = body["cid"].(string)
 
+	// Re-committing is required: an era that stayed open could not revoke an SACD,
+	// whose effectiveAt is chosen by whoever holds the signing key.
+	sameEra := f.sign(rotated, &did.Operation{
+		Type:              did.OpTypeRevokeSince,
+		RotationKeys:      []string{rotatedDIDKey},
+		ControlCommitment: &era2Commitment,
+		RevokeSince:       ptr(issued.Format(time.RFC3339)),
+		EffectiveAt:       ptr(issued.Add(time.Second).Format(time.RFC3339)),
+		Prev:              &headCID,
+	})
+	status, body = f.submit(vehicle, sameEra)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, body["error"], "different controlCommitment")
+
 	var state control.State
 	require.Equal(t, http.StatusOK, f.get("/"+vehicle+"/control", &state))
-	require.Len(t, state.Eras, 2)
+	require.Len(t, state.Eras, 3)
 	assert.Equal(t, transferAt, *state.Eras[0].End)
 	assert.Equal(t, transferAt, *state.Eras[1].Start)
+	assert.Equal(t, issued, *state.Eras[1].End, "the compromised era is closed")
 	require.Len(t, state.Eras[1].Revocations, 1)
 	assert.True(t, state.Eras[1].Revoked(transferAt))
-	assert.False(t, state.Eras[1].Revoked(issued.Add(time.Second)))
+	assert.Equal(t, uint64(2), state.Current().Number)
+	assert.Equal(t, issued, *state.Current().Start)
+	assert.False(t, state.Current().Revoked(issued.Add(time.Second)))
+	assert.True(t, state.Current().Revoked(transferAt),
+		"the window is carried forward: it filters on commit time, not on which era a record names")
 
-	// Deactivation is terminal.
-	tomb := f.sign(rotated, &did.Operation{Type: did.OpTypeTombstone, Prev: &headCID})
+	// Deactivation is terminal, and it closes the final era.
+	deactivatedAt := time.Now().UTC().Truncate(time.Second).Add(2 * time.Second)
+	tomb := f.sign(rotated, &did.Operation{
+		Type:        did.OpTypeTombstone,
+		EffectiveAt: ptr(deactivatedAt.Format(time.RFC3339)),
+		Prev:        &headCID,
+	})
 	status, body = f.submit(vehicle, tomb)
 	require.Equal(t, http.StatusOK, status, body)
 	after := f.sign(rotated, &did.Operation{
 		Type:              did.OpTypeCreate,
 		RotationKeys:      []string{rotatedDIDKey},
-		ControlCommitment: transfer.ControlCommitment,
+		ControlCommitment: &era2Commitment,
 		Prev:              ptr(body["cid"].(string)),
 	})
 	status, body = f.submit(vehicle, after)
 	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Contains(t, body["error"], "deactivated")
+
+	// GET /:did reports 410, so GET /:did/control must not still show a live era.
+	var gone map[string]any
+	assert.Equal(t, http.StatusGone, f.get("/"+vehicle, &gone))
+
+	state = control.State{}
+	require.Equal(t, http.StatusOK, f.get("/"+vehicle+"/control", &state))
+	assert.True(t, state.Deactivated, "control state must record the tombstone")
+	assert.Nil(t, state.Current(), "a deactivated vehicle has no controller of record")
+	require.Len(t, state.Eras, 3)
+	assert.Equal(t, deactivatedAt, *state.Eras[2].End, "the final era must not stay open")
+}
+
+// A controlled DID cannot be deactivated without a timestamp: there would be no
+// time at which to close its final era.
+func TestTombstoneOfControlledDIDNeedsATimestamp(t *testing.T) {
+	f := newFlow(t)
+	custody, custodyDIDKey := f.key()
+	genesis := f.sign(custody, &did.Operation{
+		Type:              did.OpTypeCreate,
+		RotationKeys:      []string{custodyDIDKey},
+		AlsoKnownAs:       []string{},
+		Services:          map[string]did.Service{},
+		ControlCommitment: ptr(f.commitment("did:dimo:avis", 0)),
+	})
+	vehicle, err := did.DeriveFromGenesis(genesis)
+	require.NoError(t, err)
+	status, body := f.submit(vehicle, genesis)
+	require.Equal(t, http.StatusOK, status, body)
+
+	tomb := f.sign(custody, &did.Operation{Type: did.OpTypeTombstone, Prev: ptr(body["cid"].(string))})
+	status, body = f.submit(vehicle, tomb)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, body["error"], "requires effectiveAt")
+}
+
+// Two racing dimo_transfer posts both read the same head and both pass the
+// prev check. Without a compare-and-swap append they both land, the vehicle
+// resolves to two rival eras, and the legitimate controller — holding only the
+// era-1 opening — can never issue an SACD for it again.
+func TestConcurrentTransfersElectOneEra(t *testing.T) {
+	f := newFlow(t)
+	custody, custodyDIDKey := f.key()
+	genesis := f.sign(custody, &did.Operation{
+		Type:              did.OpTypeCreate,
+		RotationKeys:      []string{custodyDIDKey},
+		AlsoKnownAs:       []string{},
+		Services:          map[string]did.Service{},
+		ControlCommitment: ptr(f.commitment("did:dimo:avis", 0)),
+	})
+	vehicle, err := did.DeriveFromGenesis(genesis)
+	require.NoError(t, err)
+	status, body := f.submit(vehicle, genesis)
+	require.Equal(t, http.StatusOK, status, body)
+	headCID := body["cid"].(string)
+
+	const rivals = 8
+	at := time.Now().UTC().Truncate(time.Second)
+	ops := make([]*did.Operation, rivals)
+	for i := range rivals {
+		_, buyerCustodyDIDKey := f.key()
+		ops[i] = f.sign(custody, &did.Operation{
+			Type:              did.OpTypeTransfer,
+			RotationKeys:      []string{buyerCustodyDIDKey},
+			ControlCommitment: ptr(f.commitment(fmt.Sprintf("did:dimo:buyer%d", i), 1)),
+			EffectiveAt:       ptr(at.Format(time.RFC3339)),
+			Prev:              &headCID,
+		})
+	}
+
+	var wg sync.WaitGroup
+	var accepted atomic.Int64
+	for i := range rivals {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if code, _ := f.submit(vehicle, ops[i]); code == http.StatusOK {
+				accepted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(1), accepted.Load(), "only one transfer may extend the head")
+
+	var state control.State
+	require.Equal(t, http.StatusOK, f.get("/"+vehicle+"/control", &state))
+	assert.Len(t, state.Eras, 2, "rival transfers must not produce rival eras")
+	assert.Equal(t, uint64(1), state.Current().Number)
 }
 
 func TestUncontrolledDIDCannotTransfer(t *testing.T) {

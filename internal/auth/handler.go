@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
@@ -88,11 +89,22 @@ func (h *Handler) HandleAuth(c *fiber.Ctx) error {
 		})
 	}
 
-	// Verify challenge signature.
-	devDIDKey := "did:key:" + devDoc.VerificationMethod[0].PublicKeyMultibase
-	if err := dimocrypto.VerifyWithDIDKey(devDIDKey, challengeBytes, req.Signature); err != nil {
+	// Verify the challenge signature against every verification method the DID
+	// publishes. Taking only the first one makes a developer with two keys
+	// authenticate or get a 401 depending on the resolve's map ordering.
+	var sigErr error = errors.New("no verification method matched the signature")
+	verified := false
+	for _, vm := range devDoc.VerificationMethod {
+		if err := dimocrypto.VerifyWithDIDKey("did:key:"+vm.PublicKeyMultibase, challengeBytes, req.Signature); err == nil {
+			verified = true
+			break
+		} else {
+			sigErr = err
+		}
+	}
+	if !verified {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "challenge signature verification failed: " + err.Error(),
+			"error": "challenge signature verification failed: " + sigErr.Error(),
 		})
 	}
 
@@ -100,6 +112,18 @@ func (h *Handler) HandleAuth(c *fiber.Ctx) error {
 	var assets []AssetClaim
 	for i := range req.SACDs {
 		sacdDoc := &req.SACDs[i]
+
+		// The challenge proves only that the caller controls req.DID. Without this
+		// an SACD is a bearer token: anyone who copies one out of a log, a file or
+		// a support ticket mints a JWT carrying the asset's permissions.
+		if sacdDoc.Grantee != req.DID {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":      "SACD was not granted to the authenticated DID",
+				"sacd_index": i,
+				"grantee":    sacdDoc.Grantee,
+			})
+		}
+
 		if err := ValidateSACD(ctx, h.dirClient, sacdDoc); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error":      "SACD validation failed",

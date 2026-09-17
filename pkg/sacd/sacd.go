@@ -46,14 +46,25 @@ func (d *Document) UnsignedPayload() ([]byte, error) {
 // state at time now.
 //
 //   - Controlled asset: the grantor must be the controller of record for the
-//     asset's current era (proven by ControlProof), the SACD must be issued in
-//     that era, and it must not have become effective inside a revocation window.
-//     A transfer starts a new era and therefore invalidates the SACD.
+//     asset's current era (proven by ControlProof), and the SACD must be issued
+//     in that era. Anything that ends the era — a transfer, or a compromise
+//     window recorded with dimo_revoke_since — invalidates the SACD.
 //   - Uncontrolled asset (a person or org sharing its own resources): the grantor
 //     must be the asset.
+//   - Deactivated asset: nothing verifies.
+//
+// Era equality, not the revocation window, is what revokes an SACD. The window
+// filters on commit time, and an SACD has no witnessed commit time: effectiveAt
+// is chosen by whoever holds the signing key, so a stolen key can place a grant
+// on either side of any window. The effectiveAt checks below still run, and
+// still fail closed, but they are a floor and not the revocation mechanism.
 func (d *Document) Verify(grantorKeys []string, asset *control.State, now time.Time) error {
 	if d.Type != DocumentType {
 		return fmt.Errorf("unsupported sacd type %q (want %s)", d.Type, DocumentType)
+	}
+
+	if asset != nil && asset.Deactivated {
+		return fmt.Errorf("asset %s has been deactivated", d.Asset)
 	}
 
 	effectiveAt, err := time.Parse(time.RFC3339, d.EffectiveAt)

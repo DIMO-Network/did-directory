@@ -110,6 +110,42 @@ func TestVerify_RevocationWindow(t *testing.T) {
 	assert.NoError(t, f.doc.Verify([]string{f.didKey}, f.asset, now), "re-grant after the revocation is valid")
 }
 
+// The revocation window is checked against effectiveAt, a timestamp the signer
+// chooses. A stolen key can sit outside any window it likes — which is why
+// dimo_revoke_since ends the era rather than relying on the window alone.
+func TestVerify_RevocationWindowCannotBindAChosenTimestamp(t *testing.T) {
+	window := control.Revocation{From: now.Add(-2 * time.Hour), To: now.Add(-10 * time.Minute)}
+
+	backdated := newFixture(t)
+	backdated.asset.Eras[0].Revocations = []control.Revocation{window}
+	backdated.doc.EffectiveAt = now.Add(-3 * time.Hour).Format(time.RFC3339)
+	backdated.sign(t)
+	assert.NoError(t, backdated.doc.Verify([]string{backdated.didKey}, backdated.asset, now),
+		"a backdated effectiveAt walks straight past the window: the window is not the mechanism")
+
+	// Ending the era is. The thief's document names era 0; the directory has
+	// moved to era 1, whose commitment the thief's opening does not open.
+	ended := now.Add(-10 * time.Minute)
+	backdated.asset.Eras[0].End = &ended
+	backdated.asset.Eras = append(backdated.asset.Eras, control.Era{
+		Number:      1,
+		Start:       &ended,
+		Commitment:  "sha256:" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		Revocations: []control.Revocation{window},
+	})
+	assert.ErrorContains(t, backdated.doc.Verify([]string{backdated.didKey}, backdated.asset, now), "era")
+}
+
+// Deactivating a vehicle must stop its grants. Control state is what SACD
+// verification reads, and it never looked at the tombstone.
+func TestVerify_DeactivatedAsset(t *testing.T) {
+	f := newFixture(t)
+	require.NoError(t, f.doc.Verify([]string{f.didKey}, f.asset, now))
+
+	f.asset.Deactivated = true
+	assert.ErrorContains(t, f.doc.Verify([]string{f.didKey}, f.asset, now), "deactivated")
+}
+
 func TestVerify_SelfGrantForUncontrolledDID(t *testing.T) {
 	f := newFixture(t)
 	person := &control.State{DID: "did:dimo:owner"}

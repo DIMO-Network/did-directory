@@ -7,7 +7,7 @@ set -euo pipefail
 # Demonstrates the complete flow:
 #   Owner DID → Vehicle DID (controlled, no signing key) → Device DID
 #   (pairing SACD signed by the owner) → Developer access → Auth → JWT
-#   → Compromise window (revoke-since) → Sale (transfer to a new era)
+#   → Compromise window (revoke-since ends the era) → Sale (a new era)
 #
 # The vehicle never signs anything. Its controller of record signs as itself,
 # and the vehicle document only carries a commitment to who that is.
@@ -219,6 +219,10 @@ success "Developer access granted"
 header "Step 7: Developer Authenticates and Gets JWT"
 info "Developer presents their signed challenge + SACD to the auth service."
 info "Auth service verifies everything and returns a short-lived JWT."
+info ""
+info "The SACD is bound to its grantee: the challenge proves the caller controls"
+info "the DID it claims, and the auth service refuses any SACD granted to someone"
+info "else. That is why printing these documents here is safe to demo."
 
 AUTH_OUTPUT=$($DIMOCLI auth \
     -auth-url "$AUTH_URL" \
@@ -232,8 +236,13 @@ success "JWT issued — developer can now query telemetry-api"
 
 header "Step 8: Compromise Window (Custody Key Suspected Stolen)"
 info "The owner records a revocation window starting before the grants were"
-info "issued and rotates the custody key in the same operation. Grants issued"
-info "inside the window are invalid; grants issued afterwards are valid again."
+info "issued, rotates the custody key and re-commits control in one operation."
+info "That ends the era. Delegations keep the history they earned before the"
+info "window, because a repository witnesses when they were committed. An SACD"
+info "does not: its effectiveAt is chosen by whoever holds the signing key, so a"
+info "thief could date a stolen grant either side of the window. Ending the era"
+info "is what actually revokes them — every SACD from era 0 stops verifying, and"
+info "the owner re-issues in era 1."
 
 sleep 1
 COMPROMISE_SINCE=$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
@@ -244,7 +253,7 @@ step "Vehicle control state:"
 curl -s "$DIRECTORY_URL/$VEHICLE_DID/control" | python3 -m json.tool 2>/dev/null || true
 
 echo ""
-step "Verifying device SACD (should FAIL — issued inside the window)..."
+step "Verifying device SACD (should FAIL — the revocation ended its era)..."
 if $DIMOCLI sacd-verify -server "$DIRECTORY_URL" -file "$DEVICE_SACD" 2>&1; then
     fail "Device SACD should have been invalidated!"
     exit 1
@@ -254,7 +263,7 @@ fi
 
 sleep 1
 echo ""
-step "Re-pairing the device after the window..."
+step "Re-pairing the device in the new era..."
 $DIMOCLI sacd-grant \
     -server "$DIRECTORY_URL" \
     -grantor "$OWNER_DID" \
@@ -328,7 +337,7 @@ echo -e "    3. Aftermarket device got a DID with metadata (serial, firmware)"
 echo -e "    4. Owner (never the vehicle) paired the device via SACD with a control proof"
 echo -e "    5. Developer granted read access via SACD (replaces on-chain privileges)"
 echo -e "    6. Developer authenticated and received a JWT with asset permissions"
-echo -e "    7. Compromise window invalidated grants issued inside it; re-grant works after"
+echo -e "    7. A compromise window ended the era: every SACD from it died, re-grant works"
 echo -e "    8. Sale started a new era: old grants and the old owner lost authority"
 echo ""
 echo -e "  ${BOLD}Zero on-chain transactions. Pure cryptographic authorization.${NC}"
