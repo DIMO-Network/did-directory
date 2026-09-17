@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +40,8 @@ var (
 type memResolver struct {
 	records     map[string]*Stored
 	memberships map[string][]Membership // tag|vehicle
-	roles       map[string][]Stored     // org|member
+	custody     map[string][]CustodyPeriod
+	roles       map[string][]Stored // org|member
 	states      map[string]*control.State
 	openings    map[string]*control.Opening // vehicle|era|controller
 	parties     map[string]Party
@@ -49,6 +51,7 @@ func newResolver() *memResolver {
 	return &memResolver{
 		records:     map[string]*Stored{},
 		memberships: map[string][]Membership{},
+		custody:     map[string][]CustodyPeriod{},
 		roles:       map[string][]Stored{},
 		states:      map[string]*control.State{},
 		openings:    map[string]*control.Opening{},
@@ -80,6 +83,28 @@ func (m *memResolver) Record(_ context.Context, uri string) (*Stored, error) {
 
 func (m *memResolver) Memberships(_ context.Context, tag, vehicle string) ([]Membership, error) {
 	return m.memberships[tag+"|"+vehicle], nil
+}
+
+// TagSize counts the vehicles in the tag at time at, as an org host's coverage
+// index would.
+func (m *memResolver) TagSize(_ context.Context, tag string, at time.Time) (int, error) {
+	n := 0
+	for key, ms := range m.memberships {
+		if !strings.HasPrefix(key, tag+"|") {
+			continue
+		}
+		for _, mem := range ms {
+			if !at.Before(mem.JoinedAt) && (mem.LeftAt == nil || mem.LeftAt.After(at)) {
+				n++
+				break
+			}
+		}
+	}
+	return n, nil
+}
+
+func (m *memResolver) Custody(_ context.Context, vehicle, holder string) ([]CustodyPeriod, error) {
+	return m.custody[vehicle+"|"+holder], nil
 }
 
 func (m *memResolver) Roles(_ context.Context, org, member string) ([]Stored, error) {
@@ -159,6 +184,15 @@ func (m *memResolver) role(org, member string, covers Covers, abilities []string
 	key := org + "|" + member
 	m.roles[key] = append(m.roles[key], s)
 	return &m.roles[key][len(m.roles[key])-1]
+}
+
+// hold records a custody period: holder picked the vehicle up at from and
+// returned it at until, or still has it when until is nil.
+func (m *memResolver) hold(vehicle, holder string, from time.Time, until *time.Time) {
+	key := vehicle + "|" + holder
+	m.custody[key] = append(m.custody[key], CustodyPeriod{
+		Vehicle: vehicle, Holder: holder, From: from, Until: until,
+	})
 }
 
 func (m *memResolver) join(tag, vehicle, author string, joined time.Time, left *time.Time) {

@@ -66,6 +66,11 @@ type CommitContext struct {
 	From Party
 	// CoveredVehicles is the number of vehicles the record covers once committed.
 	CoveredVehicles int
+	// Role is the role record the author is writing under, when the author is not
+	// the issuing principal itself. Its constraints bound the shape of the write.
+	// Nil means the principal authored it directly, or holds no role that limits
+	// what it may issue.
+	Role *Record
 	// Approved reports whether the write carries a second approval.
 	Approved bool
 	// Policy in force; zero means DefaultPolicy.
@@ -109,6 +114,15 @@ func CheckCommit(rec *Record, cc CommitContext) error {
 	}
 	if rec.Type == TypeRole && !cc.From.CanHaveMembers() {
 		return errors.New("only a party that can have members may issue roles")
+	}
+	// A constrained role is the only bound on an unattended issuer such as a
+	// booking service, so the shape of what it writes is checked here as well as
+	// at evaluation: this is the error the writer sees, not the silent refusal
+	// weeks later.
+	if cc.Role != nil {
+		if err := cc.Role.Constraints.check(rec, cc.CoveredVehicles); err != nil {
+			return err
+		}
 	}
 	if reasons := ApprovalReasons(rec, cc.CoveredVehicles, policy); len(reasons) > 0 && !cc.Approved {
 		return fmt.Errorf("%w: %s", ErrApprovalRequired, strings.Join(reasons, "; "))
