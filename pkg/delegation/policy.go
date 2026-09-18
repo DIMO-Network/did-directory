@@ -34,10 +34,12 @@ type Policy struct {
 	// VehicleApprovalThreshold is the vehicle count above which a write needs a
 	// second approval.
 	VehicleApprovalThreshold int
-	// ApprovalForLiveAbilities requires a second approval for abilities that
-	// actuate the vehicle. Data writes are live too, but a device pairing is not
-	// the thing a pair of admins is protecting against.
-	ApprovalForLiveAbilities bool
+	// AllowUnapprovedActuation lets abilities that actuate the vehicle be granted
+	// without a second approval. Off by default, like every other permissive
+	// field here: a partial literal must not be able to switch a protection off
+	// by saying nothing. Data writes are live too, but a device pairing is not
+	// the thing a pair of admins is protecting against, so only actuation counts.
+	AllowUnapprovedActuation bool
 	// AllowIrrevocableFromNonOperator lets a party without attested operator
 	// status issue a grant only its recipient can revoke. Off by default:
 	// consumers keep the right to revoke.
@@ -51,7 +53,6 @@ func DefaultPolicy() Policy {
 	return Policy{
 		Name:                     "default",
 		VehicleApprovalThreshold: DefaultApprovalThreshold,
-		ApprovalForLiveAbilities: true,
 		MaxChainDepth:            MaxChainDepth,
 	}
 }
@@ -118,7 +119,7 @@ func ApprovalReasons(rec *Record, cc CommitContext) []string {
 	if cc.CoveredVehicles > policy.VehicleApprovalThreshold {
 		reasons = append(reasons, fmt.Sprintf("covers %d vehicles (threshold %d)", cc.CoveredVehicles, policy.VehicleApprovalThreshold))
 	}
-	if policy.ApprovalForLiveAbilities {
+	if !policy.AllowUnapprovedActuation {
 		for _, a := range rec.Abilities {
 			if IsActuating(a) {
 				reasons = append(reasons, "grants live ability "+a)

@@ -126,3 +126,20 @@ func TestClassOf_WritesAreLive(t *testing.T) {
 		From: Party{Kind: KindOrg, Operator: true}, CoveredVehicles: 1,
 	}), ErrApprovalRequired)
 }
+
+// Every permissive field here defaults to strict, so a partial literal cannot
+// switch a protection off by saying nothing.
+func TestPolicy_PartialLiteralStillRequiresApproval(t *testing.T) {
+	unlock := validRecord()
+	unlock.Abilities = []string{"command:unlock"}
+	org := Party{Kind: KindOrg, Operator: true}
+
+	partial := Policy{Name: "eu-consumer", VehicleApprovalThreshold: 100}
+	assert.ErrorIs(t, CheckCommit(&unlock, CommitContext{From: org, CoveredVehicles: 1, Policy: partial}),
+		ErrApprovalRequired, "a policy that says nothing about actuation still requires approval")
+
+	permissive := partial
+	permissive.AllowUnapprovedActuation = true
+	assert.NoError(t, CheckCommit(&unlock, CommitContext{From: org, CoveredVehicles: 1, Policy: permissive}),
+		"switching it off is something a profile has to say out loud")
+}

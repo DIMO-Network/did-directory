@@ -30,7 +30,7 @@ type Grant struct {
 func CommitPolicy() delegation.Policy {
 	p := delegation.DefaultPolicy()
 	p.Name = "rental-booking"
-	p.ApprovalForLiveAbilities = false
+	p.AllowUnapprovedActuation = true
 	return p
 }
 
