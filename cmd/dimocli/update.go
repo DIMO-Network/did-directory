@@ -81,6 +81,7 @@ func runUpdate(args []string) {
 		VerificationMethods: currentOp.VerificationMethods,
 		AlsoKnownAs:         aliases,
 		Services:            services,
+		ControlCommitment:   currentOp.ControlCommitment,
 		Prev:                &prevCID,
 	}
 
@@ -103,6 +104,7 @@ func runUpdate(args []string) {
 		VerificationMethods: unsignedOp.VerificationMethods,
 		AlsoKnownAs:         unsignedOp.AlsoKnownAs,
 		Services:            unsignedOp.Services,
+		ControlCommitment:   unsignedOp.ControlCommitment,
 		Prev:                unsignedOp.Prev,
 		Sig:                 sig,
 	}

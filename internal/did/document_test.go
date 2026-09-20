@@ -2,11 +2,53 @@ package did
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Ranging over op.VerificationMethods and op.Services randomises their order per
+// resolve, which defeats any ETag or canonicalisation a relying party applies
+// and makes "the first verification method" mean a different key each time.
+func TestGenerateDocument_DeterministicOrder(t *testing.T) {
+	op := &Operation{
+		Type:                OpTypeCreate,
+		VerificationMethods: map[string]string{},
+		Services:            map[string]Service{},
+	}
+	for _, id := range []string{"signing", "auth", "recovery", "backup", "device", "passkey", "yubikey", "laptop"} {
+		_, didKey := generateTestKey(t)
+		op.VerificationMethods[id] = didKey
+		op.Services[id] = Service{Type: "DimoStorageNode", Endpoint: "https://" + id + ".dimo.zone"}
+	}
+
+	first, err := GenerateDocument("did:dimo:person", op, nil)
+	require.NoError(t, err)
+	want, err := json.Marshal(first)
+	require.NoError(t, err)
+
+	for i := range 50 {
+		doc, err := GenerateDocument("did:dimo:person", op, nil)
+		require.NoError(t, err)
+		got, err := json.Marshal(doc)
+		require.NoError(t, err)
+		require.Equal(t, string(want), string(got), "resolve %d reordered the document", i)
+	}
+
+	ids := make([]string, 0, len(first.VerificationMethod))
+	for _, vm := range first.VerificationMethod {
+		ids = append(ids, vm.ID)
+	}
+	assert.True(t, slices.IsSorted(ids), "verification methods must be ordered, got %v", ids)
+
+	svcIDs := make([]string, 0, len(first.Service))
+	for _, svc := range first.Service {
+		svcIDs = append(svcIDs, svc.ID)
+	}
+	assert.True(t, slices.IsSorted(svcIDs), "services must be ordered, got %v", svcIDs)
+}
 
 func TestGenerateDocument(t *testing.T) {
 	_, didKey := generateTestKey(t)
@@ -26,7 +68,7 @@ func TestGenerateDocument(t *testing.T) {
 		},
 	}
 
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
+	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "did:dimo:testidentifier12345678", doc.ID)
@@ -54,7 +96,7 @@ func TestGenerateDocument_Tombstone(t *testing.T) {
 		Type: OpTypeTombstone,
 	}
 
-	_, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
+	_, err := GenerateDocument("did:dimo:testidentifier12345678", op, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "deactivated")
 }
@@ -72,7 +114,7 @@ func TestGenerateDocument_EmptyAliases(t *testing.T) {
 		Services:     map[string]Service{},
 	}
 
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
+	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, nil)
 	require.NoError(t, err)
 
 	// Should be an empty slice, not nil.
@@ -95,56 +137,9 @@ func TestGenerateDocument_MultipleVerificationMethods(t *testing.T) {
 		Services:     map[string]Service{},
 	}
 
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
+	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, nil)
 	require.NoError(t, err)
 
 	assert.Len(t, doc.VerificationMethod, 2)
 }
 
-func TestGenerateDocument_SacdEpochZero(t *testing.T) {
-	_, didKey := generateTestKey(t)
-
-	op := &Operation{
-		Type:         OpTypeCreate,
-		RotationKeys: []string{didKey},
-		VerificationMethods: map[string]string{
-			"signing": didKey,
-		},
-		AlsoKnownAs: []string{},
-		Services:     map[string]Service{},
-	}
-
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 0)
-	require.NoError(t, err)
-
-	assert.Equal(t, uint64(0), doc.DimoSacdEpoch)
-	assert.Contains(t, doc.Context, "https://schema.dimo.zone/did/v1")
-
-	// Verify the JSON output includes the field.
-	data, err := json.Marshal(doc)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), `"dimoSacdEpoch":0`)
-}
-
-func TestGenerateDocument_SacdEpochBumped(t *testing.T) {
-	_, didKey := generateTestKey(t)
-
-	op := &Operation{
-		Type:         OpTypeCreate,
-		RotationKeys: []string{didKey},
-		VerificationMethods: map[string]string{
-			"signing": didKey,
-		},
-		AlsoKnownAs: []string{},
-		Services:     map[string]Service{},
-	}
-
-	doc, err := GenerateDocument("did:dimo:testidentifier12345678", op, 5)
-	require.NoError(t, err)
-
-	assert.Equal(t, uint64(5), doc.DimoSacdEpoch)
-
-	data, err := json.Marshal(doc)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), `"dimoSacdEpoch":5`)
-}

@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/internal/store"
@@ -93,8 +94,13 @@ func (h *SubmitHandler) handleCreate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// Store the genesis operation.
-	if err := h.store.Append(c.Context(), didParam, cid, op); err != nil {
+	// Store the genesis operation, but only while the log is still empty.
+	if err := h.store.AppendAfter(c.Context(), didParam, "", cid, op); err != nil {
+		if store.IsHeadChanged(err) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "DID already exists",
+			})
+		}
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to store genesis operation")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to store operation",
@@ -116,7 +122,7 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// Get the full operation log to resolve current state including sacdEpoch.
+	// Get the full operation log to resolve current state and control eras.
 	records, err := h.store.GetLog(c.Context(), didParam)
 	if err != nil {
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get operation log")
@@ -131,6 +137,12 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 	}
 
 	current := records[len(records)-1]
+
+	if current.Operation.IsTombstone() {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "invalid transition: DID has been deactivated",
+		})
+	}
 
 	// The prev field must reference the CID of the current latest operation.
 	if op.Prev == nil || *op.Prev != current.CID {
@@ -147,16 +159,16 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// Validate sacdEpoch if being changed.
+	// Validate the operation against the current state and control eras.
 	ops := make([]did.Operation, len(records))
 	for i, r := range records {
 		ops[i] = r.Operation
 	}
-	currentEpoch := did.ResolveSacdEpoch(ops)
+	state := did.ResolveControlState(didParam, ops)
 
-	if err := did.ValidateSacdEpoch(op, currentEpoch); err != nil {
+	if err := did.ValidateTransition(&current.Operation, state, op, time.Now().UTC()); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fmt.Sprintf("invalid sacdEpoch: %v", err),
+			"error": fmt.Sprintf("invalid transition: %v", err),
 		})
 	}
 
@@ -168,8 +180,16 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// Store the operation.
-	if err := h.store.Append(c.Context(), didParam, cid, op); err != nil {
+	// Store the operation, but only if the head is still the one validated
+	// against. Everything above — the prev check, the signature, the transition —
+	// was decided from `current`, and a concurrent writer may have moved on since.
+	if err := h.store.AppendAfter(c.Context(), didParam, current.CID, cid, op); err != nil {
+		if store.IsHeadChanged(err) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error":    "prev CID does not match current head",
+				"expected": current.CID,
+			})
+		}
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to store update operation")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to store operation",

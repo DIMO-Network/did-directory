@@ -57,13 +57,19 @@ func runRotate(args []string) {
 		os.Exit(1)
 	}
 
-	// Build update with new keys.
+	// Build update with new keys. A controlled DID only rotates its custody key;
+	// it never gains a verification method.
+	verificationMethods := map[string]string{"signing": newDIDKey}
+	if currentOp.IsControlled() {
+		verificationMethods = nil
+	}
 	unsignedOp := &did.UnsignedOperation{
 		Type:                did.OpTypeCreate,
 		RotationKeys:        []string{newDIDKey},
-		VerificationMethods: map[string]string{"signing": newDIDKey},
+		VerificationMethods: verificationMethods,
 		AlsoKnownAs:         currentOp.AlsoKnownAs,
 		Services:            currentOp.Services,
+		ControlCommitment:   currentOp.ControlCommitment,
 		Prev:                &prevCID,
 	}
 
@@ -86,6 +92,7 @@ func runRotate(args []string) {
 		VerificationMethods: unsignedOp.VerificationMethods,
 		AlsoKnownAs:         unsignedOp.AlsoKnownAs,
 		Services:            unsignedOp.Services,
+		ControlCommitment:   unsignedOp.ControlCommitment,
 		Prev:                unsignedOp.Prev,
 		Sig:                 sig,
 	}

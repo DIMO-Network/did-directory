@@ -2,18 +2,14 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
-	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/pkg/client"
+	"github.com/DIMO-Network/did-directory/pkg/control"
 )
 
 func runCreate(args []string) {
@@ -21,33 +17,15 @@ func runCreate(args []string) {
 	server := fs.String("server", defaultServer(), "directory server URL")
 	service := fs.String("service", "", "service endpoints as id=type:endpoint (comma-separated)")
 	alias := fs.String("alias", "", "also-known-as aliases (comma-separated)")
-	rotationKeyDID := fs.String("rotation-key", "", "external rotation key (did:key format) to control this DID (e.g., owner's key for a vehicle DID)")
+	controller := fs.String("controller", "", "controller of record DID; creates a controlled asset DID (e.g., a vehicle) with no signing key")
 	fs.Parse(args)
 
-	// Generate a P-256 private key.
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// Generate a P-256 private key. For a controlled DID this is the per-vehicle
+	// custody key held by the controller; it only authorizes DID operations.
+	privKey, didKey, err := newKey()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error generating key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Encode public key as did:key.
-	didKey, err := dimocrypto.EncodeDIDKey(&privKey.PublicKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encoding did:key: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Determine rotation keys. If --rotation-key is provided, it becomes the
-	// primary rotation key (highest authority), and the DID's own key is secondary.
-	// This lets an external entity (e.g., vehicle owner) control the DID.
-	rotationKeys := []string{didKey}
-	if *rotationKeyDID != "" {
-		if _, err := dimocrypto.DecodeDIDKey(*rotationKeyDID); err != nil {
-			fmt.Fprintf(os.Stderr, "Invalid --rotation-key: %v\n", err)
-			os.Exit(1)
-		}
-		rotationKeys = []string{*rotationKeyDID, didKey}
 	}
 
 	// Build services map.
@@ -77,24 +55,35 @@ func runCreate(args []string) {
 		aliases = strings.Split(*alias, ",")
 	}
 
-	// Build unsigned operation.
 	unsignedOp := &did.UnsignedOperation{
-		Type:                did.OpTypeCreate,
-		RotationKeys:        rotationKeys,
-		VerificationMethods: map[string]string{"signing": didKey},
-		AlsoKnownAs:         aliases,
-		Services:            services,
-		Prev:                nil,
+		Type:         did.OpTypeCreate,
+		RotationKeys: []string{didKey},
+		AlsoKnownAs:  aliases,
+		Services:     services,
+		Prev:         nil,
 	}
 
-	// Build signed operation for DID derivation (needs Operation type).
-	op := &did.Operation{
-		Type:                unsignedOp.Type,
-		RotationKeys:        unsignedOp.RotationKeys,
-		VerificationMethods: unsignedOp.VerificationMethods,
-		AlsoKnownAs:         unsignedOp.AlsoKnownAs,
-		Services:            unsignedOp.Services,
-		Prev:                unsignedOp.Prev,
+	var opening *control.Opening
+	if *controller != "" {
+		if !did.IsValidDID(*controller) {
+			fmt.Fprintf(os.Stderr, "Invalid --controller: %s\n", *controller)
+			os.Exit(1)
+		}
+		o, commitment, err := newCommitment(*controller, 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating control commitment: %v\n", err)
+			os.Exit(1)
+		}
+		unsignedOp.ControlCommitment = &commitment
+		opening = &o
+	} else {
+		unsignedOp.VerificationMethods = map[string]string{"signing": didKey}
+	}
+
+	op, err := signOp(privKey, unsignedOp)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Derive the DID.
@@ -103,20 +92,6 @@ func runCreate(args []string) {
 		fmt.Fprintf(os.Stderr, "Error deriving DID: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Sign the operation.
-	data, err := json.Marshal(unsignedOp)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling operation: %v\n", err)
-		os.Exit(1)
-	}
-
-	sig, err := dimocrypto.SignOperation(privKey, data)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error signing operation: %v\n", err)
-		os.Exit(1)
-	}
-	op.Sig = sig
 
 	// Submit to directory.
 	c := client.New(*server)
@@ -135,4 +110,13 @@ func runCreate(args []string) {
 	fmt.Printf("DID created: %s\n", resp.DID)
 	fmt.Printf("CID: %s\n", resp.CID)
 	fmt.Printf("Key stored at: %s\n", keyFilePath(derivedDID))
+
+	if opening != nil {
+		if err := SaveOpening(derivedDID, *opening); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save control opening: %v\n", err)
+		}
+		fmt.Printf("Controller of record: %s (era 0, not published)\n", opening.Controller)
+		fmt.Printf("Control commitment: %s\n", *unsignedOp.ControlCommitment)
+		fmt.Printf("Control opening stored at: %s\n", openingFilePath(derivedDID))
+	}
 }
