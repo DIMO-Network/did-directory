@@ -2,6 +2,7 @@ package agreement
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
@@ -12,6 +13,12 @@ type Grant struct {
 	// Key is stable across compilations: the same agreement state always yields
 	// the same keys, so a booking service upserts its records instead of
 	// accumulating a new set every time a booking changes.
+	//
+	// Its shape is bookingID:serviceCode:offerName[:incidentID]. The parts are
+	// joined with ':' and each is restricted to [A-Za-z0-9._-], which keeps the
+	// join injective and the whole key a valid record key: the host commits it
+	// as at://<org>/network.dimo.delegation/<Key>, and a slash in it would make
+	// that URI unparseable.
 	Key string
 	// Offer names the catalog offer that produced it.
 	Offer string
@@ -161,9 +168,13 @@ func (a *Agreement) grant(off *Offer, svc *Service, inc *Incident, now time.Time
 	// that is all a catalog can enforce, so two products may legitimately both
 	// call their grant "custody"; keying on the name alone would make a live
 	// two-service booking compile to nothing at all.
-	key := a.ID + "/" + svc.Code + "/" + off.Name
+	parts := []string{a.ID, svc.Code, off.Name}
 	if inc != nil {
-		key += "/" + inc.ID
+		parts = append(parts, inc.ID)
+	}
+	key, err := grantKey(parts)
+	if err != nil {
+		return nil, err
 	}
 	terms := off.Terms
 	if terms == "" {
@@ -245,4 +256,39 @@ func (a *Agreement) scope(s Scope, svc *Service, inc *Incident) (delegation.Wind
 	default:
 		return delegation.Window{}, fmt.Errorf("%w %q", ErrUnknownScope, s)
 	}
+}
+
+// KeySeparator joins the parts of a Grant.Key.
+const KeySeparator = ":"
+
+// grantKey joins the parts into a record key, refusing any part that would make
+// the key ambiguous or unaddressable. Refusing is the right failure: a key that
+// was escaped or hashed would still be stable, but an operator reading their own
+// store could no longer see which booking a record belongs to.
+func grantKey(parts []string) (string, error) {
+	for _, p := range parts {
+		if p == "" {
+			return "", fmt.Errorf("%w: empty part", ErrBadKey)
+		}
+		for i := 0; i < len(p); i++ {
+			if !isKeyPartByte(p[i]) {
+				return "", fmt.Errorf("%w: %q", ErrBadKey, p)
+			}
+		}
+	}
+	key := strings.Join(parts, KeySeparator)
+	if err := delegation.ValidateRKey(key); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrBadKey, err)
+	}
+	return key, nil
+}
+
+func isKeyPartByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '.', c == '_', c == '-':
+		return true
+	}
+	return false
 }

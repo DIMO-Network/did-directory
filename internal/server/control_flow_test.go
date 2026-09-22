@@ -160,8 +160,8 @@ func TestControlFlow(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, body)
 	headCID = body["cid"].(string)
 
-	// Re-committing is required: an era that stayed open could not revoke an SACD,
-	// whose effectiveAt is chosen by whoever holds the signing key.
+	// Re-committing is required: an era that stayed open would leave the old
+	// opening valid, and anything a thief proved with it would still verify.
 	sameEra := f.sign(rotated, &did.Operation{
 		Type:              did.OpTypeRevokeSince,
 		RotationKeys:      []string{rotatedDIDKey},
@@ -245,7 +245,7 @@ func TestTombstoneOfControlledDIDNeedsATimestamp(t *testing.T) {
 // Two racing dimo_transfer posts both read the same head and both pass the
 // prev check. Without a compare-and-swap append they both land, the vehicle
 // resolves to two rival eras, and the legitimate controller — holding only the
-// era-1 opening — can never issue an SACD for it again.
+// era-1 opening — can never prove control of it again.
 func TestConcurrentTransfersElectOneEra(t *testing.T) {
 	f := newFlow(t)
 	custody, custodyDIDKey := f.key()

@@ -796,14 +796,14 @@
   <section>
     <p class="eyebrow">Status</p>
     <h2>Where this stands</h2>
-    <p>Honest part: the org store, dauth and dq are not built. The directory layer, the grant engine, the rental compiler and the ODRL format are, the tests pass, and the demo runs end to end.</p>
+    <p>Honest part: the org store, dauth and dq are not built, and until the org store exists nothing runs the grant engine end to end. The directory layer, the grant engine, the rental compiler and the ODRL format are built and tested.</p>
     <div class="tablewrap">
       <table>
         <thead><tr><th>Piece</th><th>State</th></tr></thead>
         <tbody>
           <tr><td>commitments, eras, revocation windows</td><td>Built — <code>pkg/control</code>, directory operations, <code>GET /:did/control</code></td></tr>
           <tr><td>grants, narrowing, coverage</td><td>Built — <code>pkg/delegation</code>, about 87% test coverage</td></tr>
-          <tr><td>single-car grants (SACD v3)</td><td>Built — controller-signed, era-bound, carries a control proof</td></tr>
+          <tr><td>single-car grants</td><td>A delegation with <code>covers: {vehicle}</code>, same engine — the separate SACD document was dropped on 2026-09-22</td></tr>
           <tr><td>role constraints, custody narrowing</td><td>Built — an unattended booking service can issue one rental and not the fleet</td></tr>
           <tr><td>agreements, duties, the compiler</td><td>Built — <code>pkg/agreement</code>, 97% test coverage</td></tr>
           <tr><td>ODRL wire format</td><td>Built — <code>pkg/odrl</code>, lossless both ways</td></tr>

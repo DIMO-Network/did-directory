@@ -27,14 +27,3 @@ services:
         condition: service_healthy
     command: ["-settings", "/dev/null"]
 
-  auth-service:
-    build:
-      context: .
-      target: auth-service
-    environment:
-      DIRECTORY_URL: "http://directory:8080"
-      PORT: "8081"
-    ports:
-      - "8081:8081"
-    depends_on:
-      - directory

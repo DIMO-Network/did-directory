@@ -183,8 +183,8 @@ func TestCompiledGrantsEvaluate(t *testing.T) {
 		Validity:  span(1, 400),
 	}, day(1))
 
-	custodyURI := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1/rental/custody"
-	historyURI := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1/rental/history"
+	custodyURI := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1:rental:custody"
+	historyURI := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1:rental:history"
 
 	t.Run("renter can unlock during the booking", func(t *testing.T) {
 		cov, err := ev.Authorize(ctx, custodyURI, renter, "", car, []string{"command:unlock"}, day(11))
@@ -259,7 +259,7 @@ func TestInsurerGrantEvaluates(t *testing.T) {
 		f.commit(g.Key, g.Record, day(9))
 	}
 
-	uri := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1/waiver/insurer"
+	uri := "at://" + avis + "/" + delegation.TypeDelegation + "/bk-1:waiver:insurer"
 	cov, err := ev.Authorize(ctx, uri, insurer, "", car, []string{"events:read"}, day(20))
 	require.NoError(t, err, "the insurer bought a look at the customer's drive")
 

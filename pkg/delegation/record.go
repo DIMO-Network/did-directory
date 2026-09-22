@@ -405,10 +405,49 @@ func ParseURI(uri string) (authority, collection, rkey string, err error) {
 		return "", "", "", fmt.Errorf("URI must start with at://: %s", uri)
 	}
 	parts := strings.Split(rest, "/")
-	if len(parts) != 3 || !isDID(parts[0]) || parts[1] == "" || parts[2] == "" {
+	if len(parts) != 3 || !isDID(parts[0]) || parts[1] == "" {
 		return "", "", "", fmt.Errorf("URI must be at://<did>/<collection>/<rkey>: %s", uri)
 	}
+	if err := ValidateRKey(parts[2]); err != nil {
+		return "", "", "", fmt.Errorf("URI %s: %w", uri, err)
+	}
 	return parts[0], parts[1], parts[2], nil
+}
+
+// MaxRKeyLength is the atproto record-key length limit.
+const MaxRKeyLength = 512
+
+// ValidateRKey checks that s can be the record key of a repository record. The
+// rules are atproto's: 1 to 512 characters from [A-Za-z0-9._:~-], and neither
+// "." nor "..". Anything that builds a key — the agreement compiler, an org
+// host minting one — should check here rather than discover at commit time
+// that the key cannot be addressed.
+func ValidateRKey(s string) error {
+	if s == "" {
+		return errors.New("record key must not be empty")
+	}
+	if len(s) > MaxRKeyLength {
+		return fmt.Errorf("record key exceeds %d bytes", MaxRKeyLength)
+	}
+	if s == "." || s == ".." {
+		return fmt.Errorf("record key %q is reserved", s)
+	}
+	for i := 0; i < len(s); i++ {
+		if !isRKeyByte(s[i]) {
+			return fmt.Errorf("record key %q: byte %q is not allowed (want [A-Za-z0-9._:~-])", s, s[i])
+		}
+	}
+	return nil
+}
+
+func isRKeyByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '.', c == '_', c == ':', c == '~', c == '-':
+		return true
+	}
+	return false
 }
 
 func isDID(s string) bool {
