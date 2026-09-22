@@ -4,7 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
+	"encoding/base64"
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -23,7 +23,9 @@ func TestSignAndVerify_P256(t *testing.T) {
 	assert.NotEmpty(t, sig)
 
 	// Verify using the public key.
-	err = VerifySignature(&key.PublicKey, data, sig)
+	pub, err := FromECDSA(&key.PublicKey)
+	require.NoError(t, err)
+	err = VerifySignature(pub, data, sig)
 	assert.NoError(t, err)
 }
 
@@ -39,14 +41,20 @@ func TestSignAndVerify_Secp256k1(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, sig)
 
-	pub := &ecdsa.PublicKey{
-		Curve: secp256k1.S256(),
-		X:     privKey.PubKey().X(),
-		Y:     privKey.PubKey().Y(),
-	}
-
+	// The signature came from the standard library's generic ECDSA over the
+	// decred curve adaptor; verification goes through decred's own
+	// implementation, so this also checks the two agree.
+	pub := FromSecp256k1(privKey.PubKey())
 	err = VerifySignature(pub, data, sig)
 	assert.NoError(t, err)
+
+	err = VerifySignature(pub, []byte("other data"), sig)
+	assert.Error(t, err)
+
+	other, err := secp256k1.GeneratePrivateKey()
+	require.NoError(t, err)
+	err = VerifySignature(FromSecp256k1(other.PubKey()), data, sig)
+	assert.Error(t, err)
 }
 
 func TestVerify_WrongData(t *testing.T) {
@@ -58,7 +66,9 @@ func TestVerify_WrongData(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify with different data should fail.
-	err = VerifySignature(&key.PublicKey, []byte("tampered data"), sig)
+	pub, err := FromECDSA(&key.PublicKey)
+	require.NoError(t, err)
+	err = VerifySignature(pub, []byte("tampered data"), sig)
 	assert.Error(t, err)
 }
 
@@ -74,7 +84,9 @@ func TestVerify_WrongKey(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify with wrong key should fail.
-	err = VerifySignature(&key2.PublicKey, data, sig)
+	pub2, err := FromECDSA(&key2.PublicKey)
+	require.NoError(t, err)
+	err = VerifySignature(pub2, data, sig)
 	assert.Error(t, err)
 }
 
@@ -94,15 +106,28 @@ func TestVerifyWithDIDKey_P256(t *testing.T) {
 }
 
 func TestDecodeSignature_InvalidBase64(t *testing.T) {
-	_, _, err := DecodeSignature("not-valid-base64!!!", 32)
+	_, err := decodeSignatureBytes("not-valid-base64!!!", 32)
 	assert.Error(t, err)
 }
 
 func TestDecodeSignature_WrongLength(t *testing.T) {
-	// Create valid base64url but wrong length.
-	hash := sha256.Sum256([]byte("test"))
-	sig := hash[:16] // Too short.
-	_ = sig
-	_, _, err := DecodeSignature("AAAA", 32)
+	// Valid base64url, but not 64 bytes.
+	_, err := decodeSignatureBytes("AAAA", 32)
+	assert.Error(t, err)
+}
+
+func TestVerify_Secp256k1_ComponentOverflow(t *testing.T) {
+	privKey, err := secp256k1.GeneratePrivateKey()
+	require.NoError(t, err)
+	pub := FromSecp256k1(privKey.PubKey())
+
+	// r at 2^256-1 is above the group order and must be rejected rather
+	// than reduced.
+	sig := make([]byte, 64)
+	for i := range sig[:32] {
+		sig[i] = 0xff
+	}
+	sig[63] = 1
+	err = VerifySignature(pub, []byte("data"), base64.RawURLEncoding.EncodeToString(sig))
 	assert.Error(t, err)
 }

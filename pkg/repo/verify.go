@@ -1,9 +1,9 @@
 package repo
 
 import (
-	"crypto/ecdsa"
 	"fmt"
 
+	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
 )
 
@@ -18,12 +18,17 @@ type Head struct {
 }
 
 // VerifyLog checks an org's whole commit log offline: every signature verifies
-// against pub, every commit hashes to the CID the next one names, the sequence
+// against key, the org's #dimo_org public key as a did:key, every commit
+// hashes to the CID the next one names, the sequence
 // is unbroken from 1, every record key is addressable, every record is in
 // canonical form, and the operations replay without contradiction (a create
 // only where nothing is live, an update or tombstone only over something live).
 // It returns the state of every record key touched.
-func VerifyLog(did string, log []Committed, pub *ecdsa.PublicKey) (map[string]Head, error) {
+func VerifyLog(did string, log []Committed, key string) (map[string]Head, error) {
+	pub, err := dimocrypto.DecodeDIDKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("decode did:key: %w", err)
+	}
 	heads := map[string]Head{}
 	var seq int64
 	var prev string
@@ -47,7 +52,7 @@ func VerifyLog(did string, log []Committed, pub *ecdsa.PublicKey) (map[string]He
 		if err := delegation.ValidateRKey(c.RKey); err != nil {
 			return nil, fmt.Errorf("seq %d: %w", c.Seq, err)
 		}
-		if err := Verify(&c.Commit, pub); err != nil {
+		if err := verify(&c.Commit, pub); err != nil {
 			return nil, fmt.Errorf("seq %d: %w", c.Seq, err)
 		}
 		cid, err := c.Commit.CID()

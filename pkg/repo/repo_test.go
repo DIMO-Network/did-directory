@@ -25,6 +25,13 @@ func (s keySigner) PublicKey(context.Context, string) (string, error) {
 	return dimocrypto.EncodeDIDKey(&s.key.PublicKey)
 }
 
+func didKeyOf(t *testing.T, key *ecdsa.PrivateKey) string {
+	t.Helper()
+	didKey, err := dimocrypto.EncodeDIDKey(&key.PublicKey)
+	require.NoError(t, err)
+	return didKey
+}
+
 func newKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -129,7 +136,7 @@ func TestVerifyLog(t *testing.T) {
 	const did = "did:dimo:org"
 	log := signedLog(t, key, did)
 
-	heads, err := VerifyLog(did, log, &key.PublicKey)
+	heads, err := VerifyLog(did, log, didKeyOf(t, key))
 	require.NoError(t, err)
 	assert.Equal(t, Head{Seq: 3, Live: true}, heads["network.dimo.org.tag/fleet"])
 	assert.Equal(t, Head{Seq: 5, Live: true}, heads["network.dimo.delegation/3jzfcijpj2z2a"])
@@ -140,17 +147,17 @@ func TestVerifyLog(t *testing.T) {
 	require.NoError(t, err)
 	var decoded []Committed
 	require.NoError(t, json.Unmarshal(data, &decoded))
-	_, err = VerifyLog(did, decoded, &key.PublicKey)
+	_, err = VerifyLog(did, decoded, didKeyOf(t, key))
 	require.NoError(t, err)
 
 	// Another key does not verify it.
-	_, err = VerifyLog(did, log, &newKey(t).PublicKey)
+	_, err = VerifyLog(did, log, didKeyOf(t, newKey(t)))
 	assert.ErrorContains(t, err, "invalid signature")
 
 	tamper := func(name string, f func(l []Committed) []Committed, want string) {
 		t.Run(name, func(t *testing.T) {
 			l := append([]Committed(nil), signedLog(t, key, did)...)
-			_, err := VerifyLog(did, f(l), &key.PublicKey)
+			_, err := VerifyLog(did, f(l), didKeyOf(t, key))
 			assert.ErrorContains(t, err, want)
 		})
 	}
@@ -192,7 +199,7 @@ func TestVerifyLog(t *testing.T) {
 	}, "not in canonical form")
 
 	// A log for another DID, however well signed, is not this org's.
-	_, err = VerifyLog("did:dimo:other", log, &key.PublicKey)
+	_, err = VerifyLog("did:dimo:other", log, didKeyOf(t, key))
 	assert.ErrorContains(t, err, "belongs to")
 
 	// Replay contradictions: a create over a live record, an update of a dead one.
@@ -204,19 +211,19 @@ func TestVerifyLog(t *testing.T) {
 		return Committed{Commit: c, CID: cid}
 	}
 	dup := resign(log[0].Commit, log[len(log)-1].CID, 6)
-	_, err = VerifyLog(did, append(append([]Committed(nil), log...), dup), &key.PublicKey)
+	_, err = VerifyLog(did, append(append([]Committed(nil), log...), dup), didKeyOf(t, key))
 	assert.ErrorContains(t, err, "create over live record")
 
 	upd := log[2].Commit
 	upd.Collection, upd.RKey = "network.dimo.delegation", "3jzfcijpj2z2a"
 	l := append([]Committed(nil), log[:4]...)
 	l = append(l, resign(upd, log[3].CID, 5))
-	_, err = VerifyLog(did, l, &key.PublicKey)
+	_, err = VerifyLog(did, l, didKeyOf(t, key))
 	assert.ErrorContains(t, err, "which is not live")
 
 	// The head map lists every key touched, tombstoned ones included.
 	l = append([]Committed(nil), log[:4]...)
-	heads, err = VerifyLog(did, l, &key.PublicKey)
+	heads, err = VerifyLog(did, l, didKeyOf(t, key))
 	require.NoError(t, err)
 	keys := make([]string, 0, len(heads))
 	for k := range heads {
@@ -238,7 +245,7 @@ func TestCommitSigningExcludesSig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before, after)
 	assert.NotContains(t, string(before), `"sig"`)
-	require.NoError(t, Verify(&c, &key.PublicKey))
+	require.NoError(t, Verify(&c, didKeyOf(t, key)))
 
 	// The CID does cover the signature.
 	cid1, _ := c.CID()

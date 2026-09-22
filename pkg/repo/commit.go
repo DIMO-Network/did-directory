@@ -14,7 +14,6 @@ package repo
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,8 +122,17 @@ func Sign(ctx context.Context, signer Signer, c *Commit) error {
 	return nil
 }
 
-// Verify checks c.Sig against pub.
-func Verify(c *Commit, pub *ecdsa.PublicKey) error {
+// Verify checks c.Sig against key, the org's #dimo_org public key as a
+// did:key.
+func Verify(c *Commit, key string) error {
+	pub, err := dimocrypto.DecodeDIDKey(key)
+	if err != nil {
+		return fmt.Errorf("decode did:key: %w", err)
+	}
+	return verify(c, pub)
+}
+
+func verify(c *Commit, pub *dimocrypto.PublicKey) error {
 	if c.Sig == "" {
 		return errors.New("commit is not signed")
 	}
@@ -132,7 +140,7 @@ func Verify(c *Commit, pub *ecdsa.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	return dimocrypto.VerifySignature(pub, data, c.Sig)
+	return pub.Verify(data, c.Sig)
 }
 
 // Canonical returns v as canonical JSON: keys sorted bytewise, no insignificant
