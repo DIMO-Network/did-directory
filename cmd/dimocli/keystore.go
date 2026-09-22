@@ -40,6 +40,11 @@ func keyFilePath(did string) string {
 
 // SaveKey stores a private key to the keystore.
 func SaveKey(did string, key *ecdsa.PrivateKey) error {
+	return writeKey(keyFilePath(did), did, key)
+}
+
+// writeKey stores key as a KeyEntry at path, creating the keystore directory.
+func writeKey(path, did string, key *ecdsa.PrivateKey) error {
 	dir := keystoreDir()
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create keystore dir: %w", err)
@@ -62,7 +67,6 @@ func SaveKey(did string, key *ecdsa.PrivateKey) error {
 		return fmt.Errorf("marshal key entry: %w", err)
 	}
 
-	path := keyFilePath(did)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("write key file: %w", err)
 	}
@@ -72,7 +76,11 @@ func SaveKey(did string, key *ecdsa.PrivateKey) error {
 
 // LoadKey reads a private key from the keystore.
 func LoadKey(did string) (*ecdsa.PrivateKey, error) {
-	path := keyFilePath(did)
+	return readKey(keyFilePath(did))
+}
+
+// readKey parses the KeyEntry at path.
+func readKey(path string) (*ecdsa.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read key file %s: %w", path, err)

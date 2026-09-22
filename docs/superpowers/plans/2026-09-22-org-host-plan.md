@@ -115,7 +115,7 @@ Derived indexes for the resolver are plain btrees on `heads` joined to `commits`
 ## 5. Changes elsewhere
 
 **did-directory, before the host can exist:**
-- The CLI can set `#dimo_org` and `#dimo_org_host` on an org DID. `create` only writes a `signing` verification method and `update` only touches services today.
+- The CLI can set `#dimo_org` and `#dimo_org_host` on an org DID. **Done 2026-09-22:** `dimocli create --org [--org-key did:key] [--org-host URL]` publishes the commit key (generated into the keystore as `<did>.org.json`, or supplied by the host) and the `DimoOrgHost` service entry; `update --org-key | --new-org-key | --org-host` sets them on an existing DID; `rotate` keeps `#dimo_org`; `pubkey --org` prints it. Controlled DIDs refuse all three.
 - `pkg/client` gains nothing; the host uses `Control` and `Resolve`.
 - `pkg/agreement` gains a small client: compile, then `PUT` each grant and custody period to the host under the booking role, and tombstone the keys that dropped out. This is the booking SDK (decision F). It may move to its own repo later; nothing here depends on it.
 
@@ -130,7 +130,7 @@ Derived indexes for the resolver are plain btrees on `heads` joined to `commits`
 
 Each step ends with something runnable.
 
-1. **CLI org keys.** `dimocli` can create an org DID with `#dimo_org` and set `#dimo_org_host`. Half a day.
+1. **CLI org keys.** `dimocli` can create an org DID with `#dimo_org` and set `#dimo_org_host`. Half a day. **Done 2026-09-22** (§5).
 2. **Repository core.** Commits, signing, heads, tombstones, `ValidateRKey` on every write, in-memory and Postgres stores, `GET` for members. No checks yet beyond structure. Test: write, read back, verify the chain and every signature offline.
 3. **Resolver and `/authorize`.** Implement `delegation.Resolver` over the store and directory. Test: the Avis fixtures from `pkg/agreement/evaluate_test.go` replayed through HTTP produce the same coverage.
 4. **Write-time checks and approval.** Roles, `CheckCommit`, `CheckMembershipGrowth`, pending writes, second approval, `revokeAuthoredBy`. Test: the spec §13.1 table, action by action.
