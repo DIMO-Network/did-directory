@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -57,44 +56,11 @@ func runRotate(args []string) {
 		os.Exit(1)
 	}
 
-	// Build update with new keys. A controlled DID only rotates its custody key;
-	// it never gains a verification method.
-	verificationMethods := map[string]string{"signing": newDIDKey}
-	if currentOp.IsControlled() {
-		verificationMethods = nil
-	}
-	unsignedOp := &did.UnsignedOperation{
-		Type:                did.OpTypeCreate,
-		RotationKeys:        []string{newDIDKey},
-		VerificationMethods: verificationMethods,
-		AlsoKnownAs:         currentOp.AlsoKnownAs,
-		Services:            currentOp.Services,
-		ControlCommitment:   currentOp.ControlCommitment,
-		Prev:                &prevCID,
-	}
-
 	// Sign with OLD key.
-	data, err := json.Marshal(unsignedOp)
+	op, err := signOp(oldKey, buildRotate(currentOp, prevCID, newDIDKey))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling operation: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-
-	sig, err := dimocrypto.SignOperation(oldKey, data)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error signing operation: %v\n", err)
-		os.Exit(1)
-	}
-
-	op := &did.Operation{
-		Type:                unsignedOp.Type,
-		RotationKeys:        unsignedOp.RotationKeys,
-		VerificationMethods: unsignedOp.VerificationMethods,
-		AlsoKnownAs:         unsignedOp.AlsoKnownAs,
-		Services:            unsignedOp.Services,
-		ControlCommitment:   unsignedOp.ControlCommitment,
-		Prev:                unsignedOp.Prev,
-		Sig:                 sig,
 	}
 
 	resp, err := c.Submit(ctx, *didStr, op)
@@ -111,4 +77,28 @@ func runRotate(args []string) {
 	fmt.Printf("Keys rotated for: %s\n", resp.DID)
 	fmt.Printf("CID: %s\n", resp.CID)
 	fmt.Printf("New key stored at: %s\n", keyFilePath(*didStr))
+}
+
+// buildRotate replaces the rotation key and the #signing verification method
+// with newDIDKey. Every other verification method stays: an org's #dimo_org
+// commit key belongs to the org host and is rotated separately. A controlled
+// DID only rotates its custody key; it never gains a verification method.
+func buildRotate(current *did.Operation, prevCID, newDIDKey string) *did.UnsignedOperation {
+	var vms map[string]string
+	if !current.IsControlled() {
+		vms = make(map[string]string, len(current.VerificationMethods)+1)
+		for k, v := range current.VerificationMethods {
+			vms[k] = v
+		}
+		vms["signing"] = newDIDKey
+	}
+	return &did.UnsignedOperation{
+		Type:                did.OpTypeCreate,
+		RotationKeys:        []string{newDIDKey},
+		VerificationMethods: vms,
+		AlsoKnownAs:         current.AlsoKnownAs,
+		Services:            current.Services,
+		ControlCommitment:   current.ControlCommitment,
+		Prev:                &prevCID,
+	}
 }

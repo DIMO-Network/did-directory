@@ -16,13 +16,6 @@ func defaultServer() string {
 	return "http://localhost:8080"
 }
 
-func defaultAuthServer() string {
-	if s := os.Getenv("AUTH_URL"); s != "" {
-		return s
-	}
-	return "http://localhost:8081"
-}
-
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -61,13 +54,14 @@ Usage:
   dimocli <command> [flags]
 
 Commands:
-  create       Create a new DID (--controller for a controlled asset such as a vehicle)
+  create       Create a new DID (--controller for a controlled asset such as a vehicle,
+               --org for an org with a #dimo_org commit key and --org-host)
   resolve      Resolve a DID to its document
-  update       Update a DID's service endpoints
+  update       Update a DID's service endpoints, #dimo_org key or #dimo_org_host
   rotate       Rotate a DID's keys
   transfer     Transfer a controlled DID to a new controller (starts a new era)
   revoke-since Record a compromise window and rotate the custody key
-  pubkey       Print the did:key public key for a local DID
+  pubkey       Print the did:key public key for a local DID (--org for its #dimo_org key)
 
 Environment:
   DIRECTORY_URL  Directory server URL (default: http://localhost:8080)

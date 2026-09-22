@@ -2,16 +2,81 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
-	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/pkg/client"
 )
+
+// updateOptions is everything runUpdate reads from its flags.
+type updateOptions struct {
+	Services string
+	Aliases  string
+	// OrgKey publishes the given did:key as #dimo_org; NewOrgKey generates one.
+	OrgKey    string
+	NewOrgKey bool
+	OrgHost   string
+}
+
+// updatePlan is a plc_operation update ready to sign, plus the generated
+// #dimo_org private key when --new-org-key asked for one.
+type updatePlan struct {
+	Op     *did.UnsignedOperation
+	OrgKey *ecdsa.PrivateKey
+}
+
+// buildUpdate applies the options on top of the current operation.
+func buildUpdate(current *did.Operation, prevCID string, opts updateOptions) (*updatePlan, error) {
+	services := make(map[string]did.Service, len(current.Services)+1)
+	for k, v := range current.Services {
+		services[k] = v
+	}
+	if err := parseServices(opts.Services, services); err != nil {
+		return nil, err
+	}
+	if opts.OrgHost != "" {
+		services = withOrgHost(services, opts.OrgHost)
+	}
+
+	aliases := current.AlsoKnownAs
+	if opts.Aliases != "" {
+		aliases = strings.Split(opts.Aliases, ",")
+	}
+
+	vms := current.VerificationMethods
+	choice := orgKeyChoice{Given: opts.OrgKey, Generate: opts.NewOrgKey}
+	var orgKey *ecdsa.PrivateKey
+	if choice.wanted() {
+		if current.IsControlled() {
+			return nil, errors.New("a controlled DID cannot carry #dimo_org: it has no verification methods")
+		}
+		didKey, priv, err := resolveOrgKey(choice)
+		if err != nil {
+			return nil, err
+		}
+		vms = withOrgKey(vms, didKey)
+		orgKey = priv
+	}
+
+	return &updatePlan{
+		Op: &did.UnsignedOperation{
+			Type:                did.OpTypeCreate,
+			RotationKeys:        current.RotationKeys,
+			VerificationMethods: vms,
+			AlsoKnownAs:         aliases,
+			Services:            services,
+			ControlCommitment:   current.ControlCommitment,
+			Prev:                &prevCID,
+		},
+		OrgKey: orgKey,
+	}, nil
+}
 
 func runUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
@@ -19,10 +84,17 @@ func runUpdate(args []string) {
 	didStr := fs.String("did", "", "DID to update (required)")
 	service := fs.String("service", "", "service endpoints as id=type:endpoint (comma-separated)")
 	alias := fs.String("alias", "", "also-known-as aliases (comma-separated)")
+	orgKey := fs.String("org-key", "", "did:key to publish as #dimo_org (the org host holds the private half)")
+	newOrgKey := fs.Bool("new-org-key", false, "generate a new #dimo_org commit signing key and store it in the keystore")
+	orgHost := fs.String("org-host", "", "org host URL, published as the #dimo_org_host service entry")
 	fs.Parse(args)
 
 	if *didStr == "" {
 		fmt.Fprintf(os.Stderr, "Error: --did is required\n")
+		os.Exit(1)
+	}
+	if *orgKey != "" && *newOrgKey {
+		fmt.Fprintf(os.Stderr, "Error: --org-key and --new-org-key are mutually exclusive\n")
 		os.Exit(1)
 	}
 
@@ -44,69 +116,22 @@ func runUpdate(args []string) {
 		os.Exit(1)
 	}
 
-	// Build services map, starting from current.
-	services := currentOp.Services
-	if services == nil {
-		services = make(map[string]did.Service)
-	}
-	if *service != "" {
-		for _, s := range strings.Split(*service, ",") {
-			parts := strings.SplitN(s, "=", 2)
-			if len(parts) != 2 {
-				fmt.Fprintf(os.Stderr, "Invalid service format: %s\n", s)
-				os.Exit(1)
-			}
-			typeParts := strings.SplitN(parts[1], ":", 2)
-			if len(typeParts) != 2 {
-				fmt.Fprintf(os.Stderr, "Invalid service value: %s\n", parts[1])
-				os.Exit(1)
-			}
-			services[parts[0]] = did.Service{
-				Type:     typeParts[0],
-				Endpoint: typeParts[1],
-			}
-		}
-	}
-
-	// Build aliases.
-	aliases := currentOp.AlsoKnownAs
-	if *alias != "" {
-		aliases = strings.Split(*alias, ",")
-	}
-
-	// Build unsigned operation.
-	unsignedOp := &did.UnsignedOperation{
-		Type:                did.OpTypeCreate,
-		RotationKeys:        currentOp.RotationKeys,
-		VerificationMethods: currentOp.VerificationMethods,
-		AlsoKnownAs:         aliases,
-		Services:            services,
-		ControlCommitment:   currentOp.ControlCommitment,
-		Prev:                &prevCID,
-	}
-
-	// Sign the operation.
-	data, err := json.Marshal(unsignedOp)
+	plan, err := buildUpdate(currentOp, prevCID, updateOptions{
+		Services:  *service,
+		Aliases:   *alias,
+		OrgKey:    *orgKey,
+		NewOrgKey: *newOrgKey,
+		OrgHost:   *orgHost,
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling operation: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	sig, err := dimocrypto.SignOperation(privKey, data)
+	op, err := signOp(privKey, plan.Op)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error signing operation: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-	}
-
-	op := &did.Operation{
-		Type:                unsignedOp.Type,
-		RotationKeys:        unsignedOp.RotationKeys,
-		VerificationMethods: unsignedOp.VerificationMethods,
-		AlsoKnownAs:         unsignedOp.AlsoKnownAs,
-		Services:            unsignedOp.Services,
-		ControlCommitment:   unsignedOp.ControlCommitment,
-		Prev:                unsignedOp.Prev,
-		Sig:                 sig,
 	}
 
 	resp, err := c.Submit(ctx, *didStr, op)
@@ -117,6 +142,18 @@ func runUpdate(args []string) {
 
 	fmt.Printf("DID updated: %s\n", resp.DID)
 	fmt.Printf("CID: %s\n", resp.CID)
+	if plan.OrgKey != nil {
+		if err := SaveOrgKey(*didStr, plan.OrgKey); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save org key: %v\n", err)
+		}
+		fmt.Printf("Org key stored at: %s\n", orgKeyFilePath(*didStr))
+	}
+	if *orgKey != "" || *newOrgKey {
+		fmt.Printf("Org commit key (#%s): %s\n", OrgKeyID, plan.Op.VerificationMethods[OrgKeyID])
+	}
+	if *orgHost != "" {
+		fmt.Printf("Org host (#%s): %s\n", OrgHostServiceID, *orgHost)
+	}
 }
 
 // getLatestCIDAndOp fetches the audit log and returns the latest CID and operation.
