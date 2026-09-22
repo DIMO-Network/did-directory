@@ -1,7 +1,7 @@
 # DIMO Orgs, Fleets & Delegation
 
 **Date:** 2026-09-16
-**Status:** Decisions recorded (§16). did-directory layer implemented on branch `feat/orgs-fleets-delegation` (§17). Org host, dauth and dq still to do.
+**Status:** Decisions recorded (§16, §19). did-directory layer merged (PR #6) and trimmed of the SACD path on 2026-09-22 (§17). Org host, dauth and dq still to do; the org host plan is `docs/superpowers/plans/2026-09-22-org-host-plan.md`.
 **Supersedes, in `2026-03-26-dimo-v2-identity-architecture-design.md`:** Layer 1.1 (Organizational Accounts), the grantor model of Layer 3 (SACDs), the epoch semantics of Layer 3.1, and "Fleet scaling" in Layer 5.
 **Evolves:** the 2026-06-12 fleet sharing decision (org smart account holder, off-chain credential hierarchy, no on-chain org node). That decision still holds for NFT-era vehicles. This spec is the did:dimo form of it.
 
@@ -233,7 +233,7 @@ A root is implicit for the controller: the controller holds every ability over i
 | Owner consent (dealer) | Owner → dealer org, scoped abilities, `purpose`, `redelegate: {mode: "allowlist", grantees: [...]}` or `none` (§9.2) |
 | Consumer app grant | Owner → developer DID, `covers: {vehicle}`. Same record type, no special consumer path. |
 
-**Party attributes, not entity type.** Policy keys off attested status, never off whether a DID is a person or an org. A sole proprietor with six cars on a peer-to-peer platform is an **operator**; a large company renting one car is a **consumer** in that transaction; and the same person is routinely both, in different agreements, at the same time. `delegation.Party` carries `Operator` and `ConsumerProtected`, and every rule below reads those.
+**Party attributes, not entity type.** Policy keys off attested status, never off whether a DID is a person or an org. A sole proprietor with six cars on a peer-to-peer platform is an **operator**; a large company renting one car is a **consumer** in that transaction; and the same person is routinely both, in different agreements, at the same time. `delegation.Party` carries `Operator`, and every rule below reads it. A `ConsumerProtected` flag was declared for jurisdictional consumer rules and removed on 2026-09-22 because nothing read it; it returns with its first rule.
 
 **Thresholds are policy, not constants.** Whether a consumer may sign away their right to revoke, how many vehicles one signature may cover, and what an operator may see during a rental vary by jurisdiction. `delegation.Policy` is a profile chosen from the agreement's governing law and passed to both the commit check and the evaluator. The engine enforces; the profile decides.
 
@@ -437,7 +437,7 @@ Grants activate on the **booking** window; the custody records **narrow** the da
 - **Unattended issuing needs its own policy profile.** No operator putting two admins behind every unlock grant can write thousands of bookings a day. The approval belongs one level up and happens once: a pair of admins signs the fleet delegation that permits exclusive redelegation, and everything compiled beneath it is bounded by that basis, by the booking role's constraints, and re-checked at evaluation. `agreement.CommitPolicy()` is that profile.
 - **A booking cannot be unbounded.** With neither an end to the booking window nor a return duty, compilation fails rather than issuing a live grant with no end. This is what stops a stale exclusive hold — a device that never synced its return — from locking a renter out forever.
 - **A device that never syncs cannot extend a window.** With no custody event and a returned booking, the fallback is the operator's own due-back time, never later.
-- **Grant keys are stable** across recompilations, so a booking service upserts rather than accumulating a record per state change. The shape is `bookingID/serviceCode/offerName[/incidentID]`; the service code is part of it because two line items sharing an offer name would otherwise collide into one key.
+- **Grant keys are stable** across recompilations, so a booking service upserts rather than accumulating a record per state change. The shape is `bookingID:serviceCode:offerName[:incidentID]`, each part drawn from `[A-Za-z0-9._-]`, so the key is a valid record key and the join is injective; an identifier outside that alphabet is refused (`ErrBadKey`) rather than escaped. The service code is part of it because two line items sharing an offer name would otherwise collide into one key.
 
 ### 12.5.1 Cancellation is a return, not an erasure
 
@@ -517,12 +517,7 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 
 ## 15. Migration and compatibility
 
-- **NFT-era vehicles.** The holder registry maps holder addresses (ZeroDev kernels for orgs) to org DIDs. Existing on-chain SACDs are read as roots or delegations from the holder. Removing token-exchange's owner shortcut for org-held NFTs still ships as decided on 2026-06-12.
-- **v2 SACD documents.** `dimo.sacd.v2` records with `grantor == asset == vehicle` are rejected once this ships. The prototype staging data is wiped anyway (identity parity plan, Task 11).
-- **did-directory prototype.** Done (§17).
-- **Consumer SACDs** become `dimo.sacd.v3`: `grantor` is the controller (never the asset), with an explicit `asset`, the asset's `era`, and a `controlProof` (the opening). They're invalid after a transfer or when issued inside a revocation window. A self-grant (`grantor == asset`) is allowed only for uncontrolled DIDs such as a person sharing their own account documents.
-- **Developer license.** A DIMO → org delegation with `abilities: [license:developer]`, replacing Layer 1.1's "license SACD".
-- **dauth.** `/exchange` gains the delegation path (§11.1). The on-chain SACD path stays through the 90-day window.
+**None** (decided 2026-09-22, §19). The did:erc721 world, on-chain SACDs, the holder registry, the dual v1/v2 privilege names, the 90-day SACD window and the `dimo.sacd.v3` document are all dropped. A single-car grant, consumer or fleet, is a delegation with `covers: {vehicle}` (§7), evaluated by the same issuer path. The developer license is a DIMO → org delegation with `abilities: [license:developer]`.
 
 ## 16. Decisions (2026-09-16)
 
@@ -554,15 +549,17 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 | Commitments, openings, eras, revocation windows | `pkg/control` |
 | `controlCommitment`, `dimo_transfer`, `dimo_revoke_since`; controlled DIDs can't have verification methods; ±5 min clock-skew bound; no ops after a tombstone | `internal/did/operation.go` (`ValidateTransition`, `ResolveControlState`) |
 | `dimoControl` in the DID document; `GET /:did/control`; `sacdEpoch` removed | `internal/did/document.go`, `internal/handlers/resolve.go`, `internal/server/server.go`, `pkg/client.Control` |
-| `dimo.sacd.v3`: controller-signed with a control proof, era-bound, checked against revocation windows, any grantor key accepted | `pkg/sacd`, `internal/auth/sacd.go` |
-| CLI: `create --controller` (custody key only), `transfer`, `revoke-since`, `sacd-grant --asset`; `revoke-all` removed | `cmd/dimocli` |
+| CLI: `create --controller` (custody key only), `transfer`, `revoke-since`; `revoke-all` removed | `cmd/dimocli` |
 | Delegation records, narrowing rules, time-based coverage, roots of control with opening checks, tag-author authority, member-departure semantics, liens, allowlist/attenuated redelegation, client allowlists, org-member use, commit policy | `pkg/delegation` |
-| End-to-end demo (controller grant → compromise window → re-grant → sale → buyer grant) | `scripts/demo.sh` |
 | Existing bug fixed: `MemoryStore` kept Fiber param strings that pointed into a reused request buffer, which corrupted stored DIDs | `internal/store/postgres.go` |
 
 **Also built (2026-09-17, same branch):** party attributes in place of entity-type checks, policy profiles, the self-dealing rule, exclusivity with a recovery path, role constraints and custody narrowing — all in `pkg/delegation`. Plus `pkg/agreement`: the ODRL-shaped agreement record, a per-operator service catalog, and a pure compiler from an agreement and a time to the grants it produces, with duties gating the output.
 
 **Reviewed 2026-09-17** at max effort, 15 findings; the nine correctness and security ones are fixed on the branch, with the rest triaged in the PR. The pattern worth remembering: authority kept being read from fields the signer controls — `createdBy`, `effectiveAt`, `grantee` — while the delegation path already had the right answer in the repository's witnessed `committedAt`. `internal/auth` and `internal/handlers` went from no tests to roughly 80%.
+
+**Removed 2026-09-22 (§19):** `pkg/sacd`, `internal/auth`, `cmd/auth-service`, the `sacd-grant`, `sacd-verify` and `auth` CLI commands, and `scripts/demo.sh`. They were the single-car bearer-document path and the only runnable end-to-end flow; nothing exercises `pkg/delegation` end to end until the org host exists.
+
+**Fixed 2026-09-22:** compiled grant keys were joined with `/`, which `ParseURI` cannot address. Keys are now `:`-joined from a restricted alphabet, and `delegation.ValidateRKey` enforces the atproto record-key rules for anyone minting a key.
 
 **Not in did-directory (other agents):**
 - **Org host:** repository commits, the `ORG_COVERAGE` stream, coverage proofs, `listDescendants`, countersignatures, lender notification. It implements `delegation.Resolver`.
@@ -576,3 +573,21 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 3. ~~Capacity-scoped tokens~~ — **decided** (§16.13): the caller names the grant they are exercising, and the token records that chain. One request, one capacity, one audit answer.
 4. **Data residency.** A German car, rented in France, operated from the US. The storage node's region is in the DID document and nothing checks it.
 5. **Custody suspension in contract.** Rental agreements today assert the operator's right to immobilise. The engine can express either answer; legal picks.
+
+## 19. Decisions (2026-09-22)
+
+| # | Question | Decision |
+|---|---|---|
+| 17 | Backwards compatibility | **None.** §15 rewritten. Nothing in the new stack reads a SACD, an NFT holder or a v1 privilege number. |
+| 18 | `dimo.sacd.v3` and the demo auth service | **Dropped.** A single-car grant is a delegation with `covers: {vehicle}`. The issuer is dauth `/exchange`; did-directory ships no token minting. |
+| 19 | Ford Pro in the reference diagram | **Ford Pro is the data host**: the vehicle's `dimo_storage` service entry, set by the controller through a DID update. Reads of that data are still authorized by delegations; where the bytes sit grants nothing. |
+| 20 | Org host location | A separate binary in this repo for now (`cmd/org-host`), with its own database. Confirmed 2026-09-21 as a separate service; repo placement is a convenience until a second consumer of `pkg/delegation` exists. |
+| 21 | Who runs the evaluator | **The org host**, behind `POST /authorize`; dauth authenticates and mints. Openings never leave the host except inside a coverage proof. |
+| 22 | Member authentication to the org host | **dauth identity token**, `sub` = member DID. |
+| 23 | Commit signing in v1 | **Host-held org key** behind a `Signer` interface; Turnkey later. |
+| 24 | Second approval | **A record fact** (`approvedBy`), collected in v1 by a second member approving a pending write. Not a vendor feature. |
+| 25 | Party attributes | **DIMO-administered table** per DID for v1. |
+| 26 | Agreement compilation | **Client side, in the booking service** (as §12 says). The host never learns what a booking is; `pkg/agreement` is an SDK. |
+
+**Open, added 2026-09-22.** `revokeSince` ends the era (§8) because a bearer SACD had no witnessed commit time. With SACDs gone every grant has one, so a compromise window alone could suffice. Ending the era still invalidates the old opening, which is a real property, so the mechanism stays until someone needs the simpler one.
+

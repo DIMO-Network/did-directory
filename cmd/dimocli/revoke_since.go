@@ -108,6 +108,6 @@ func runRevokeSince(args []string) {
 
 	fmt.Printf("Revocation window recorded: %s\n", resp.DID)
 	fmt.Printf("Compromise window: [%s, %s]\n", *since, issued)
-	fmt.Printf("New era: %d (starts %s) — every SACD from era %d is now invalid\n", nextEra, issued, cur.Number)
+	fmt.Printf("New era: %d (starts %s) — every grant rooted in era %d is now invalid\n", nextEra, issued, cur.Number)
 	fmt.Printf("Custody key rotated. CID: %s\n", resp.CID)
 }

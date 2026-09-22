@@ -82,14 +82,14 @@ func TestCheckCommit(t *testing.T) {
 
 	lien := validRecord()
 	lien.RevocableBy = RevocableByTo
-	assert.ErrorIs(t, CheckCommit(&lien, CommitContext{From: Party{Kind: KindPerson, ConsumerProtected: true}, Approved: true}), ErrLienNotAllowed)
+	assert.ErrorIs(t, CheckCommit(&lien, CommitContext{From: Party{Kind: KindPerson}, Approved: true}), ErrLienNotAllowed)
 	assert.ErrorIs(t, CheckCommit(&lien, CommitContext{From: Party{Kind: KindOrg, Operator: true}}), ErrApprovalRequired)
 	assert.NoError(t, CheckCommit(&lien, CommitContext{From: Party{Kind: KindOrg, Operator: true}, Approved: true}))
 
 	role := validRecord()
 	role.Type = TypeRole
 	role.To = alice
-	assert.Error(t, CheckCommit(&role, CommitContext{From: Party{Kind: KindPerson, ConsumerProtected: true}}))
+	assert.Error(t, CheckCommit(&role, CommitContext{From: Party{Kind: KindPerson}}))
 }
 
 func TestCheckMembershipGrowth(t *testing.T) {

@@ -19,7 +19,7 @@ const (
 func TestOperatorStatus_NotEntityType(t *testing.T) {
 	r := newResolver()
 	r.parties[host] = Party{Kind: KindPerson, Operator: true}
-	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[renter] = Party{Kind: KindPerson}
 	r.control(t, car, host)
 
 	lien := delegation(host, fordCredit, Covers{Vehicle: car}, "location:precise")
@@ -33,7 +33,7 @@ func TestOperatorStatus_NotEntityType(t *testing.T) {
 	assert.NoError(t, CheckCommit(&lien, CommitContext{From: r.parties[host], Approved: true}))
 
 	// The same shape from a consumer is still refused.
-	r.parties[host] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[host] = Party{Kind: KindPerson}
 	_, err = e.Coverage(ctx, u, car, day(2))
 	assert.ErrorIs(t, err, ErrLienNotAllowed)
 
@@ -103,7 +103,7 @@ func TestSelfDealing(t *testing.T) {
 // recovery path. Historical access is untouched.
 func TestCustodySuspendsOperatorCommands(t *testing.T) {
 	r := newResolver()
-	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[renter] = Party{Kind: KindPerson}
 	r.control(t, car, avis)
 
 	custody := delegation(avis, renter, Covers{Vehicle: car}, "command:unlock", "command:lock", "telemetry:read")
@@ -212,9 +212,9 @@ func TestSamePersonBothCapacities(t *testing.T) {
 // Peer-to-peer: consumer host, org platform in the middle, consumer renter.
 func TestPeerToPeerChain(t *testing.T) {
 	r := newResolver()
-	r.parties[host] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[host] = Party{Kind: KindPerson}
 	r.parties[platform] = Party{Kind: KindOrg, Operator: true}
-	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[renter] = Party{Kind: KindPerson}
 	r.control(t, car, host)
 
 	listing := delegation(host, platform, Covers{Vehicle: car}, "command:unlock", "telemetry:read")
@@ -295,7 +295,7 @@ func TestExclusiveValidation(t *testing.T) {
 // never made: the operator is told somebody is driving their car.
 func TestSuspendedIsNotUncovered(t *testing.T) {
 	r := newResolver()
-	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[renter] = Party{Kind: KindPerson}
 	r.control(t, car, avis)
 
 	custody := delegation(avis, renter, Covers{Vehicle: car}, "command:unlock")

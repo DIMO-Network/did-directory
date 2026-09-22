@@ -22,15 +22,15 @@ const (
 	OpTypeTransfer = "dimo_transfer"
 
 	// OpTypeRevokeSince records a compromise window [RevokeSince, EffectiveAt] and
-	// closes the current era: every grant or delegation rooted in this era's
-	// control and committed inside the window is invalid, and every SACD bound to
-	// the closed era stops verifying.
+	// closes the current era: every delegation rooted in this era's control and
+	// committed inside the window is invalid, and any proof bound to the closed
+	// era's commitment stops verifying.
 	//
-	// It ends the era because an SACD is a bearer document with no
-	// repository-witnessed commit time: its effectiveAt is chosen by whoever holds
-	// the signing key, so a thief can place a stolen grant on either side of any
-	// window. Delegations, which do carry a witnessed CommittedAt, keep their
-	// pre-window history through the era intervals they already resolve.
+	// It ends the era so that the compromise cannot be argued about: a window
+	// filters on commit time, and ending the era invalidates the old opening
+	// itself, so nothing that opened the old commitment can be replayed.
+	// Delegations carry a witnessed CommittedAt and keep their pre-window history
+	// through the era intervals they already resolve.
 	//
 	// The operation re-commits control for the next era under the same controller
 	// and may rotate the custody keys at the same time; nothing else about the DID

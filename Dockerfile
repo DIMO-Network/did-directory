@@ -7,17 +7,12 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /directory ./cmd/did-directory
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /auth-service ./cmd/auth-service
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /dimocli ./cmd/dimocli
 
 FROM alpine:3.21 AS directory
 COPY --from=builder /directory /usr/local/bin/directory
 ENTRYPOINT ["directory"]
 CMD ["-settings", "/config/settings.yaml"]
-
-FROM alpine:3.21 AS auth-service
-COPY --from=builder /auth-service /usr/local/bin/auth-service
-ENTRYPOINT ["auth-service"]
 
 FROM alpine:3.21 AS cli
 COPY --from=builder /dimocli /usr/local/bin/dimocli

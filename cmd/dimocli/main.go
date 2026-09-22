@@ -45,12 +45,6 @@ func main() {
 		runTransfer(args)
 	case "revoke-since":
 		runRevokeSince(args)
-	case "sacd-grant":
-		runSACDGrant(args)
-	case "sacd-verify":
-		runSACDVerify(args)
-	case "auth":
-		runAuth(args)
 	case "pubkey":
 		runPubkey(args)
 	default:
@@ -73,13 +67,9 @@ Commands:
   rotate       Rotate a DID's keys
   transfer     Transfer a controlled DID to a new controller (starts a new era)
   revoke-since Record a compromise window and rotate the custody key
-  sacd-grant   Create and sign an SACD as the asset's controller
-  sacd-verify  Verify an SACD document
-  auth         Authenticate and get a JWT
   pubkey       Print the did:key public key for a local DID
 
 Environment:
   DIRECTORY_URL  Directory server URL (default: http://localhost:8080)
-  AUTH_URL       Auth service URL (default: http://localhost:8081)
 `)
 }

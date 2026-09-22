@@ -49,9 +49,6 @@ type Party struct {
 	// and issue liens, and is governed by operator policy rather than consumer
 	// protection.
 	Operator bool
-	// ConsumerProtected reports that consumer rules apply to this party as a
-	// counterparty. It is jurisdictional, so the resolver supplies it.
-	ConsumerProtected bool
 }
 
 // CanHaveMembers reports whether principals may act as members of this party.

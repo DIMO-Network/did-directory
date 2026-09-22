@@ -259,9 +259,9 @@ func TestResolveControlState_Eras(t *testing.T) {
 	assert.False(t, state.Deactivated)
 }
 
-// A revocation window cannot be enforced against a timestamp the signer chooses.
-// A stolen key backdates effectiveAt to before the window, or forward past it,
-// and the SACD verifies either way — so ending the era is what has to revoke it.
+// A revocation window filters on commit time, but the old opening would still
+// verify against the old commitment no matter when a proof was made. Ending the
+// era is what invalidates the opening itself, so nothing can replay it.
 func TestResolveControlState_RevokeSinceEndsTheEra(t *testing.T) {
 	compromise := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	issued := compromise.Add(24 * time.Hour)

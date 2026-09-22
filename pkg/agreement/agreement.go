@@ -51,6 +51,10 @@ var (
 	// ErrDuplicateGrant means two line items compiled to the same grant name over
 	// the same agreement, which would make the record key ambiguous.
 	ErrDuplicateGrant = errors.New("two line items compile to the same grant")
+	// ErrBadKey means an agreement, service or incident identifier cannot form a
+	// record key. Keys are addressed as at://<org>/<collection>/<rkey>, so each
+	// part must fit the rkey alphabet minus the separator.
+	ErrBadKey = errors.New("identifier cannot form a record key: use [A-Za-z0-9._-]")
 	// ErrUnknownScope means an offer names a time range the compiler cannot derive.
 	ErrUnknownScope = errors.New("unknown scope")
 )
@@ -172,7 +176,8 @@ type Timestamps struct {
 type Agreement struct {
 	Type string `json:"$type"`
 	// ID is the operator's booking reference. It keys the compiled records, so it
-	// must be stable and unique within the issuing repository.
+	// must be stable and unique within the issuing repository, and drawn from
+	// [A-Za-z0-9._-] so the key it forms is a valid record key (see Grant.Key).
 	ID string `json:"id"`
 	// Assigner is the provider: the operator that sold the service and that
 	// issues the grants. ODRL's assigner.
