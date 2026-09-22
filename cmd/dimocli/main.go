@@ -40,6 +40,8 @@ func main() {
 		runRevokeSince(args)
 	case "pubkey":
 		runPubkey(args)
+	case "signin":
+		runSignin(args)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
 		printUsage()
@@ -62,8 +64,10 @@ Commands:
   transfer     Transfer a controlled DID to a new controller (starts a new era)
   revoke-since Record a compromise window and rotate the custody key
   pubkey       Print the did:key public key for a local DID (--org for its #dimo_org key)
+  signin       Sign in to dauth as a local DID and print the identity token
 
 Environment:
   DIRECTORY_URL  Directory server URL (default: http://localhost:8080)
+  DAUTH_URL      dauth base URL for signin (default: http://localhost:8080)
 `)
 }

@@ -14,10 +14,10 @@ Run it against Postgres with a sealed-key master key, or with no `DATABASE_URL` 
 
 ```
 openssl rand -base64 32   # MASTER_KEY
-DATABASE_URL=postgres://... MASTER_KEY=... IDENTITY_JWKS_URL=http://localhost:3000/siwe/keys go run ./cmd/org-host -settings /dev/null
+DATABASE_URL=postgres://... MASTER_KEY=... IDENTITY_JWKS_URL=http://localhost:8080/signin/keys go run ./cmd/org-host -settings /dev/null
 ```
 
-Every route but `/health` takes a `Bearer` identity token (RS256, `sub` = DID) verified against the configured JWKS. `DIRECTORY_URL` names the DID directory the host reads control state from; `ISSUER_DIDS` lists who may call `/authorize` (dauth) and `ADMIN_DIDS` who may set party attributes (DIMO).
+Every route but `/health` takes a `Bearer` identity token (RS256, `sub` = DID) verified against the configured JWKS: dauth's `/signin/keys`, which `dimocli signin` obtains a token from. `DIRECTORY_URL` names the DID directory the host reads control state from; `ISSUER_DIDS` lists who may call `/authorize` (dauth) and `ADMIN_DIDS` who may set party attributes (DIMO).
 
 Under `/orgs` the org itself may write anything to its own repository, subject to the same approvals as anyone. Anyone else is a member only through a live `network.dimo.org.role` record, and each write takes the ability plan §3.2 names over the record's scope: `delegation:create` plus the abilities handed out for a delegation, `org:members` plus the abilities handed out for a role, `tag:write` for tags and memberships (plus, for a membership, the abilities of every delegation over the tag, spec §9.2), `org:admin` for control openings and `delegation:create` over the vehicle for custody. Delegations and roles pass `delegation.CheckCommit` under the policy the member's role names in `constraints.policy` (`default`, or `rental-booking` for a booking service); a write the policy wants a second approval for answers `202 {pending, uri, reasons}` and commits when somebody else approves it: the org, or a member holding `delegation:create` (`org:members` for a role, `tag:write` for a membership) over its scope. An org's first role therefore carries no live abilities, and its booking role waits for that admin. Reads take any live role; the openings and the commit log take `org:admin`.
 
