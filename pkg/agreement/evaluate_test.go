@@ -121,7 +121,7 @@ func (f *fleet) Party(_ context.Context, did string) (delegation.Party, error) {
 	if did == avis {
 		return delegation.Party{Kind: delegation.KindOrg, Operator: true}, nil
 	}
-	return delegation.Party{Kind: delegation.KindPerson, ConsumerProtected: true}, nil
+	return delegation.Party{Kind: delegation.KindPerson}, nil
 }
 
 // Exclusives mirrors what an org host's coverage index does: the live records

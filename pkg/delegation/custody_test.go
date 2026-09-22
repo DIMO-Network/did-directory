@@ -13,7 +13,7 @@ import (
 func rentalHistory(t *testing.T) (*memResolver, *Evaluator, string) {
 	t.Helper()
 	r := newResolver()
-	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[renter] = Party{Kind: KindPerson}
 	r.control(t, car, avis)
 
 	rec := delegation(avis, renter, Covers{Vehicle: car}, "telemetry:read")

@@ -87,7 +87,7 @@ func TestAuthority_SelfDealingUsesTheWitness(t *testing.T) {
 // exclusive claim cannot be redelegated into one that beats somebody else's.
 func TestNarrows_RecoveryNeedsTheSamePermissionAsExclusivity(t *testing.T) {
 	r := newResolver()
-	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[renter] = Party{Kind: KindPerson}
 	r.control(t, car, avis)
 
 	// A third party is driving the car.
@@ -226,7 +226,7 @@ func TestPolicy_CallerBuiltDepthIsEnforced(t *testing.T) {
 // custody is exactly the one worth logging.
 func TestAuthorize_ReportsRecoveryAndSuspension(t *testing.T) {
 	r := newResolver()
-	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[renter] = Party{Kind: KindPerson}
 	r.control(t, car, avis)
 
 	custody := delegation(avis, renter, Covers{Vehicle: car}, "command:unlock")
@@ -263,7 +263,7 @@ func TestAuthorize_ReportsRecoveryAndSuspension(t *testing.T) {
 // them is driving, which is the outcome §12.5 exists to prevent.
 func TestExclusive_OverlappingHoldsDoNotLockBothOut(t *testing.T) {
 	r := newResolver()
-	r.parties[renter] = Party{Kind: KindPerson, ConsumerProtected: true}
+	r.parties[renter] = Party{Kind: KindPerson}
 	r.control(t, car, avis)
 
 	// The previous renter's booking, whose device never synced a return.

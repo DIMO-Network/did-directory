@@ -233,7 +233,7 @@ A root is implicit for the controller: the controller holds every ability over i
 | Owner consent (dealer) | Owner → dealer org, scoped abilities, `purpose`, `redelegate: {mode: "allowlist", grantees: [...]}` or `none` (§9.2) |
 | Consumer app grant | Owner → developer DID, `covers: {vehicle}`. Same record type, no special consumer path. |
 
-**Party attributes, not entity type.** Policy keys off attested status, never off whether a DID is a person or an org. A sole proprietor with six cars on a peer-to-peer platform is an **operator**; a large company renting one car is a **consumer** in that transaction; and the same person is routinely both, in different agreements, at the same time. `delegation.Party` carries `Operator` and `ConsumerProtected`, and every rule below reads those.
+**Party attributes, not entity type.** Policy keys off attested status, never off whether a DID is a person or an org. A sole proprietor with six cars on a peer-to-peer platform is an **operator**; a large company renting one car is a **consumer** in that transaction; and the same person is routinely both, in different agreements, at the same time. `delegation.Party` carries `Operator`, and every rule below reads it. A `ConsumerProtected` flag was declared for jurisdictional consumer rules and removed on 2026-09-22 because nothing read it; it returns with its first rule.
 
 **Thresholds are policy, not constants.** Whether a consumer may sign away their right to revoke, how many vehicles one signature may cover, and what an operator may see during a rental vary by jurisdiction. `delegation.Policy` is a profile chosen from the agreement's governing law and passed to both the commit check and the evaluator. The engine enforces; the profile decides.
 

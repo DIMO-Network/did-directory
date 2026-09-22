@@ -64,11 +64,11 @@ func newResolver() *memResolver {
 			dealer:     {Kind: KindOrg, Operator: true},
 			rooftop:    {Kind: KindOrg, Operator: true},
 			marketing:  {Kind: KindOrg, Operator: true},
-			alice:      {Kind: KindPerson, ConsumerProtected: true},
-			bob:        {Kind: KindPerson, ConsumerProtected: true},
-			fcAnalyst:  {Kind: KindPerson, ConsumerProtected: true},
-			owner:      {Kind: KindPerson, ConsumerProtected: true},
-			buyer:      {Kind: KindPerson, ConsumerProtected: true},
+			alice:      {Kind: KindPerson},
+			bob:        {Kind: KindPerson},
+			fcAnalyst:  {Kind: KindPerson},
+			owner:      {Kind: KindPerson},
+			buyer:      {Kind: KindPerson},
 		},
 	}
 }
