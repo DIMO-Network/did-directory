@@ -85,16 +85,11 @@ func GenerateDocument(did string, op *Operation, state *control.State) (*DIDDocu
 			return nil, fmt.Errorf("decode verification method %q: %w", vmID, err)
 		}
 
-		multibase, err := dimocrypto.PublicKeyMultibase(pub)
-		if err != nil {
-			return nil, fmt.Errorf("encode multibase for %q: %w", vmID, err)
-		}
-
 		doc.VerificationMethod = append(doc.VerificationMethod, VerificationMethodEntry{
 			ID:                 did + "#" + vmID,
 			Type:               "Multikey",
 			Controller:         did,
-			PublicKeyMultibase: multibase,
+			PublicKeyMultibase: pub.Multibase(),
 		})
 	}
 

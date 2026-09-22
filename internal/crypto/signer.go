@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"math/big"
 )
 
 // SignOperation signs the given data bytes with the private key using ECDSA-SHA256.
@@ -33,19 +32,17 @@ func SignOperation(key *ecdsa.PrivateKey, data []byte) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
-// DecodeSignature decodes a base64url-encoded r||s signature into big.Int components.
-func DecodeSignature(sig string, byteSize int) (*big.Int, *big.Int, error) {
+// decodeSignatureBytes decodes a base64url-encoded r||s signature, checking
+// that it holds exactly two byteSize components.
+func decodeSignatureBytes(sig string, byteSize int) ([]byte, error) {
 	sigBytes, err := base64.RawURLEncoding.DecodeString(sig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("base64url decode: %w", err)
+		return nil, fmt.Errorf("base64url decode: %w", err)
 	}
 
 	if len(sigBytes) != 2*byteSize {
-		return nil, nil, fmt.Errorf("invalid signature length: got %d, want %d", len(sigBytes), 2*byteSize)
+		return nil, fmt.Errorf("invalid signature length: got %d, want %d", len(sigBytes), 2*byteSize)
 	}
 
-	r := new(big.Int).SetBytes(sigBytes[:byteSize])
-	s := new(big.Int).SetBytes(sigBytes[byteSize:])
-
-	return r, s, nil
+	return sigBytes, nil
 }

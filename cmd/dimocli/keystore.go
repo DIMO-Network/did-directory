@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,13 +107,11 @@ func readKey(path string) (*ecdsa.PrivateKey, error) {
 
 	// Fallback: try raw 32-byte scalar for P-256.
 	if len(keyBytes) == 32 {
-		curve := elliptic.P256()
-		d := new(big.Int).SetBytes(keyBytes)
-		x, y := curve.ScalarBaseMult(d.Bytes())
-		return &ecdsa.PrivateKey{
-			PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y},
-			D:         d,
-		}, nil
+		key, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse raw private key: %w", err)
+		}
+		return key, nil
 	}
 
 	return nil, fmt.Errorf("unable to parse private key")

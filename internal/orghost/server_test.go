@@ -266,8 +266,6 @@ func TestRepositoryFlow(t *testing.T) {
 			status, body = h.do(http.MethodPost, "/orgs/"+org, org, nil)
 			require.Equal(t, http.StatusCreated, status, body)
 			orgKey := body["key"].(string)
-			pub, err := dimocrypto.DecodeDIDKey(orgKey)
-			require.NoError(t, err)
 			status, body = h.do(http.MethodPost, "/orgs/"+org, org, nil)
 			assert.Equal(t, http.StatusConflict, status, body)
 
@@ -372,7 +370,7 @@ func TestRepositoryFlow(t *testing.T) {
 			var log []repo.Committed
 			require.NoError(t, json.Unmarshal(raw, &log))
 			require.Len(t, log, 10)
-			heads, err := repo.VerifyLog(org, log, pub)
+			heads, err := repo.VerifyLog(org, log, orgKey)
 			require.NoError(t, err)
 			assert.Equal(t, repo.Head{Seq: 4, Live: true}, heads["network.dimo.org.tag/fleet"])
 			assert.Equal(t, repo.Head{Seq: 10, Live: true}, heads["network.dimo.delegation/booking:42:renter"])
@@ -481,7 +479,7 @@ func TestRegisterWithSuppliedKey(t *testing.T) {
 	raw, _ := json.Marshal(body["commits"])
 	var log []repo.Committed
 	require.NoError(t, json.Unmarshal(raw, &log))
-	_, err = repo.VerifyLog(org, log, &key.PublicKey)
+	_, err = repo.VerifyLog(org, log, want)
 	require.NoError(t, err)
 
 	status, body = h.do(http.MethodPost, "/orgs/"+newOrgDID(), "did:dimo:x", map[string]string{"privateKey": "nope"})
@@ -535,8 +533,7 @@ func TestConcurrentWritesKeepOneChain(t *testing.T) {
 			org := newOrgDID()
 			status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 			require.Equal(t, http.StatusCreated, status, body)
-			pub, err := dimocrypto.DecodeDIDKey(body["key"].(string))
-			require.NoError(t, err)
+			orgKey := body["key"].(string)
 			h.grantRole(org, roleRecord(org, "did:dimo:alice", delegation.Covers{Inherit: true}, "tag:write"))
 
 			const writers, perWriter = 8, 10
@@ -557,7 +554,7 @@ func TestConcurrentWritesKeepOneChain(t *testing.T) {
 			log, err := h.repo.Log(t.Context(), org, 0, 0)
 			require.NoError(t, err)
 			require.Len(t, log, writers*perWriter+1)
-			heads, err := repo.VerifyLog(org, log, pub)
+			heads, err := repo.VerifyLog(org, log, orgKey)
 			require.NoError(t, err)
 			assert.Len(t, heads, writers*perWriter+1)
 		})

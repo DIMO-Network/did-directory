@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/agreement/booking"
@@ -237,11 +236,9 @@ func TestBookingServiceDrivesTheHost(t *testing.T) {
 			// Everything the SDK wrote verifies offline against #dimo_org.
 			status, body = h.do(http.MethodGet, "/orgs/"+org, backend, nil)
 			require.Equal(t, http.StatusOK, status, body)
-			pub, err := dimocrypto.DecodeDIDKey(body["key"].(string))
-			require.NoError(t, err)
 			log, err := h.repo.Log(ctx, org, 0, 0)
 			require.NoError(t, err)
-			_, err = repo.VerifyLog(org, log, pub)
+			_, err = repo.VerifyLog(org, log, body["key"].(string))
 			require.NoError(t, err)
 		})
 	}
