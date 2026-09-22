@@ -582,6 +582,12 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 | 18 | `dimo.sacd.v3` and the demo auth service | **Dropped.** A single-car grant is a delegation with `covers: {vehicle}`. The issuer is dauth `/exchange`; did-directory ships no token minting. |
 | 19 | Ford Pro in the reference diagram | **Ford Pro is the data host**: the vehicle's `dimo_storage` service entry, set by the controller through a DID update. Reads of that data are still authorized by delegations; where the bytes sit grants nothing. |
 | 20 | Org host location | A separate binary in this repo for now (`cmd/org-host`), with its own database. Confirmed 2026-09-21 as a separate service; repo placement is a convenience until a second consumer of `pkg/delegation` exists. |
+| 21 | Who runs the evaluator | **The org host**, behind `POST /authorize`; dauth authenticates and mints. Openings never leave the host except inside a coverage proof. |
+| 22 | Member authentication to the org host | **dauth identity token**, `sub` = member DID. |
+| 23 | Commit signing in v1 | **Host-held org key** behind a `Signer` interface; Turnkey later. |
+| 24 | Second approval | **A record fact** (`approvedBy`), collected in v1 by a second member approving a pending write. Not a vendor feature. |
+| 25 | Party attributes | **DIMO-administered table** per DID for v1. |
+| 26 | Agreement compilation | **Client side, in the booking service** (as §12 says). The host never learns what a booking is; `pkg/agreement` is an SDK. |
 
 **Open, added 2026-09-22.** `revokeSince` ends the era (§8) because a bearer SACD had no witnessed commit time. With SACDs gone every grant has one, so a compromise window alone could suffice. Ending the era still invalidates the old opening, which is a real property, so the mechanism stays until someone needs the simpler one.
 
