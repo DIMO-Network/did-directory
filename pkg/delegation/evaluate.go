@@ -27,6 +27,20 @@ var (
 	ErrExceedsRole      = errors.New("the grant exceeds the constraints of the role that authored it")
 )
 
+// ExclusiveHoldError is ErrExclusiveHold together with the abilities that are
+// suspended, so an issuer can tell the caller which ones somebody else holds
+// rather than parse them back out of the message. It matches ErrExclusiveHold
+// under errors.Is.
+type ExclusiveHoldError struct {
+	Suspended []string
+}
+
+func (e *ExclusiveHoldError) Error() string {
+	return ErrExclusiveHold.Error() + ": " + strings.Join(e.Suspended, ", ")
+}
+
+func (e *ExclusiveHoldError) Unwrap() error { return ErrExclusiveHold }
+
 // Kind is the kind of principal behind a DID.
 type Kind int
 
@@ -238,7 +252,7 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 	}
 	if filtered.Empty() {
 		if len(filtered.Suspended) > 0 {
-			return nil, fmt.Errorf("%w: %s", ErrExclusiveHold, strings.Join(filtered.Suspended, ", "))
+			return nil, &ExclusiveHoldError{Suspended: filtered.Suspended}
 		}
 		return nil, ErrNotCovered
 	}
@@ -380,7 +394,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		// log it. Saying "not covered" here would hide a custody hold behind the
 		// same error as a missing grant.
 		if len(cov.Suspended) > 0 {
-			return nil, fmt.Errorf("%w: %s", ErrExclusiveHold, strings.Join(cov.Suspended, ", "))
+			return nil, &ExclusiveHoldError{Suspended: cov.Suspended}
 		}
 		return nil, ErrNotCovered
 	}

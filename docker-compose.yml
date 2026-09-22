@@ -42,9 +42,15 @@ services:
       # Where the identity token issuer (dauth) publishes its RS256 keys.
       IDENTITY_JWKS_URL: "${IDENTITY_JWKS_URL:-}"
       IDENTITY_JWKS: "${IDENTITY_JWKS:-}"
+      DIRECTORY_URL: "http://directory:8080"
+      # Comma-separated DIDs: who may call /authorize, and who may set parties.
+      ISSUER_DIDS: "${ORG_HOST_ISSUER_DIDS:-}"
+      ADMIN_DIDS: "${ORG_HOST_ADMIN_DIDS:-}"
     ports:
       - "8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
+      directory:
+        condition: service_started
     command: ["-settings", "/dev/null"]

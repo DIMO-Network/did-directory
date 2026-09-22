@@ -14,6 +14,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/internal/orghost"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
+	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/rs/zerolog"
 )
 
@@ -75,8 +76,23 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to load identity keys")
 	}
 
+	if cfg.DirectoryURL == "" {
+		log.Fatal().Msg("DIRECTORY_URL is required: /authorize reads control state from the directory")
+	}
+	if len(cfg.IssuerDIDs) == 0 {
+		log.Warn().Msg("No ISSUER_DIDS configured: nothing may call /authorize")
+	}
+
 	repo := &orghost.Repository{Store: st, Signer: orghost.NewLocalSigner(st, sealer)}
-	app := orghost.New(repo, auth, cfg.PageSize, log)
+	app := orghost.New(orghost.Options{
+		Repo:     repo,
+		Auth:     auth,
+		Control:  client.New(cfg.DirectoryURL),
+		Issuers:  cfg.IssuerDIDs,
+		Admins:   cfg.AdminDIDs,
+		PageSize: cfg.PageSize,
+		Log:      log,
+	})
 
 	go func() {
 		if err := app.Listen(fmt.Sprintf(":%d", cfg.Port)); err != nil {

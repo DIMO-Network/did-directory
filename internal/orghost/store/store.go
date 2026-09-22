@@ -80,6 +80,23 @@ type Stored struct {
 // Live reports whether the record has not been tombstoned.
 func (s *Stored) Live() bool { return s.Tombstone == nil }
 
+// Party kinds, as the party table stores them.
+const (
+	KindPerson = "person"
+	KindOrg    = "org"
+)
+
+// Party is the DIMO-administered policy attributes of a DID (plan §1 decision
+// E): what kind of principal it is and whether it is an attested commercial
+// operator. It is a host-level table rather than a record, because it is
+// DIMO's say-so and not the org's.
+type Party struct {
+	DID      string    `json:"did"`
+	Kind     string    `json:"kind"`
+	Operator bool      `json:"operator"`
+	SetAt    time.Time `json:"setAt"`
+}
+
 // Store persists org repositories.
 type Store interface {
 	// CreateOrg registers an org on this host with its sealed signing key.
@@ -105,6 +122,31 @@ type Store interface {
 	// Commits returns the org's commits with seq greater than afterSeq, in order,
 	// at most limit.
 	Commits(ctx context.Context, org string, afterSeq int64, limit int) ([]repo.Committed, error)
+
+	// The resolver queries (plan §3.3) read the current view of records. Each
+	// returns live records only unless it says otherwise, ordered by seq.
+
+	// Memberships returns org's live tagMembership records for tag and vehicle.
+	Memberships(ctx context.Context, org, tag, vehicle string) ([]Stored, error)
+	// TagSize counts the distinct vehicles with a live membership interval in
+	// org's tag that contains at.
+	TagSize(ctx context.Context, org, tag string, at time.Time) (int, error)
+	// Custody returns every live custody record for vehicle and holder, from
+	// every repository on this host.
+	Custody(ctx context.Context, vehicle, holder string) ([]Stored, error)
+	// Roles returns org's role records addressed to member, tombstoned ones
+	// included: the evaluator decides for itself whether a tombstone counts.
+	Roles(ctx context.Context, org, member string) ([]Stored, error)
+	// Exclusives returns the live delegation records, from every repository on
+	// this host, that claim exclusive abilities and cover vehicle: directly, or
+	// through a tag the vehicle has a membership in at time at. Validity is the
+	// caller's to check.
+	Exclusives(ctx context.Context, vehicle string, at time.Time) ([]Stored, error)
+
+	// SetParty records or replaces a DID's party attributes.
+	SetParty(ctx context.Context, p Party) error
+	// GetParty returns a DID's party attributes, or ErrNotFound.
+	GetParty(ctx context.Context, did string) (*Party, error)
 
 	// Close closes the store.
 	Close() error

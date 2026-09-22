@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,11 @@ import (
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/pkg/control"
 )
+
+// ErrNotFound is returned by Resolve and Control for a DID the directory does
+// not hold. Callers that treat an unknown vehicle as "no control history"
+// rather than as a failure match on it with errors.Is.
+var ErrNotFound = errors.New("DID not found")
 
 // Client is a Go client for the DID Directory service.
 type Client struct {
@@ -148,7 +154,7 @@ func (c *Client) Resolve(ctx context.Context, didStr string) (*did.DIDDocument, 
 	}
 
 	if status == http.StatusNotFound {
-		return nil, fmt.Errorf("DID not found: %s", didStr)
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, didStr)
 	}
 
 	if status != http.StatusOK {
@@ -177,7 +183,7 @@ func (c *Client) Control(ctx context.Context, didStr string) (*control.State, er
 	}
 
 	if status == http.StatusNotFound {
-		return nil, fmt.Errorf("DID not found: %s", didStr)
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, didStr)
 	}
 
 	if status != http.StatusOK {

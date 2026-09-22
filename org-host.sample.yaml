@@ -7,4 +7,10 @@ MASTER_KEY: ""
 # Identity tokens (RS256, sub = member DID) are verified against this key set.
 IDENTITY_JWKS_URL: "http://localhost:3000/siwe/keys"
 IDENTITY_ISSUER: ""
+# The DID directory, for control state.
+DIRECTORY_URL: "http://localhost:8080"
+# DIDs that may call POST /authorize (dauth) and set party attributes (DIMO).
+# Comma-separated when given in the environment.
+ISSUER_DIDS: []
+ADMIN_DIDS: []
 PAGE_SIZE: 100

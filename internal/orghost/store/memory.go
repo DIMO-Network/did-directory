@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"sort"
 	"strings"
@@ -16,8 +17,9 @@ import (
 // own goroutine, and mu is what keeps concurrent appends from losing a sequence
 // number.
 type MemoryStore struct {
-	mu   sync.RWMutex
-	orgs map[string]*memOrg
+	mu      sync.RWMutex
+	orgs    map[string]*memOrg
+	parties map[string]Party
 }
 
 type memOrg struct {
@@ -35,7 +37,7 @@ type memHead struct {
 
 // NewMemoryStore creates an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{orgs: map[string]*memOrg{}}
+	return &MemoryStore{orgs: map[string]*memOrg{}, parties: map[string]Party{}}
 }
 
 func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {
@@ -194,6 +196,177 @@ func (s *MemoryStore) Commits(_ context.Context, org string, afterSeq int64, lim
 		}
 	}
 	return out, nil
+}
+
+// each calls fn with the current state of every live record in collection
+// whose parsed body is wanted, in seq order, across the given orgs.
+func (o *memOrg) each(collection string, fn func(st Stored, rec map[string]any)) {
+	prefix := collection + "/"
+	var heads []memHead
+	for k, h := range o.heads {
+		if h.tombstone >= 0 || !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		heads = append(heads, h)
+	}
+	sort.Slice(heads, func(i, j int) bool { return heads[i].record < heads[j].record })
+	for _, h := range heads {
+		st := o.stored(h)
+		var rec map[string]any
+		if json.Unmarshal(st.Record, &rec) != nil {
+			continue
+		}
+		fn(st, rec)
+	}
+}
+
+func field(rec map[string]any, path ...string) string {
+	var cur any = rec
+	for _, p := range path {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return ""
+		}
+		cur = m[p]
+	}
+	s, _ := cur.(string)
+	return s
+}
+
+func parseTime(s string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	return t, err == nil
+}
+
+// memberAt reports whether a membership record's interval contains at.
+func memberAt(rec map[string]any, at time.Time) bool {
+	joined, ok := parseTime(field(rec, "joinedAt"))
+	if !ok || at.Before(joined) {
+		return false
+	}
+	if left, ok := parseTime(field(rec, "leftAt")); ok && !at.Before(left) {
+		return false
+	}
+	return true
+}
+
+func (s *MemoryStore) Memberships(_ context.Context, org, tag, vehicle string) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	out := []Stored{}
+	o.each("network.dimo.org.tagMembership", func(st Stored, rec map[string]any) {
+		if field(rec, "tag") == tag && field(rec, "vehicle") == vehicle {
+			out = append(out, st)
+		}
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) TagSize(_ context.Context, org, tag string, at time.Time) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return 0, ErrNotFound
+	}
+	vehicles := map[string]bool{}
+	o.each("network.dimo.org.tagMembership", func(_ Stored, rec map[string]any) {
+		if field(rec, "tag") == tag && memberAt(rec, at) {
+			vehicles[field(rec, "vehicle")] = true
+		}
+	})
+	return len(vehicles), nil
+}
+
+func (s *MemoryStore) Custody(_ context.Context, vehicle, holder string) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []Stored{}
+	for _, o := range s.orgs {
+		o.each("network.dimo.org.custody", func(st Stored, rec map[string]any) {
+			if field(rec, "vehicle") == vehicle && field(rec, "holder") == holder {
+				out = append(out, st)
+			}
+		})
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) Roles(_ context.Context, org, member string) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	prefix := "network.dimo.org.role/"
+	var heads []memHead
+	for k, h := range o.heads {
+		if strings.HasPrefix(k, prefix) {
+			heads = append(heads, h)
+		}
+	}
+	sort.Slice(heads, func(i, j int) bool { return heads[i].record < heads[j].record })
+	out := []Stored{}
+	for _, h := range heads {
+		st := o.stored(h)
+		var rec map[string]any
+		if json.Unmarshal(st.Record, &rec) == nil && field(rec, "to") == member {
+			out = append(out, st)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) Exclusives(_ context.Context, vehicle string, at time.Time) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tags := map[string]bool{}
+	for _, o := range s.orgs {
+		o.each("network.dimo.org.tagMembership", func(_ Stored, rec map[string]any) {
+			if field(rec, "vehicle") == vehicle && memberAt(rec, at) {
+				tags[field(rec, "tag")] = true
+			}
+		})
+	}
+	out := []Stored{}
+	for _, o := range s.orgs {
+		o.each("network.dimo.delegation", func(st Stored, rec map[string]any) {
+			if ex, _ := rec["exclusive"].([]any); len(ex) == 0 {
+				return
+			}
+			if field(rec, "covers", "vehicle") == vehicle || tags[field(rec, "covers", "tag")] {
+				out = append(out, st)
+			}
+		})
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) SetParty(_ context.Context, p Party) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.DID = strings.Clone(p.DID)
+	p.Kind = strings.Clone(p.Kind)
+	if p.SetAt.IsZero() {
+		p.SetAt = time.Now().UTC()
+	}
+	s.parties[p.DID] = p
+	return nil
+}
+
+func (s *MemoryStore) GetParty(_ context.Context, did string) (*Party, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.parties[did]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &p, nil
 }
 
 func (s *MemoryStore) Close() error { return nil }
