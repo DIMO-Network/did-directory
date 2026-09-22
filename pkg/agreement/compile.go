@@ -292,3 +292,63 @@ func isKeyPartByte(c byte) bool {
 	}
 	return false
 }
+
+// Keys returns every record key Compile could produce for this agreement, at
+// any time and in any state: one per purchased line item and offer, and one
+// per incident, open or closed, for an offer produced per incident. They are
+// in Compile's order.
+//
+// It is what a booking service reconciles against. A key here that the current
+// compilation did not produce is a grant an earlier compilation may have
+// committed and this state no longer supports, so it is the one to tombstone:
+// custody after the return, roadside after the incident closes, everything
+// after a cancellation before pickup. The set is complete because nothing
+// leaves an agreement: a closed incident stays on it with its ClosedAt, and a
+// purchased line item is the purchase. Deriving it beats asking the host,
+// whose listing order is its database's collation and so cannot be scanned by
+// key prefix.
+//
+// It refuses the same identifiers Compile refuses (ErrBadKey, ErrUnknownService,
+// ErrDuplicateGrant), and does so even for a booking that compiles to nothing
+// yet, since such a booking could never be written.
+func Keys(a *Agreement, cat Catalog) ([]string, error) {
+	if err := a.Validate(); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var keys []string
+	add := func(parts []string) error {
+		key, err := grantKey(parts)
+		if err != nil {
+			return err
+		}
+		if seen[key] {
+			return fmt.Errorf("%w: %s", ErrDuplicateGrant, key)
+		}
+		seen[key] = true
+		keys = append(keys, key)
+		return nil
+	}
+	for i := range a.Services {
+		svc := &a.Services[i]
+		offers, ok := cat[svc.Code]
+		if !ok {
+			return nil, fmt.Errorf("%w: %s", ErrUnknownService, svc.Code)
+		}
+		for j := range offers {
+			off := &offers[j]
+			if !off.PerOpenIncident {
+				if err := add([]string{a.ID, svc.Code, off.Name}); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			for k := range a.Incidents {
+				if err := add([]string{a.ID, svc.Code, off.Name, a.Incidents[k].ID}); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return keys, nil
+}
