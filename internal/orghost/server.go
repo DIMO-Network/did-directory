@@ -21,15 +21,17 @@ import (
 
 // Server serves org repositories over HTTP (plan §3).
 //
-// Every route but /health needs an identity token. Under /orgs any
-// authenticated DID may read or write any org's repository and the commit
-// records who did; roles, CheckCommit and pending approvals gate these routes
-// in step 4, which is where "member" starts to mean something. /authorize is
-// for the issuer (dauth) and /parties for DIMO, each an allowlist of DIDs.
+// Every route but /health needs an identity token. Under /orgs the org itself
+// may do anything to its own repository; anyone else is a member only through
+// a live role, and each write takes the role and ability plan §3.2 names,
+// passes delegation.CheckCommit under that role's policy, and lands as
+// pending when the policy wants a second approval. /authorize is for the
+// issuer (dauth) and /parties for DIMO, each an allowlist of DIDs.
 type Server struct {
 	repo     *Repository
 	auth     Authenticator
 	resolver *Resolver
+	policies Policies
 	issuers  map[string]bool
 	admins   map[string]bool
 	pageSize int
@@ -46,6 +48,9 @@ type Options struct {
 	Issuers []string
 	// Admins are the DIDs that may set party attributes (plan §1 decision E).
 	Admins []string
+	// Policies are the commit policy profiles a role may name; the default
+	// profile is always present.
+	Policies Policies
 	// PageSize bounds list and log responses; zero means 100.
 	PageSize int
 	Log      zerolog.Logger
@@ -65,9 +70,14 @@ func New(o Options) *fiber.App {
 		}
 		return m
 	}
+	policies := DefaultPolicies()
+	for name, p := range o.Policies {
+		policies[name] = p
+	}
 	s := &Server{
 		repo: o.Repo, auth: o.Auth,
 		resolver: &Resolver{Store: o.Repo.Store, Control: o.Control, Now: o.Repo.now},
+		policies: policies,
 		issuers:  set(o.Issuers), admins: set(o.Admins),
 		pageSize: o.PageSize, log: o.Log.With().Str("component", "orghost").Logger(),
 	}
@@ -89,8 +99,12 @@ func New(o Options) *fiber.App {
 	orgs := app.Group("/orgs", s.authenticate)
 	orgs.Post("/:org", s.register)
 	orgs.Get("/:org", s.getOrg)
-	// Before /:org/:collection, which would otherwise capture it.
+	// Before /:org/:collection, which would otherwise capture them.
 	orgs.Get("/:org/commits", s.commits)
+	orgs.Get("/:org/pending", s.listPending)
+	orgs.Post("/:org/pending/:id/approve", s.approve)
+	orgs.Delete("/:org/pending/:id", s.withdraw)
+	orgs.Post("/:org/revoke-authored-by", s.revokeAuthoredBy)
 	orgs.Post("/:org/:collection", s.create)
 	orgs.Get("/:org/:collection", s.list)
 	orgs.Put("/:org/:collection/:rkey", s.put)
@@ -191,6 +205,9 @@ func (s *Server) getOrg(c *fiber.Ctx) error {
 
 func (s *Server) commits(c *fiber.Ctx) error {
 	org, _, _ := params(c)
+	if err := s.checkRead(c.Context(), org, caller(c), ""); err != nil {
+		return s.fail(c, err)
+	}
 	after, err := strconv.ParseInt(c.Query("after", "0"), 10, 64)
 	if err != nil || after < 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "after must be a non-negative integer"})
@@ -212,8 +229,30 @@ func (s *Server) put(c *fiber.Ctx) error {
 	return s.write(c, org, collection, rkey)
 }
 
+// write is the write path (plan §3.2): prepare, check, then commit or park.
 func (s *Server) write(c *fiber.Ctx, org, collection, rkey string) error {
-	res, err := s.repo.Put(c.Context(), org, collection, rkey, c.Body(), committedBy(c, org), nil)
+	by := committedBy(c, org)
+	record, err := s.repo.Prepare(org, collection, rkey, c.Body(), by)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	w := &write{org: org, collection: collection, rkey: rkey, record: record, committedBy: by}
+	if err := s.checkWrite(c.Context(), w); err != nil {
+		var need *ApprovalRequiredError
+		if !errors.As(err, &need) {
+			return s.fail(c, err)
+		}
+		p := store.Pending{
+			ID: repo.NewTID(), Org: org, Collection: collection, RKey: rkey, Record: record,
+			CommittedBy: by, Reasons: need.Reasons, CreatedAt: s.repo.now(),
+		}
+		if err := s.repo.Store.AddPending(c.Context(), p); err != nil {
+			return s.fail(c, err)
+		}
+		s.log.Info().Str("uri", w.uri()).Str("pending", p.ID).Str("by", caller(c)).Strs("reasons", p.Reasons).Msg("write pending approval")
+		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"pending": p.ID, "uri": w.uri(), "reasons": p.Reasons})
+	}
+	res, err := s.repo.Put(c.Context(), org, collection, rkey, record, by, nil)
 	if err != nil {
 		return s.fail(c, err)
 	}
@@ -227,6 +266,16 @@ func (s *Server) write(c *fiber.Ctx, org, collection, rkey string) error {
 
 func (s *Server) tombstone(c *fiber.Ctx) error {
 	org, collection, rkey := params(c)
+	cur, err := s.repo.Get(c.Context(), org, collection, rkey)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	if !cur.Live() {
+		return s.fail(c, ErrNotLive)
+	}
+	if err := s.checkTombstone(c.Context(), org, caller(c), cur); err != nil {
+		return s.fail(c, err)
+	}
 	res, err := s.repo.Delete(c.Context(), org, collection, rkey, committedBy(c, org), nil)
 	if err != nil {
 		return s.fail(c, err)
@@ -237,6 +286,9 @@ func (s *Server) tombstone(c *fiber.Ctx) error {
 
 func (s *Server) get(c *fiber.Ctx) error {
 	org, collection, rkey := params(c)
+	if err := s.checkRead(c.Context(), org, caller(c), collection); err != nil {
+		return s.fail(c, err)
+	}
 	st, err := s.repo.Get(c.Context(), org, collection, rkey)
 	if err != nil {
 		return s.fail(c, err)
@@ -251,6 +303,9 @@ func (s *Server) get(c *fiber.Ctx) error {
 
 func (s *Server) list(c *fiber.Ctx) error {
 	org, collection, _ := params(c)
+	if err := s.checkRead(c.Context(), org, caller(c), collection); err != nil {
+		return s.fail(c, err)
+	}
 	records, err := s.repo.List(c.Context(), org, collection, c.Query("after"), s.limit(c))
 	if err != nil {
 		return s.fail(c, err)
@@ -271,6 +326,8 @@ func (s *Server) fail(c *fiber.Ctx, err error) error {
 	switch {
 	case errors.Is(err, ErrInvalid):
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ErrForbidden):
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
 	case store.IsNotFound(err):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	case errors.Is(err, ErrNotLive):

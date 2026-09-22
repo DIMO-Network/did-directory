@@ -19,12 +19,16 @@ DATABASE_URL=postgres://... MASTER_KEY=... IDENTITY_JWKS_URL=http://localhost:30
 
 Every route but `/health` takes a `Bearer` identity token (RS256, `sub` = DID) verified against the configured JWKS. `DIRECTORY_URL` names the DID directory the host reads control state from; `ISSUER_DIDS` lists who may call `/authorize` (dauth) and `ADMIN_DIDS` who may set party attributes (DIMO).
 
+Under `/orgs` the org itself may write anything to its own repository, subject to the same approvals as anyone. Anyone else is a member only through a live `network.dimo.org.role` record, and each write takes the ability plan §3.2 names over the record's scope: `delegation:create` plus the abilities handed out for a delegation, `org:members` plus the abilities handed out for a role, `tag:write` for tags and memberships (plus, for a membership, the abilities of every delegation over the tag, spec §9.2), `org:admin` for control openings and `delegation:create` over the vehicle for custody. Delegations and roles pass `delegation.CheckCommit` under the policy the member's role names in `constraints.policy` (`default`, or `rental-booking` for a booking service); a write the policy wants a second approval for answers `202 {pending, uri, reasons}` and commits when somebody else approves it: the org, or a member holding `delegation:create` (`org:members` for a role, `tag:write` for a membership) over its scope. An org's first role therefore carries no live abilities, and its booking role waits for that admin. Reads take any live role; the openings and the commit log take `org:admin`.
+
 | Route | What it does |
 |---|---|
 | `POST /orgs/:org` | Registers the org on this host and mints its `#dimo_org` key (or takes one as `{"privateKey": <base64 PKCS#8>}`). Only the org itself may call it. Returns the did:key to publish with `dimocli update --org-key`. |
 | `GET /orgs/:org` | The org's key and log head. |
 | `PUT /orgs/:org/:collection/:rkey` | Creates or updates a record. `POST /orgs/:org/:collection` does the same under a fresh TID. |
-| `DELETE /orgs/:org/:collection/:rkey` | Tombstones a record. |
+| `DELETE /orgs/:org/:collection/:rkey` | Tombstones a record: by a principal its `revocableBy` names, or a member of one holding `delegation:create` (`org:members` for a role) over its scope. |
+| `GET /orgs/:org/pending` | Writes awaiting approval. `POST /orgs/:org/pending/:id/approve` commits one as the caller's approval; the author and the recipient cannot. `DELETE /orgs/:org/pending/:id` withdraws one. |
+| `POST /orgs/:org/revoke-authored-by` | `{member, since}` lists the live records whose current version the member committed after `since`; with `uris` it tombstones that reviewed set as one batch, every tombstone checked as a `DELETE` first. |
 | `GET /orgs/:org/:collection[/:rkey]` | Lists live records, or reads one (a tombstoned record answers 410 with its last body and who revoked it). |
 | `GET /orgs/:org/commits?after=&limit=` | The commit log, for sync and offline verification with `repo.VerifyLog`. |
 | `POST /authorize` | For the issuer: `{uri, caller, clientId?, vehicle, abilities}` runs `delegation.Evaluator.Authorize` at the host clock and returns the coverage plus `at`, or 403 with a `code` (`not_covered`, `exclusive_hold` with the `suspended` abilities, `unauthorized`, `revoked`, `not_valid`, ...) and 404 for a record that is not here. `at` in the request is refused in v1. |

@@ -1,0 +1,155 @@
+package orghost
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/DIMO-Network/did-directory/internal/orghost/store"
+	"github.com/gofiber/fiber/v2"
+)
+
+// listPending returns the org's writes awaiting approval, for approvers: any
+// member may see them, and approving is checked per write.
+func (s *Server) listPending(c *fiber.Ctx) error {
+	org, _, _ := params(c)
+	if err := s.checkRead(c.Context(), org, caller(c), "pending"); err != nil {
+		return s.fail(c, err)
+	}
+	pending, err := s.repo.Store.ListPending(c.Context(), org)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	return c.JSON(fiber.Map{"pending": pending})
+}
+
+// approve commits a pending write as approved by the caller (plan §3.2 step
+// 4). The checks run again, now, with the approval carried: the author must
+// still hold their authority, because the commit time is what evaluation
+// checks it at, and the approver must hold the same authority and be neither
+// the author nor the recipient.
+func (s *Server) approve(c *fiber.Ctx) error {
+	org, _, _ := params(c)
+	id := strings.Clone(c.Params("id"))
+	p, err := s.repo.Store.GetPending(c.Context(), org, id)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	record, err := s.repo.Prepare(p.Org, p.Collection, p.RKey, p.Record, p.CommittedBy)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	approver := caller(c)
+	w := &write{org: p.Org, collection: p.Collection, rkey: p.RKey, record: record, committedBy: p.CommittedBy, approvedBy: approver}
+	if err := s.checkWrite(c.Context(), w); err != nil {
+		return s.fail(c, err)
+	}
+	res, err := s.repo.Put(c.Context(), p.Org, p.Collection, p.RKey, record, p.CommittedBy, []string{approver})
+	if err != nil {
+		return s.fail(c, err)
+	}
+	if err := s.repo.Store.DeletePending(c.Context(), org, id); err != nil && !store.IsNotFound(err) {
+		s.log.Error().Err(err).Str("pending", id).Msg("delete pending after commit")
+	}
+	s.log.Info().Str("uri", res.URI).Str("op", res.Op).Str("by", p.CommittedBy).Str("approvedBy", approver).Msg("record committed with approval")
+	status := fiber.StatusOK
+	if res.Op == "create" {
+		status = fiber.StatusCreated
+	}
+	return c.Status(status).JSON(res)
+}
+
+// withdraw drops a pending write. Its author may, and so may the org.
+func (s *Server) withdraw(c *fiber.Ctx) error {
+	org, _, _ := params(c)
+	id := strings.Clone(c.Params("id"))
+	p, err := s.repo.Store.GetPending(c.Context(), org, id)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	if by := caller(c); by != org && by != p.CommittedBy {
+		return s.fail(c, forbidden("only the author or the org may withdraw a pending write"))
+	}
+	if err := s.repo.Store.DeletePending(c.Context(), org, id); err != nil {
+		return s.fail(c, err)
+	}
+	return c.JSON(fiber.Map{"withdrawn": id})
+}
+
+// revokeAuthoredByRequest is the body of POST /orgs/:org/revoke-authored-by
+// (plan §3.5): the member and the time their key is suspected from, and, on
+// the second call, the reviewed set to tombstone.
+type revokeAuthoredByRequest struct {
+	Member string `json:"member"`
+	Since  string `json:"since"`
+	// URIs is the reviewed set. Absent, the call only lists what the member
+	// authored after since.
+	URIs []string `json:"uris"`
+}
+
+// revokeAuthoredBy is the compromised-member procedure (spec §6.3): list every
+// live record whose current version the member committed after since, and,
+// when the caller sends the reviewed set back, tombstone it as one batch.
+// Every tombstone in the batch is checked as a DELETE by the caller would be,
+// all before any is written.
+func (s *Server) revokeAuthoredBy(c *fiber.Ctx) error {
+	org, _, _ := params(c)
+	var req revokeAuthoredByRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("invalid JSON: %v", err)})
+	}
+	req.Member = strings.Clone(req.Member)
+	for i := range req.URIs {
+		req.URIs[i] = strings.Clone(req.URIs[i])
+	}
+	if !isDID(req.Member) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "member must be a DID"})
+	}
+	since, err := parseSince(req.Since)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := s.checkRead(c.Context(), org, caller(c), "revoke-authored-by"); err != nil {
+		return s.fail(c, err)
+	}
+	authored, err := s.repo.Store.Authored(c.Context(), org, req.Member, since)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	if req.URIs == nil {
+		return c.JSON(fiber.Map{"records": authored})
+	}
+
+	byURI := map[string]*store.Stored{}
+	for i := range authored {
+		byURI[authored[i].URI] = &authored[i]
+	}
+	batch := make([]*store.Stored, 0, len(req.URIs))
+	for _, uri := range req.URIs {
+		st, ok := byURI[uri]
+		if !ok {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("%s is not a live record %s authored after %s", uri, req.Member, req.Since)})
+		}
+		if err := s.checkTombstone(c.Context(), org, caller(c), st); err != nil {
+			return s.fail(c, fmt.Errorf("%s: %w", uri, err))
+		}
+		batch = append(batch, st)
+	}
+
+	by := committedBy(c, org)
+	revoked := make([]*Result, 0, len(batch))
+	for _, st := range batch {
+		res, err := s.repo.Delete(c.Context(), org, st.Collection, st.RKey, by, nil)
+		if errors.Is(err, ErrNotLive) {
+			// Somebody got there first; the outcome is the one asked for.
+			continue
+		}
+		if err != nil {
+			s.log.Error().Err(err).Str("uri", st.URI).Int("revoked", len(revoked)).Msg("revoke-authored-by stopped partway")
+			return s.fail(c, err)
+		}
+		revoked = append(revoked, res)
+	}
+	s.log.Info().Str("org", org).Str("member", req.Member).Str("since", req.Since).Int("revoked", len(revoked)).Str("by", caller(c)).Msg("revoked records authored by member")
+	return c.JSON(fiber.Map{"revoked": revoked})
+}

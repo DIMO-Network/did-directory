@@ -6,6 +6,47 @@ import (
 	"strings"
 )
 
+// Admin abilities an org host checks writes against (plan §3.2). They are
+// ordinary abilities a role carries; nothing here implies anything else.
+const (
+	// AbilityDelegationCreate lets a member issue delegations over the role's
+	// scope, and revoke them.
+	AbilityDelegationCreate = "delegation:create"
+	// AbilityOrgMembers lets a member issue roles over the role's scope, and
+	// revoke them.
+	AbilityOrgMembers = "org:members"
+	// AbilityTagWrite lets a member create tags and move vehicles in and out of
+	// them, within the role's scope.
+	AbilityTagWrite = "tag:write"
+	// AbilityOrgAdmin lets a member read everything in the repository, the
+	// control openings included.
+	AbilityOrgAdmin = "org:admin"
+)
+
+// ManageAbility returns the ability that manages records of rec's kind: what a
+// member needs, over the record's scope, to revoke it.
+func ManageAbility(rec *Record) string {
+	if rec.Type == TypeRole {
+		return AbilityOrgMembers
+	}
+	return AbilityDelegationCreate
+}
+
+// AuthoringNeed returns the abilities a member must hold over rec's scope to
+// author it for its issuer: the managing ability plus everything the record
+// hands out, so nobody hands out more than they hold.
+func AuthoringNeed(rec *Record) []string {
+	return append([]string{ManageAbility(rec)}, rec.Abilities...)
+}
+
+// MembershipNeed returns the abilities a member must hold over a tag for a
+// membership they write to count toward rec, a record covering that tag (§9.2):
+// tag:write plus everything rec hands out, since adding a car to the tag
+// widens rec to it.
+func MembershipNeed(rec *Record) []string {
+	return append([]string{AbilityTagWrite}, rec.Abilities...)
+}
+
 // DefaultApprovalThreshold is the vehicle count above which a delegation needs a
 // policy approval (2-of-n org admins) before it can be committed.
 const DefaultApprovalThreshold = 500

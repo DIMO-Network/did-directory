@@ -18,6 +18,7 @@ import (
 // repositories, so repeated runs against one Postgres database would otherwise
 // see each other's records.
 const (
+	admin   = "did:dimo:avis-admin"
 	backend = "did:dimo:avis-backend"
 	renter  = "did:dimo:renter"
 	insurer = "did:dimo:insurer"
@@ -77,14 +78,23 @@ func (h *host) fleet(org string) {
 	status, body = h.do(http.MethodPut, "/orgs/"+org+"/"+delegation.CollectionVehicleControl+"/"+car, org, opening)
 	require.Equal(h.t, http.StatusCreated, status, body)
 
+	// The org's first role: an admin who may issue roles and grants, with no
+	// live abilities, so it commits with nobody to approve it yet.
+	h.grantRole(org, roleRecord(org, admin, delegation.Covers{Inherit: true}, "org:admin", "org:members", "delegation:create", "tag:write"))
+
 	// The booking service's role: delegation:create plus everything the catalog
-	// hands out, over every car.
+	// hands out, over every car, committing under the booking policy so its
+	// grants of live abilities do not each wait for two admins (plan §3.2).
+	// The role itself hands out commands, so the admin approves it.
 	role := delegation.Record{
 		Type: delegation.TypeRole, From: org, To: backend,
 		Covers: delegation.Covers{Inherit: true}, Abilities: agreement.RentalCatalog().Abilities(),
-		Redelegate: delegation.Redelegate{Mode: delegation.RedelegateNone}, CreatedAt: day(1),
+		Constraints: &delegation.RoleConstraints{Policy: agreement.CommitPolicy().Name, AllowExclusive: true},
+		Redelegate:  delegation.Redelegate{Mode: delegation.RedelegateNone}, CreatedAt: day(1),
 	}
 	status, body = h.do(http.MethodPost, "/orgs/"+org+"/"+delegation.CollectionRole, org, role)
+	require.Equal(h.t, http.StatusAccepted, status, body)
+	status, body = h.do(http.MethodPost, "/orgs/"+org+"/pending/"+body["pending"].(string)+"/approve", admin, nil)
 	require.Equal(h.t, http.StatusCreated, status, body)
 }
 
@@ -155,7 +165,7 @@ func TestCompiledGrantsAuthorizeOverHTTP(t *testing.T) {
 
 			// Avis grants its valet crew the same commands, with no exclusive claim,
 			// plus telemetry so the record has something to say while the commands
-			// are suspended.
+			// are suspended. Commands wait for the admin, even from the org.
 			status, body := h.do(http.MethodPut, "/orgs/"+org+"/"+delegation.CollectionDelegation+"/valet", org, delegation.Record{
 				Type: delegation.TypeDelegation, From: org, To: valet,
 				Covers:     delegation.Covers{Vehicle: car},
@@ -163,6 +173,8 @@ func TestCompiledGrantsAuthorizeOverHTTP(t *testing.T) {
 				Validity:   span(1, 400),
 				Redelegate: delegation.Redelegate{Mode: delegation.RedelegateNone}, CreatedAt: day(1),
 			})
+			require.Equal(t, http.StatusAccepted, status, body)
+			status, body = h.do(http.MethodPost, "/orgs/"+org+"/pending/"+body["pending"].(string)+"/approve", admin, nil)
 			require.Equal(t, http.StatusCreated, status, body)
 
 			// Pickup and return, as the fleet's own custody record; then the booking

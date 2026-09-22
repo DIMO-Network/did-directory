@@ -69,10 +69,10 @@ type Result struct {
 	Op  string `json:"op"`
 }
 
-// Put creates or updates the record at collection/rkey in org's repository,
-// as a write by committedBy ("" for the org itself). The record is
-// canonicalised, checked structurally and committed.
-func (r *Repository) Put(ctx context.Context, org, collection, rkey string, body []byte, committedBy string, approvedBy []string) (*Result, error) {
+// Prepare canonicalises body and checks it structurally as a write of
+// collection/rkey to org's repository by committedBy ("" for the org itself).
+// What it returns is what Put commits, once the role checks have passed.
+func (r *Repository) Prepare(org, collection, rkey string, body []byte, committedBy string) (json.RawMessage, error) {
 	record, err := repo.CanonicalRecord(body)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
@@ -80,6 +80,13 @@ func (r *Repository) Put(ctx context.Context, org, collection, rkey string, body
 	if err := checkRecord(org, collection, rkey, record, committedBy); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
+	return record, nil
+}
+
+// Put creates or updates the record at collection/rkey in org's repository,
+// as a write by committedBy ("" for the org itself), approved by approvedBy.
+// record is Prepare's output.
+func (r *Repository) Put(ctx context.Context, org, collection, rkey string, record json.RawMessage, committedBy string, approvedBy []string) (*Result, error) {
 	return r.append(ctx, org, collection, rkey, func(cur *store.Stored) (string, json.RawMessage, error) {
 		if cur != nil && cur.Live() {
 			return repo.OpUpdate, record, nil

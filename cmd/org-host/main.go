@@ -14,6 +14,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/internal/orghost"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
+	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/rs/zerolog"
 )
@@ -83,6 +84,12 @@ func main() {
 		log.Warn().Msg("No ISSUER_DIDS configured: nothing may call /authorize")
 	}
 
+	// The commit policy profiles a role may name (plan §3.2). The booking
+	// profile is registered here by name; what a booking is stays with the
+	// booking service (decision F).
+	booking := agreement.CommitPolicy()
+	policies := orghost.Policies{booking.Name: booking}
+
 	repo := &orghost.Repository{Store: st, Signer: orghost.NewLocalSigner(st, sealer)}
 	app := orghost.New(orghost.Options{
 		Repo:     repo,
@@ -90,6 +97,7 @@ func main() {
 		Control:  client.New(cfg.DirectoryURL),
 		Issuers:  cfg.IssuerDIDs,
 		Admins:   cfg.AdminDIDs,
+		Policies: policies,
 		PageSize: cfg.PageSize,
 		Log:      log,
 	})
