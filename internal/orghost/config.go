@@ -3,6 +3,7 @@ package orghost
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,6 +23,12 @@ type Settings struct {
 	IdentityJWKS    string `yaml:"IDENTITY_JWKS"`
 	// IdentityIssuer is the iss claim identity tokens must carry, or "" for any.
 	IdentityIssuer string `yaml:"IDENTITY_ISSUER"`
+	// DirectoryURL is the DID directory, for control state (plan §3.3).
+	DirectoryURL string `yaml:"DIRECTORY_URL"`
+	// IssuerDIDs are the DIDs that may call POST /authorize: dauth's.
+	IssuerDIDs []string `yaml:"ISSUER_DIDS"`
+	// AdminDIDs are the DIDs that may set party attributes (decision E).
+	AdminDIDs []string `yaml:"ADMIN_DIDS"`
 	// PageSize bounds list and log responses.
 	PageSize int `yaml:"PAGE_SIZE"`
 }
@@ -45,6 +52,14 @@ func LoadSettings(path string) (*Settings, error) {
 	env("IDENTITY_JWKS_URL", &s.IdentityJWKSURL)
 	env("IDENTITY_JWKS", &s.IdentityJWKS)
 	env("IDENTITY_ISSUER", &s.IdentityIssuer)
+	env("DIRECTORY_URL", &s.DirectoryURL)
+	// Comma-separated in the environment.
+	if v := os.Getenv("ISSUER_DIDS"); v != "" {
+		s.IssuerDIDs = splitList(v)
+	}
+	if v := os.Getenv("ADMIN_DIDS"); v != "" {
+		s.AdminDIDs = splitList(v)
+	}
 	if v := os.Getenv("PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
 			s.Port = p
@@ -56,4 +71,14 @@ func LoadSettings(path string) (*Settings, error) {
 		}
 	}
 	return s, nil
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

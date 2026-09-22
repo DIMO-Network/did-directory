@@ -87,6 +87,8 @@ The `Resolver` implementation is the bulk of the host's read code:
 | `Party` | party table |
 | `Exclusives` | delegations with `exclusive` over the vehicle, live at `at`; `Since` from validity start or commit time |
 
+As built (step 3): `internal/orghost.Resolver` reads records from any repository on this host, so a chain from one org through another resolves as long as both live here. `Custody` and `Exclusives` are likewise host-wide, found by `(vehicle, holder)` and by `covers.vehicle`, plus `covers.tag` for a tag the vehicle has a raw live membership in at `at`; an exclusive claim whose coverage is `inherit` is not found, since finding it means evaluating its chain, which is what the deferred coverage index was for. Control state comes from the directory through `pkg/client.Control`, cached 30 seconds; a vehicle the directory does not hold has no eras. `Party` reads the `parties` table, set by `PUT /parties/:did` from a DID in `ADMIN_DIDS`; an org registered here with no row is `KindOrg` and not an operator, and any other unlisted DID is `KindUnknown`. `/authorize` is open to the DIDs in `ISSUER_DIDS`, refuses `at`, evaluates under `DefaultPolicy` at the host clock and returns the coverage plus `at`; refusals are 403 with a `code` naming the evaluator's error, and `exclusive_hold` carries the suspended abilities, for which `delegation.ExclusiveHoldError` now exists. A tombstone the org wrote itself has `by = ""` on the commit and is handed to the evaluator as the org DID, since `revokedAt` compares it to `from`.
+
 ### 3.4 Other reads
 
 - `GET /orgs/:org/:collection[/:rkey]` for members with a read role or `org:admin`.
@@ -118,7 +120,7 @@ Derived indexes for the resolver are plain btrees on `heads` joined to `commits`
 
 **did-directory, before the host can exist:**
 - The CLI can set `#dimo_org` and `#dimo_org_host` on an org DID. **Done 2026-09-22:** `dimocli create --org [--org-key did:key] [--org-host URL]` publishes the commit key (generated into the keystore as `<did>.org.json`, or supplied by the host) and the `DimoOrgHost` service entry; `update --org-key | --new-org-key | --org-host` sets them on an existing DID; `rotate` keeps `#dimo_org`; `pubkey --org` prints it. Controlled DIDs refuse all three.
-- `pkg/client` gains nothing; the host uses `Control` and `Resolve`.
+- `pkg/client` gains only `ErrNotFound`, so the host can tell an unknown vehicle from a directory outage; it uses `Control` and `Resolve`.
 - `pkg/agreement` gains a small client: compile, then `PUT` each grant and custody period to the host under the booking role, and tombstone the keys that dropped out. This is the booking SDK (decision F). It may move to its own repo later; nothing here depends on it.
 
 **dauth:**
@@ -134,7 +136,7 @@ Each step ends with something runnable.
 
 1. **CLI org keys.** `dimocli` can create an org DID with `#dimo_org` and set `#dimo_org_host`. Half a day. **Done 2026-09-22** (§5).
 2. **Repository core.** Commits, signing, heads, tombstones, `ValidateRKey` on every write, in-memory and Postgres stores, `GET` for members. No checks yet beyond structure. Test: write, read back, verify the chain and every signature offline. **Done 2026-09-22:** `pkg/repo` (commit, canonical JSON, TIDs, `VerifyLog`), `internal/orghost` (sealed keys behind `repo.Signer`, JWKS identity tokens, structural checks, write path) and `internal/orghost/store` (memory and Postgres), served by `cmd/org-host`. Until step 4 any authenticated DID may read or write any repository; the commit records who did. See §3.1 for what the commit gained.
-3. **Resolver and `/authorize`.** Implement `delegation.Resolver` over the store and directory. Test: the Avis fixtures from `pkg/agreement/evaluate_test.go` replayed through HTTP produce the same coverage.
+3. **Resolver and `/authorize`.** Implement `delegation.Resolver` over the store and directory. Test: the Avis fixtures from `pkg/agreement/evaluate_test.go` replayed through HTTP produce the same coverage. **Done 2026-09-22:** `internal/orghost.Resolver`, the store's resolver queries with partial expression indexes over the derived jsonb (memory and Postgres), the `parties` table and routes, `POST /authorize`, and `DIRECTORY_URL`, `ISSUER_DIDS`, `ADMIN_DIDS` settings. `TestCompiledGrantsAuthorizeOverHTTP` and `TestInsurerGrantAuthorizesOverHTTP` are the replay, driven at fixed host-clock times. See §3.3 for what was settled in the building.
 4. **Write-time checks and approval.** Roles, `CheckCommit`, `CheckMembershipGrowth`, pending writes, second approval, `revokeAuthoredBy`. Test: the spec §13.1 table, action by action.
 5. **Booking SDK.** The `pkg/agreement` client from §5 against the running host. Test: booking → paid → picked up → returned driven from a test booking service, then `/authorize` for the renter and the blocked operator. The host's code does not change in this step.
 6. **Proofs and descendants.** Coverage proof bundle plus an offline verifier in `pkg/proof`; descendants listing. Test: a proof verifies with the host down.
@@ -145,6 +147,7 @@ Each step ends with something runnable.
 
 - **Cross-org chains and self-hosting.** A chain from Ford Pro's repo through Avis's repo is one database in v1. When an org self-hosts, `Record` and `Opening` have to fetch from another host, and that host has to decide whether to answer. Coverage proofs are the likely currency. Not designed.
 - **Membership author authority (§9.2)** is checked by the evaluator from `Membership.CreatedBy`. The host must populate that from `committedBy`, not from the request body, for the same reason as `Stored.CommittedBy`.
+- **Custody and exclusives are host-wide.** `Resolver.Custody(vehicle, holder)` and `Exclusives(vehicle, at)` carry no org, so they read every repository on the host. A custody record in org B's repository therefore widens a custody-narrowed grant from org A, up to A's own data window, and an exclusive claim in B suspends A's live abilities. Step 4's role checks bound who may write either; scoping them to the issuer's repository instead would need the `Resolver` to be told which grant is asking, or the record's controller to be found through the directory on every call. Left host-wide for now.
 - **Device-synced custody.** A custody period signed by the car's device arrives late and out of order. Whose write is it, under what role? Provisionally the operator's booking service, with the device signature kept on the record for audit.
 - **`revokeSince` ending the era** was motivated by bearer SACDs, which no longer exist (spec §19). Leave as is until someone needs the simpler behaviour.
 - **What an app / `clientId` is.** Provisionally a DID with a role or grant. The `clientAllowlist` check needs dauth to attest it.

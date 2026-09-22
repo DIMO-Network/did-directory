@@ -21,23 +21,56 @@ import (
 
 // Server serves org repositories over HTTP (plan §3).
 //
-// Step 2 of the plan: every route under /orgs needs an identity token, and any
-// authenticated DID may read or write any org's repository; the commit records
-// who did. Roles, CheckCommit and pending approvals gate these routes in step
-// 4, which is where "member" starts to mean something.
+// Every route but /health needs an identity token. Under /orgs any
+// authenticated DID may read or write any org's repository and the commit
+// records who did; roles, CheckCommit and pending approvals gate these routes
+// in step 4, which is where "member" starts to mean something. /authorize is
+// for the issuer (dauth) and /parties for DIMO, each an allowlist of DIDs.
 type Server struct {
 	repo     *Repository
 	auth     Authenticator
+	resolver *Resolver
+	issuers  map[string]bool
+	admins   map[string]bool
 	pageSize int
 	log      zerolog.Logger
 }
 
+// Options configures a Server.
+type Options struct {
+	Repo *Repository
+	Auth Authenticator
+	// Control is where control state comes from: the DID directory.
+	Control ControlSource
+	// Issuers are the DIDs that may call POST /authorize (plan §3.3): dauth.
+	Issuers []string
+	// Admins are the DIDs that may set party attributes (plan §1 decision E).
+	Admins []string
+	// PageSize bounds list and log responses; zero means 100.
+	PageSize int
+	Log      zerolog.Logger
+}
+
 // New builds the Fiber app.
-func New(r *Repository, auth Authenticator, pageSize int, log zerolog.Logger) *fiber.App {
-	if pageSize <= 0 {
-		pageSize = 100
+func New(o Options) *fiber.App {
+	if o.PageSize <= 0 {
+		o.PageSize = 100
 	}
-	s := &Server{repo: r, auth: auth, pageSize: pageSize, log: log.With().Str("component", "orghost").Logger()}
+	set := func(dids []string) map[string]bool {
+		m := map[string]bool{}
+		for _, d := range dids {
+			if d != "" {
+				m[d] = true
+			}
+		}
+		return m
+	}
+	s := &Server{
+		repo: o.Repo, auth: o.Auth,
+		resolver: &Resolver{Store: o.Repo.Store, Control: o.Control, Now: o.Repo.now},
+		issuers:  set(o.Issuers), admins: set(o.Admins),
+		pageSize: o.PageSize, log: o.Log.With().Str("component", "orghost").Logger(),
+	}
 
 	app := fiber.New(fiber.Config{AppName: "org-host", DisableStartupMessage: true})
 	app.Use(recover.New())
@@ -47,6 +80,11 @@ func New(r *Repository, auth Authenticator, pageSize int, log zerolog.Logger) *f
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok"})
 	})
+
+	app.Post("/authorize", s.authenticate, s.authorize)
+	parties := app.Group("/parties", s.authenticate)
+	parties.Get("/:did", s.getParty)
+	parties.Put("/:did", s.setParty)
 
 	orgs := app.Group("/orgs", s.authenticate)
 	orgs.Post("/:org", s.register)

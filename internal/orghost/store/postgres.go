@@ -74,6 +74,26 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 			FOREIGN KEY (org, record_seq) REFERENCES commits(org, seq),
 			FOREIGN KEY (org, tombstone_seq) REFERENCES commits(org, seq)
 		);
+		CREATE TABLE IF NOT EXISTS parties (
+			did      TEXT PRIMARY KEY,
+			kind     TEXT NOT NULL,
+			operator BOOLEAN NOT NULL,
+			set_at   TIMESTAMPTZ NOT NULL
+		);
+
+		-- The resolver's lookups (plan §3.3), as partial expression indexes over
+		-- the derived jsonb. They index every version of a record; the join to
+		-- heads is what picks the current one.
+		CREATE INDEX IF NOT EXISTS commits_membership_idx ON commits (org, (record_json->>'tag'), (record_json->>'vehicle'))
+			WHERE collection = 'network.dimo.org.tagMembership';
+		CREATE INDEX IF NOT EXISTS commits_custody_idx ON commits ((record_json->>'vehicle'), (record_json->>'holder'))
+			WHERE collection = 'network.dimo.org.custody';
+		CREATE INDEX IF NOT EXISTS commits_role_idx ON commits (org, (record_json->>'to'))
+			WHERE collection = 'network.dimo.org.role';
+		CREATE INDEX IF NOT EXISTS commits_exclusive_vehicle_idx ON commits ((record_json->'covers'->>'vehicle'))
+			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'exclusive') = 'array';
+		CREATE INDEX IF NOT EXISTS commits_exclusive_tag_idx ON commits ((record_json->'covers'->>'tag'))
+			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'exclusive') = 'array';
 	`
 	_, err := s.pool.Exec(ctx, query)
 	return err
@@ -273,6 +293,104 @@ func (s *PostgresStore) List(ctx context.Context, org, collection, afterRKey str
 		out = append(out, *st)
 	}
 	return out, rows.Err()
+}
+
+// queryStored runs a query over the current view of records. where is applied
+// to the head row h and the record commit r, with args numbered from $1.
+func (s *PostgresStore) queryStored(ctx context.Context, where string, args ...any) ([]Stored, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+storedColumns+storedFrom+` WHERE `+where+` ORDER BY r.org, r.seq`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query records: %w", err)
+	}
+	defer rows.Close()
+	out := []Stored{}
+	for rows.Next() {
+		st, err := scanStored(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan record: %w", err)
+		}
+		out = append(out, *st)
+	}
+	return out, rows.Err()
+}
+
+// memberAtSQL is the SQL for "membership commit m's interval contains $at".
+func memberAtSQL(at string) string {
+	return `(m.record_json->>'joinedAt')::timestamptz <= ` + at + `
+		AND (m.record_json->>'leftAt' IS NULL OR (m.record_json->>'leftAt')::timestamptz > ` + at + `)`
+}
+
+func (s *PostgresStore) Memberships(ctx context.Context, org, tag, vehicle string) ([]Stored, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.org.tagMembership' AND h.tombstone_seq IS NULL
+		AND r.record_json->>'tag' = $2 AND r.record_json->>'vehicle' = $3`, org, tag, vehicle)
+}
+
+func (s *PostgresStore) TagSize(ctx context.Context, org, tag string, at time.Time) (int, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return 0, err
+	}
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(DISTINCT m.record_json->>'vehicle')
+		FROM heads h JOIN commits m ON m.org = h.org AND m.seq = h.record_seq
+		WHERE h.org = $1 AND h.collection = 'network.dimo.org.tagMembership' AND h.tombstone_seq IS NULL
+			AND m.record_json->>'tag' = $2 AND `+memberAtSQL("$3"), org, tag, at).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count tag: %w", err)
+	}
+	return n, nil
+}
+
+func (s *PostgresStore) Custody(ctx context.Context, vehicle, holder string) ([]Stored, error) {
+	return s.queryStored(ctx, `h.collection = 'network.dimo.org.custody' AND h.tombstone_seq IS NULL
+		AND r.record_json->>'vehicle' = $1 AND r.record_json->>'holder' = $2`, vehicle, holder)
+}
+
+func (s *PostgresStore) Roles(ctx context.Context, org, member string) ([]Stored, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.org.role' AND r.record_json->>'to' = $2`, org, member)
+}
+
+func (s *PostgresStore) Exclusives(ctx context.Context, vehicle string, at time.Time) ([]Stored, error) {
+	return s.queryStored(ctx, `h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
+		AND jsonb_typeof(r.record_json->'exclusive') = 'array' AND jsonb_array_length(r.record_json->'exclusive') > 0
+		AND (r.record_json->'covers'->>'vehicle' = $1 OR r.record_json->'covers'->>'tag' IN (
+			SELECT m.record_json->>'tag'
+			FROM heads mh JOIN commits m ON m.org = mh.org AND m.seq = mh.record_seq
+			WHERE mh.collection = 'network.dimo.org.tagMembership' AND mh.tombstone_seq IS NULL
+				AND m.record_json->>'vehicle' = $1 AND `+memberAtSQL("$2")+`))`, vehicle, at)
+}
+
+func (s *PostgresStore) SetParty(ctx context.Context, p Party) error {
+	if p.SetAt.IsZero() {
+		p.SetAt = time.Now().UTC()
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO parties (did, kind, operator, set_at) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (did) DO UPDATE SET kind = EXCLUDED.kind, operator = EXCLUDED.operator, set_at = EXCLUDED.set_at`,
+		p.DID, p.Kind, p.Operator, p.SetAt)
+	if err != nil {
+		return fmt.Errorf("upsert party: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetParty(ctx context.Context, did string) (*Party, error) {
+	var p Party
+	err := s.pool.QueryRow(ctx, `SELECT did, kind, operator, set_at FROM parties WHERE did = $1`, did).
+		Scan(&p.DID, &p.Kind, &p.Operator, &p.SetAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query party: %w", err)
+	}
+	p.SetAt = p.SetAt.UTC()
+	return &p, nil
 }
 
 func (s *PostgresStore) Commits(ctx context.Context, org string, afterSeq int64, limit int) ([]repo.Committed, error) {

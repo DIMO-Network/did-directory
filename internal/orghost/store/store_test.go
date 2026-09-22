@@ -239,3 +239,127 @@ func TestStore_ConcurrentAppendsKeepOneChain(t *testing.T) {
 		})
 	}
 }
+
+// append commits a record after the org's current head.
+func appendRecord(t *testing.T, s Store, org, op, coll, rkey, record, by string) repo.Committed {
+	t.Helper()
+	ctx := context.Background()
+	head, err := s.Head(ctx, org)
+	require.NoError(t, err)
+	c := commit(org, head, op, coll, rkey, record, by)
+	require.NoError(t, s.AppendAfter(ctx, head, c))
+	return c
+}
+
+// The resolver queries read the current view: live records only, except roles,
+// found by the fields the evaluator asks by, across repositories where the
+// evaluator does not say which one.
+func TestStore_ResolverQueries(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			org, other := newOrg(t, s), newOrg(t, s)
+			tag := "at://" + org + "/network.dimo.org.tag/fleet"
+			// Custody and exclusives are read across repositories, so the vehicles
+			// and holder are minted per run or a persistent database would answer
+			// with an earlier run's rows.
+			car, van, renter := org+"-car", org+"-van", org+"-renter"
+			const alice = "did:dimo:alice"
+			const memberships, custody, roles, delegations = "network.dimo.org.tagMembership", "network.dimo.org.custody", "network.dimo.org.role", "network.dimo.delegation"
+			day := func(d int) string { return fmt.Sprintf("2026-01-%02dT00:00:00Z", d) }
+
+			// Two intervals for the car, one for the van that ended, and one for
+			// the car that was tombstoned.
+			appendRecord(t, s, org, repo.OpCreate, memberships, "m1", `{"tag":"`+tag+`","vehicle":"`+car+`","joinedAt":"`+day(1)+`","leftAt":"`+day(5)+`"}`, alice)
+			appendRecord(t, s, org, repo.OpCreate, memberships, "m2", `{"tag":"`+tag+`","vehicle":"`+car+`","joinedAt":"`+day(10)+`"}`, "")
+			appendRecord(t, s, org, repo.OpCreate, memberships, "m3", `{"tag":"`+tag+`","vehicle":"`+van+`","joinedAt":"`+day(1)+`","leftAt":"`+day(3)+`"}`, "")
+			appendRecord(t, s, org, repo.OpCreate, memberships, "m4", `{"tag":"`+tag+`","vehicle":"`+car+`","joinedAt":"`+day(6)+`","leftAt":"`+day(7)+`"}`, "")
+			appendRecord(t, s, org, repo.OpTombstone, memberships, "m4", "", "")
+
+			ms, err := s.Memberships(ctx, org, tag, car)
+			require.NoError(t, err)
+			require.Len(t, ms, 2)
+			assert.Equal(t, "m1", ms[0].RKey)
+			assert.Equal(t, alice, ms[0].CommittedBy)
+			assert.Equal(t, "m2", ms[1].RKey)
+			ms, err = s.Memberships(ctx, org, tag, "did:dimo:nobody")
+			require.NoError(t, err)
+			assert.Empty(t, ms)
+			_, err = s.Memberships(ctx, "did:dimo:nowhere", tag, car)
+			assert.True(t, IsNotFound(err))
+
+			at := func(d int) time.Time { return time.Date(2026, 1, d, 0, 0, 0, 0, time.UTC) }
+			for d, want := range map[int]int{1: 2, 3: 1, 5: 0, 6: 0, 12: 1} {
+				n, err := s.TagSize(ctx, org, tag, at(d))
+				require.NoError(t, err)
+				assert.Equal(t, want, n, "day %d", d)
+			}
+
+			// Custody is found by vehicle and holder across repositories.
+			appendRecord(t, s, org, repo.OpCreate, custody, "c1", `{"vehicle":"`+car+`","holder":"`+renter+`","from":"`+day(10)+`","until":"`+day(12)+`"}`, alice)
+			appendRecord(t, s, other, repo.OpCreate, custody, "c2", `{"vehicle":"`+car+`","holder":"`+renter+`","from":"`+day(20)+`"}`, "")
+			appendRecord(t, s, org, repo.OpCreate, custody, "c3", `{"vehicle":"`+van+`","holder":"`+renter+`","from":"`+day(10)+`"}`, "")
+			appendRecord(t, s, org, repo.OpCreate, custody, "c4", `{"vehicle":"`+car+`","holder":"`+renter+`","from":"`+day(1)+`","until":"`+day(2)+`"}`, "")
+			appendRecord(t, s, org, repo.OpTombstone, custody, "c4", "", "")
+			cs, err := s.Custody(ctx, car, renter)
+			require.NoError(t, err)
+			require.Len(t, cs, 2)
+			assert.ElementsMatch(t, []string{"c1", "c2"}, []string{cs[0].RKey, cs[1].RKey})
+
+			// Roles come back tombstoned or not; the evaluator reads the tombstone.
+			role := func(to string) string {
+				return `{"$type":"network.dimo.org.role","from":"` + org + `","to":"` + to + `","basis":[],"covers":{"tag":"` + tag + `"},"abilities":["tag:write"],"validity":{},"redelegate":{"mode":"none"},"createdAt":"` + day(1) + `"}`
+			}
+			appendRecord(t, s, org, repo.OpCreate, roles, "r1", role(alice), "")
+			appendRecord(t, s, org, repo.OpCreate, roles, "r2", role(alice), "")
+			appendRecord(t, s, org, repo.OpTombstone, roles, "r2", "", "")
+			appendRecord(t, s, org, repo.OpCreate, roles, "r3", role("did:dimo:bob"), "")
+			rs, err := s.Roles(ctx, org, alice)
+			require.NoError(t, err)
+			require.Len(t, rs, 2)
+			assert.True(t, rs[0].Live())
+			assert.False(t, rs[1].Live())
+			rs, err = s.Roles(ctx, other, alice)
+			require.NoError(t, err)
+			assert.Empty(t, rs)
+
+			// Exclusives: over the car directly, over a tag the car is in at the
+			// time, from any repository; not a record without an exclusive claim,
+			// not a tombstoned one, not one over a tag the car has left.
+			grant := func(covers, exclusive string) string {
+				return `{"$type":"network.dimo.delegation","from":"` + org + `","to":"` + renter + `","basis":[],"covers":` + covers + `,"abilities":["command:unlock"],"dataWindow":{},"validity":{"from":"` + day(10) + `"},"redelegate":{"mode":"none"}` + exclusive + `,"createdAt":"` + day(1) + `"}`
+			}
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g1", grant(`{"vehicle":"`+car+`"}`, `,"exclusive":["command:unlock"]`), "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g2", grant(`{"vehicle":"`+car+`"}`, ``), "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g3", grant(`{"vehicle":"`+car+`"}`, `,"exclusive":["command:unlock"]`), "")
+			appendRecord(t, s, org, repo.OpTombstone, delegations, "g3", "", "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g4", grant(`{"tag":"`+tag+`"}`, `,"exclusive":["command:unlock"]`), "")
+			appendRecord(t, s, other, repo.OpCreate, delegations, "g5", grant(`{"vehicle":"`+car+`"}`, `,"exclusive":["command:unlock"]`), "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g6", grant(`{"vehicle":"`+van+`"}`, `,"exclusive":["command:unlock"]`), "")
+			keys := func(sts []Stored) []string {
+				out := []string{}
+				for _, st := range sts {
+					out = append(out, st.RKey)
+				}
+				return out
+			}
+			ex, err := s.Exclusives(ctx, car, at(12))
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []string{"g1", "g4", "g5"}, keys(ex))
+			ex, err = s.Exclusives(ctx, car, at(8))
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []string{"g1", "g5"}, keys(ex), "the car was out of the tag on day 8")
+
+			// Parties.
+			_, err = s.GetParty(ctx, org)
+			assert.True(t, IsNotFound(err))
+			require.NoError(t, s.SetParty(ctx, Party{DID: org, Kind: KindOrg}))
+			require.NoError(t, s.SetParty(ctx, Party{DID: org, Kind: KindOrg, Operator: true}))
+			p, err := s.GetParty(ctx, org)
+			require.NoError(t, err)
+			assert.Equal(t, KindOrg, p.Kind)
+			assert.True(t, p.Operator)
+			assert.False(t, p.SetAt.IsZero())
+		})
+	}
+}

@@ -2,6 +2,7 @@ package orghost
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -23,6 +24,7 @@ import (
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
+	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
@@ -84,6 +86,45 @@ type host struct {
 	app    *fiber.App
 	issuer *issuer
 	repo   *Repository
+	// directory is what the resolver reads control state from.
+	directory *fakeDirectory
+	// clock is the host's time; tests move it to commit and evaluate at fixed
+	// points.
+	clock time.Time
+}
+
+// Privileged callers in tests: the one DID allowed to call /authorize and the
+// one allowed to set parties.
+const (
+	dauthDID = "did:dimo:dauth"
+	dimoDID  = "did:dimo:dimo"
+)
+
+// fakeDirectory answers control lookups for the vehicles a test registers.
+type fakeDirectory struct {
+	mu     sync.Mutex
+	states map[string]*control.State
+	calls  int
+}
+
+func (d *fakeDirectory) Control(_ context.Context, did string) (*control.State, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls++
+	st, ok := d.states[did]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", client.ErrNotFound, did)
+	}
+	return st, nil
+}
+
+func (d *fakeDirectory) set(did string, st *control.State) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.states == nil {
+		d.states = map[string]*control.State{}
+	}
+	d.states[did] = st
 }
 
 func stores(t *testing.T) map[string]store.Store {
@@ -105,8 +146,20 @@ func newHost(t *testing.T, st store.Store) *host {
 	require.NoError(t, err)
 	sealer, err := NewEphemeralSealer()
 	require.NoError(t, err)
-	r := &Repository{Store: st, Signer: NewLocalSigner(st, sealer)}
-	return &host{t: t, app: New(r, auth, 50, zerolog.Nop()), issuer: iss, repo: r}
+	h := &host{t: t, issuer: iss, directory: &fakeDirectory{}}
+	r := &Repository{Store: st, Signer: NewLocalSigner(st, sealer), Now: func() time.Time {
+		if h.clock.IsZero() {
+			return time.Now()
+		}
+		return h.clock
+	}}
+	h.repo = r
+	h.app = New(Options{
+		Repo: r, Auth: auth, Control: h.directory,
+		Issuers: []string{dauthDID}, Admins: []string{dimoDID},
+		PageSize: 50, Log: zerolog.Nop(),
+	})
+	return h
 }
 
 // do sends a request as the given DID (or unauthenticated when as is "").
