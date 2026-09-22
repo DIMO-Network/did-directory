@@ -1,0 +1,10 @@
+PORT: 8081
+DATABASE_URL: "postgres://dimo:dimo@localhost:5432/dimo_org_host?sslmode=disable"
+LOG_LEVEL: "info"
+# Base64 of 32 random bytes; seals org signing keys at rest. Required with DATABASE_URL.
+#   openssl rand -base64 32
+MASTER_KEY: ""
+# Identity tokens (RS256, sub = member DID) are verified against this key set.
+IDENTITY_JWKS_URL: "http://localhost:3000/siwe/keys"
+IDENTITY_ISSUER: ""
+PAGE_SIZE: 100
