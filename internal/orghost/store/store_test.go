@@ -458,3 +458,46 @@ func TestStore_Pending(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_DelegationsWithBasis(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			owner := newOrg(t, s)
+			dealer := newOrg(t, s)
+			root := "at://" + owner + "/network.dimo.delegation/consent"
+			delegations := "network.dimo.delegation"
+
+			head, _ := s.Head(ctx, owner)
+			require.NoError(t, s.AppendAfter(ctx, head, commit(owner, head, repo.OpCreate, delegations, "consent", `{"basis":[],"to":"`+dealer+`"}`, "")))
+			// Two descendants in the dealer's repository, one of them later
+			// tombstoned; a record with another basis; a role naming the root.
+			head, _ = s.Head(ctx, dealer)
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "a", `{"basis":["`+root+`"],"to":"did:dimo:x"}`, "")))
+			head, _ = s.Head(ctx, dealer)
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "b", `{"basis":["at://did:dimo:other/network.dimo.delegation/k","`+root+`"],"to":"did:dimo:y"}`, "")))
+			head, _ = s.Head(ctx, dealer)
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "c", `{"basis":["`+root+`"],"to":"did:dimo:z"}`, "")))
+			head, _ = s.Head(ctx, dealer)
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpTombstone, delegations, "c", "", "")))
+			head, _ = s.Head(ctx, dealer)
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "d", `{"basis":["at://did:dimo:other/network.dimo.delegation/k"],"to":"did:dimo:w"}`, "")))
+			head, _ = s.Head(ctx, dealer)
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, "network.dimo.org.role", "r", `{"basis":["`+root+`"],"to":"did:dimo:v"}`, "")))
+
+			got, err := s.DelegationsWithBasis(ctx, root)
+			require.NoError(t, err)
+			keys := []string{}
+			for _, st := range got {
+				keys = append(keys, st.RKey)
+			}
+			assert.ElementsMatch(t, []string{"a", "b"}, keys)
+			for _, st := range got {
+				assert.Equal(t, "at://"+dealer+"/"+delegations+"/"+st.RKey, st.URI)
+			}
+			got, err = s.DelegationsWithBasis(ctx, "at://"+owner+"/network.dimo.delegation/nothing")
+			require.NoError(t, err)
+			assert.Empty(t, got)
+		})
+	}
+}

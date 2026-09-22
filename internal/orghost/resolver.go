@@ -118,6 +118,11 @@ func (r *Resolver) Memberships(ctx context.Context, tag, vehicle string) ([]dele
 	if err != nil {
 		return nil, resolveErr(err)
 	}
+	return membershipsOf(sts)
+}
+
+// membershipsOf converts membership records to what the evaluator reads.
+func membershipsOf(sts []store.Stored) ([]delegation.Membership, error) {
 	out := make([]delegation.Membership, 0, len(sts))
 	for i := range sts {
 		var m delegation.MembershipRecord
@@ -155,6 +160,11 @@ func (r *Resolver) Custody(ctx context.Context, vehicle, holder string) ([]deleg
 	if err != nil {
 		return nil, resolveErr(err)
 	}
+	return custodyOf(sts)
+}
+
+// custodyOf converts custody records to periods, oldest first.
+func custodyOf(sts []store.Stored) ([]delegation.CustodyPeriod, error) {
 	out := make([]delegation.CustodyPeriod, 0, len(sts))
 	for i := range sts {
 		var p delegation.CustodyPeriod
@@ -176,6 +186,11 @@ func (r *Resolver) Roles(ctx context.Context, org, member string) ([]delegation.
 	if err != nil {
 		return nil, resolveErr(err)
 	}
+	return storedAll(org, sts)
+}
+
+// storedAll converts every record in sts, all from org's repository.
+func storedAll(org string, sts []store.Stored) ([]delegation.Stored, error) {
 	out := make([]delegation.Stored, 0, len(sts))
 	for i := range sts {
 		s, err := stored(org, &sts[i])
@@ -225,6 +240,12 @@ func (r *Resolver) Opening(ctx context.Context, vehicle string, era uint64, cont
 	if err != nil {
 		return nil, resolveErr(err)
 	}
+	return openingOf(st, era)
+}
+
+// openingOf reads a vehicleControl record as an opening for era, or nil if
+// the record is tombstoned or names another era.
+func openingOf(st *store.Stored, era uint64) (*control.Opening, error) {
 	if !st.Live() {
 		return nil, nil
 	}
@@ -277,6 +298,12 @@ func (r *Resolver) Exclusives(ctx context.Context, vehicle string, at time.Time)
 	if err != nil {
 		return nil, resolveErr(err)
 	}
+	return holdsOf(sts, at)
+}
+
+// holdsOf converts the delegations the store found to the holds in force at
+// time at.
+func holdsOf(sts []store.Stored, at time.Time) ([]delegation.ExclusiveHold, error) {
 	var holds []delegation.ExclusiveHold
 	for i := range sts {
 		var rec delegation.Record

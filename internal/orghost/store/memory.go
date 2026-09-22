@@ -364,6 +364,26 @@ func (s *MemoryStore) DelegationsOverTag(_ context.Context, org, tag string) ([]
 	return out, nil
 }
 
+func (s *MemoryStore) DelegationsWithBasis(_ context.Context, uri string) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	orgs := make([]string, 0, len(s.orgs))
+	for did := range s.orgs {
+		orgs = append(orgs, did)
+	}
+	sort.Strings(orgs)
+	out := []Stored{}
+	for _, did := range orgs {
+		s.orgs[did].each("network.dimo.delegation", func(st Stored, rec map[string]any) {
+			basis, _ := rec["basis"].([]any)
+			if slices.Contains(basis, any(uri)) {
+				out = append(out, st)
+			}
+		})
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) Authored(_ context.Context, org, member string, since time.Time) ([]Stored, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
