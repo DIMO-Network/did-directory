@@ -109,6 +109,8 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS commits_covers_tag_idx ON commits (org, (record_json->'covers'->>'tag'))
 			WHERE collection = 'network.dimo.delegation';
 		CREATE INDEX IF NOT EXISTS commits_author_idx ON commits (org, committed_by, committed_at);
+		CREATE INDEX IF NOT EXISTS commits_basis_idx ON commits USING GIN ((record_json->'basis'))
+			WHERE collection = 'network.dimo.delegation';
 	`
 	// Two instances starting at once would race to create the same tables,
 	// which Postgres reports as a duplicate type rather than tolerating.
@@ -399,6 +401,11 @@ func (s *PostgresStore) DelegationsOverTag(ctx context.Context, org, tag string)
 	}
 	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
 		AND r.record_json->'covers'->>'tag' = $2`, org, tag)
+}
+
+func (s *PostgresStore) DelegationsWithBasis(ctx context.Context, uri string) ([]Stored, error) {
+	return s.queryStored(ctx, `h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
+		AND jsonb_typeof(r.record_json->'basis') = 'array' AND r.record_json->'basis' ? $1`, uri)
 }
 
 func (s *PostgresStore) Authored(ctx context.Context, org, member string, since time.Time) ([]Stored, error) {

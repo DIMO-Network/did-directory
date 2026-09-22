@@ -160,6 +160,10 @@ type Store interface {
 	// DelegationsOverTag returns org's live delegation records whose covers.tag
 	// is tag: the records a membership in the tag widens.
 	DelegationsOverTag(ctx context.Context, org, tag string) ([]Stored, error)
+	// DelegationsWithBasis returns the live delegation records, from every
+	// repository on this host, whose basis names uri: its direct descendants
+	// (spec §9.3).
+	DelegationsWithBasis(ctx context.Context, uri string) ([]Stored, error)
 	// Authored returns org's live records whose current version was committed
 	// by member after since, ordered by seq.
 	Authored(ctx context.Context, org, member string, since time.Time) ([]Stored, error)

@@ -105,6 +105,8 @@ func New(o Options) *fiber.App {
 	orgs.Post("/:org/pending/:id/approve", s.approve)
 	orgs.Delete("/:org/pending/:id", s.withdraw)
 	orgs.Post("/:org/revoke-authored-by", s.revokeAuthoredBy)
+	orgs.Get("/:org/delegations/:rkey/proof", s.proof)
+	orgs.Get("/:org/delegations/:rkey/descendants", s.descendants)
 	orgs.Post("/:org/:collection", s.create)
 	orgs.Get("/:org/:collection", s.list)
 	orgs.Put("/:org/:collection/:rkey", s.put)

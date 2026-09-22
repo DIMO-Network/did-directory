@@ -90,7 +90,7 @@ func (s *Server) authorize(c *fiber.Ctx) error {
 	ev := &delegation.Evaluator{Resolver: s.resolver}
 	cov, err := ev.Authorize(c.Context(), req.URI, req.Caller, req.ClientID, req.Vehicle, req.Abilities, at)
 	if err != nil {
-		return s.refuse(c, &req, err)
+		return s.refuse(c, req.URI, err)
 	}
 	log := s.log.Info().Str("uri", req.URI).Str("caller", req.Caller).Str("vehicle", req.Vehicle).Strs("abilities", req.Abilities)
 	if cov.RecoveryUsed {
@@ -133,29 +133,33 @@ func (r *AuthorizeRequest) own() {
 	}
 }
 
+// codeOf names an evaluation refusal.
+func codeOf(err error) string {
+	for _, rc := range refusalCodes {
+		if errors.Is(err, rc.err) {
+			return rc.code
+		}
+	}
+	return CodeDenied
+}
+
 // refuse maps an evaluation error to a response: 404 for a record that is not
 // here, 500 when the host could not read what it needed, and otherwise 403
 // with a code the issuer can act on.
-func (s *Server) refuse(c *fiber.Ctx, req *AuthorizeRequest, err error) error {
+func (s *Server) refuse(c *fiber.Ctx, uri string, err error) error {
 	switch {
 	case store.IsNotFound(err):
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error(), "code": "not_found"})
 	case errors.Is(err, ErrResolve):
-		s.log.Error().Err(err).Str("uri", req.URI).Msg("authorize: resolver failed")
+		s.log.Error().Err(err).Str("uri", uri).Msg("evaluation: resolver failed")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
-	body := fiber.Map{"error": err.Error(), "code": CodeDenied}
-	for _, rc := range refusalCodes {
-		if errors.Is(err, rc.err) {
-			body["code"] = rc.code
-			break
-		}
-	}
+	body := fiber.Map{"error": err.Error(), "code": codeOf(err)}
 	var hold *delegation.ExclusiveHoldError
 	if errors.As(err, &hold) {
 		body["suspended"] = hold.Suspended
 	}
-	s.log.Info().Str("uri", req.URI).Str("caller", req.Caller).Str("vehicle", req.Vehicle).Str("code", body["code"].(string)).Msg("authorize refused")
+	s.log.Info().Str("uri", uri).Str("path", c.Path()).Str("code", body["code"].(string)).Msg("evaluation refused")
 	return c.Status(fiber.StatusForbidden).JSON(body)
 }
 
