@@ -117,10 +117,10 @@ type Membership struct {
 // would leave someone standing next to a locked car in a garage with no signal.
 // Custody narrows the data window afterwards instead.
 type CustodyPeriod struct {
-	Vehicle string
-	Holder  string
-	From    time.Time
-	Until   *time.Time
+	Vehicle string     `json:"vehicle"`
+	Holder  string     `json:"holder"`
+	From    time.Time  `json:"from"`
+	Until   *time.Time `json:"until,omitempty"`
 }
 
 // Resolver supplies repository and directory data to the evaluator.

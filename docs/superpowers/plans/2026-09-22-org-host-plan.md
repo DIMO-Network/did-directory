@@ -43,6 +43,8 @@ commit {
 
 The hash chain is the v1 stand-in for the MST (spec §6.2). `committedAt` is the host clock and is what every `Stored.CommittedAt` and `Membership.CommittedAt` reads. Records are addressed as `at://<orgDID>/<collection>/<rkey>`; every rkey passes `delegation.ValidateRKey`.
 
+As built (step 2): the commit also carries `did`, the org, inside the signature, so a commit cannot be replayed into another repository even if two orgs were published under one key. The record is stored as the canonical JSON that was signed (sorted keys, no whitespace, numbers verbatim) and only derived into jsonb for queries, because a signature has to be checked against the bytes it was made over and jsonb does not give those back. A commit's CID is the sha2-256 multihash of the signed commit, as the directory does for operations; `prev` names it. `committedAt` is UTC at microsecond precision so a timestamptz round trip does not change the signed bytes. `repo.VerifyLog` replays a whole log offline against `#dimo_org`.
+
 Collections, all under the org's authority:
 
 | Collection | rkey | Record | Notes |
@@ -131,7 +133,7 @@ Derived indexes for the resolver are plain btrees on `heads` joined to `commits`
 Each step ends with something runnable.
 
 1. **CLI org keys.** `dimocli` can create an org DID with `#dimo_org` and set `#dimo_org_host`. Half a day. **Done 2026-09-22** (§5).
-2. **Repository core.** Commits, signing, heads, tombstones, `ValidateRKey` on every write, in-memory and Postgres stores, `GET` for members. No checks yet beyond structure. Test: write, read back, verify the chain and every signature offline.
+2. **Repository core.** Commits, signing, heads, tombstones, `ValidateRKey` on every write, in-memory and Postgres stores, `GET` for members. No checks yet beyond structure. Test: write, read back, verify the chain and every signature offline. **Done 2026-09-22:** `pkg/repo` (commit, canonical JSON, TIDs, `VerifyLog`), `internal/orghost` (sealed keys behind `repo.Signer`, JWKS identity tokens, structural checks, write path) and `internal/orghost/store` (memory and Postgres), served by `cmd/org-host`. Until step 4 any authenticated DID may read or write any repository; the commit records who did. See §3.1 for what the commit gained.
 3. **Resolver and `/authorize`.** Implement `delegation.Resolver` over the store and directory. Test: the Avis fixtures from `pkg/agreement/evaluate_test.go` replayed through HTTP produce the same coverage.
 4. **Write-time checks and approval.** Roles, `CheckCommit`, `CheckMembershipGrowth`, pending writes, second approval, `revokeAuthoredBy`. Test: the spec §13.1 table, action by action.
 5. **Booking SDK.** The `pkg/agreement` client from §5 against the running host. Test: booking → paid → picked up → returned driven from a test booking service, then `/authorize` for the renter and the blocked operator. The host's code does not change in this step.

@@ -5,6 +5,8 @@ services:
       POSTGRES_DB: dimo_did
       POSTGRES_USER: dimo
       POSTGRES_PASSWORD: dimo
+    volumes:
+      - ./scripts/init-org-host-db.sql:/docker-entrypoint-initdb.d/org-host.sql:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -27,3 +29,22 @@ services:
         condition: service_healthy
     command: ["-settings", "/dev/null"]
 
+
+  org-host:
+    build:
+      context: .
+      target: org-host
+    environment:
+      DATABASE_URL: "postgres://dimo:dimo@postgres:5432/dimo_org_host?sslmode=disable"
+      PORT: "8081"
+      # Development only: a fixed master key seals org signing keys at rest.
+      MASTER_KEY: "${ORG_HOST_MASTER_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}"
+      # Where the identity token issuer (dauth) publishes its RS256 keys.
+      IDENTITY_JWKS_URL: "${IDENTITY_JWKS_URL:-}"
+      IDENTITY_JWKS: "${IDENTITY_JWKS:-}"
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["-settings", "/dev/null"]

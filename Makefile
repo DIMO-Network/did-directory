@@ -6,12 +6,19 @@ LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
 build:
 	CGO_ENABLED=0 go build $(LDFLAGS) -o bin/$(BINARY) ./cmd/did-directory
+	CGO_ENABLED=0 go build $(LDFLAGS) -o bin/org-host ./cmd/org-host
+	CGO_ENABLED=0 go build $(LDFLAGS) -o bin/dimocli ./cmd/dimocli
 
 run: build
 	./bin/$(BINARY) -settings settings.yaml
 
 test:
 	go test -v -race -count=1 ./...
+
+# Also runs the org host's store and HTTP tests against Postgres. Create the
+# database once with `createdb org_host_test`.
+test-postgres:
+	ORG_HOST_TEST_DATABASE_URL="postgres://localhost:5432/org_host_test?sslmode=disable" go test -race -count=1 ./internal/orghost/...
 
 lint:
 	golangci-lint run ./...

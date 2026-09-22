@@ -1,0 +1,315 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/DIMO-Network/did-directory/pkg/repo"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
+)
+
+// PostgresStore implements Store using PostgreSQL.
+type PostgresStore struct {
+	pool *pgxpool.Pool
+	log  zerolog.Logger
+}
+
+// NewPostgresStore connects to connStr and ensures the schema exists.
+func NewPostgresStore(ctx context.Context, connStr string, log zerolog.Logger) (*PostgresStore, error) {
+	pool, err := pgxpool.New(ctx, connStr)
+	if err != nil {
+		return nil, fmt.Errorf("pgxpool new: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("pgxpool ping: %w", err)
+	}
+	s := &PostgresStore{pool: pool, log: log.With().Str("component", "orghost_postgres_store").Logger()}
+	if err := s.ensureSchema(ctx); err != nil {
+		return nil, fmt.Errorf("ensure schema: %w", err)
+	}
+	return s, nil
+}
+
+// The schema follows plan §4. The commit's record is kept as the canonical JSON
+// text that was signed, since a signature has to be checked against the bytes it
+// was made over and jsonb does not promise to give those back; record_json is
+// derived from it for the resolver's queries and indexes.
+func (s *PostgresStore) ensureSchema(ctx context.Context) error {
+	query := `
+		CREATE TABLE IF NOT EXISTS orgs (
+			did             TEXT PRIMARY KEY,
+			signing_key_enc BYTEA NOT NULL,
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE TABLE IF NOT EXISTS commits (
+			org          TEXT NOT NULL REFERENCES orgs(did),
+			seq          BIGINT NOT NULL,
+			cid          TEXT NOT NULL,
+			prev         TEXT NOT NULL,
+			rev          TEXT NOT NULL,
+			op           TEXT NOT NULL,
+			collection   TEXT NOT NULL,
+			rkey         TEXT NOT NULL,
+			record       TEXT,
+			record_json  JSONB GENERATED ALWAYS AS (record::jsonb) STORED,
+			committed_by TEXT NOT NULL,
+			approved_by  TEXT[] NOT NULL,
+			committed_at TIMESTAMPTZ NOT NULL,
+			sig          TEXT NOT NULL,
+			PRIMARY KEY (org, seq),
+			UNIQUE (org, cid),
+			UNIQUE (org, collection, rkey, rev)
+		);
+		CREATE TABLE IF NOT EXISTS heads (
+			org           TEXT NOT NULL,
+			collection    TEXT NOT NULL,
+			rkey          TEXT NOT NULL,
+			record_seq    BIGINT NOT NULL,
+			tombstone_seq BIGINT,
+			PRIMARY KEY (org, collection, rkey),
+			FOREIGN KEY (org, record_seq) REFERENCES commits(org, seq),
+			FOREIGN KEY (org, tombstone_seq) REFERENCES commits(org, seq)
+		);
+	`
+	_, err := s.pool.Exec(ctx, query)
+	return err
+}
+
+func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
+	if org.CreatedAt.IsZero() {
+		org.CreatedAt = time.Now().UTC()
+	}
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO orgs (did, signing_key_enc, created_at) VALUES ($1, $2, $3) ON CONFLICT (did) DO NOTHING`,
+		org.DID, org.KeyEnc, org.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert org: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrOrgExists
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetOrg(ctx context.Context, did string) (*Org, error) {
+	var org Org
+	err := s.pool.QueryRow(ctx, `SELECT did, signing_key_enc, created_at FROM orgs WHERE did = $1`, did).
+		Scan(&org.DID, &org.KeyEnc, &org.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query org: %w", err)
+	}
+	org.CreatedAt = org.CreatedAt.UTC()
+	return &org, nil
+}
+
+func (s *PostgresStore) Head(ctx context.Context, org string) (Head, error) {
+	return s.head(ctx, s.pool, org)
+}
+
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (s *PostgresStore) head(ctx context.Context, q querier, org string) (Head, error) {
+	var exists bool
+	if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orgs WHERE did = $1)`, org).Scan(&exists); err != nil {
+		return Head{}, fmt.Errorf("query org: %w", err)
+	}
+	if !exists {
+		return Head{}, ErrNotFound
+	}
+	var h Head
+	err := q.QueryRow(ctx, `SELECT seq, cid, rev FROM commits WHERE org = $1 ORDER BY seq DESC LIMIT 1`, org).
+		Scan(&h.Seq, &h.CID, &h.Rev)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Head{}, nil
+	}
+	if err != nil {
+		return Head{}, fmt.Errorf("query head: %w", err)
+	}
+	return h, nil
+}
+
+func (s *PostgresStore) AppendAfter(ctx context.Context, expectedHead Head, c repo.Committed) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize writers for this org. The conflict is between two rows that do
+	// not exist yet, so no row lock can catch it; the primary key on (org, seq)
+	// would, but only after both writers had signed rival commits.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, c.DID); err != nil {
+		return fmt.Errorf("lock org: %w", err)
+	}
+	head, err := s.head(ctx, tx, c.DID)
+	if err != nil {
+		return err
+	}
+	if head != expectedHead {
+		return ErrHeadChanged
+	}
+
+	var record *string
+	if len(c.Record) > 0 {
+		r := string(c.Record)
+		record = &r
+	}
+	approved := c.ApprovedBy
+	if approved == nil {
+		approved = []string{}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO commits (org, seq, cid, prev, rev, op, collection, rkey, record, committed_by, approved_by, committed_at, sig)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		c.DID, c.Seq, c.CID, c.Prev, c.Rev, c.Op, c.Collection, c.RKey, record, c.CommittedBy, approved, c.CommittedAt, c.Sig,
+	); err != nil {
+		return fmt.Errorf("insert commit: %w", err)
+	}
+
+	var upsert string
+	switch c.Op {
+	case repo.OpTombstone:
+		upsert = `UPDATE heads SET tombstone_seq = $4 WHERE org = $1 AND collection = $2 AND rkey = $3`
+	default:
+		upsert = `INSERT INTO heads (org, collection, rkey, record_seq, tombstone_seq) VALUES ($1, $2, $3, $4, NULL)
+			ON CONFLICT (org, collection, rkey) DO UPDATE SET record_seq = EXCLUDED.record_seq, tombstone_seq = NULL`
+	}
+	tag, err := tx.Exec(ctx, upsert, c.DID, c.Collection, c.RKey, c.Seq)
+	if err != nil {
+		return fmt.Errorf("update head: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("update head: %s of %s/%s touched %d rows", c.Op, c.Collection, c.RKey, tag.RowsAffected())
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+const storedColumns = `
+	r.org, r.seq, r.cid, r.rev, r.collection, r.rkey, r.record, r.committed_by, r.approved_by, r.committed_at,
+	t.seq, t.cid, t.committed_by, t.committed_at`
+
+const storedFrom = `
+	FROM heads h
+	JOIN commits r ON r.org = h.org AND r.seq = h.record_seq
+	LEFT JOIN commits t ON t.org = h.org AND t.seq = h.tombstone_seq`
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanStored(row rowScanner) (*Stored, error) {
+	var (
+		st        Stored
+		org       string
+		record    *string
+		tSeq      *int64
+		tCID, tBy *string
+		tAt       *time.Time
+	)
+	if err := row.Scan(&org, &st.Seq, &st.CID, &st.Rev, &st.Collection, &st.RKey, &record, &st.CommittedBy, &st.ApprovedBy, &st.CommittedAt,
+		&tSeq, &tCID, &tBy, &tAt); err != nil {
+		return nil, err
+	}
+	st.URI = "at://" + org + "/" + st.Collection + "/" + st.RKey
+	if record != nil {
+		st.Record = []byte(*record)
+	}
+	if len(st.ApprovedBy) == 0 {
+		st.ApprovedBy = nil
+	}
+	st.CommittedAt = st.CommittedAt.UTC()
+	if tSeq != nil {
+		st.Tombstone = &Tombstone{At: tAt.UTC(), By: *tBy, Seq: *tSeq, CID: *tCID}
+	}
+	return &st, nil
+}
+
+func (s *PostgresStore) Current(ctx context.Context, org, collection, rkey string) (*Stored, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+storedColumns+storedFrom+` WHERE h.org = $1 AND h.collection = $2 AND h.rkey = $3`,
+		org, collection, rkey)
+	st, err := scanStored(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query record: %w", err)
+	}
+	return st, nil
+}
+
+func (s *PostgresStore) List(ctx context.Context, org, collection, afterRKey string, limit int) ([]Stored, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 1 << 30
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+storedColumns+storedFrom+`
+		WHERE h.org = $1 AND h.collection = $2 AND h.rkey > $3 AND h.tombstone_seq IS NULL
+		ORDER BY h.rkey ASC LIMIT $4`, org, collection, afterRKey, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query records: %w", err)
+	}
+	defer rows.Close()
+	out := []Stored{}
+	for rows.Next() {
+		st, err := scanStored(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan record: %w", err)
+		}
+		out = append(out, *st)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) Commits(ctx context.Context, org string, afterSeq int64, limit int) ([]repo.Committed, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 1 << 30
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT org, seq, cid, prev, rev, op, collection, rkey, record, committed_by, approved_by, committed_at, sig
+		FROM commits WHERE org = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3`, org, afterSeq, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query commits: %w", err)
+	}
+	defer rows.Close()
+	out := []repo.Committed{}
+	for rows.Next() {
+		var c repo.Committed
+		var record *string
+		if err := rows.Scan(&c.DID, &c.Seq, &c.CID, &c.Prev, &c.Rev, &c.Op, &c.Collection, &c.RKey, &record,
+			&c.CommittedBy, &c.ApprovedBy, &c.CommittedAt, &c.Sig); err != nil {
+			return nil, fmt.Errorf("scan commit: %w", err)
+		}
+		if record != nil {
+			c.Record = []byte(*record)
+		}
+		if len(c.ApprovedBy) == 0 {
+			c.ApprovedBy = nil
+		}
+		c.CommittedAt = c.CommittedAt.UTC()
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) Close() error {
+	s.pool.Close()
+	return nil
+}
