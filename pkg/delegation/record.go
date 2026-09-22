@@ -128,6 +128,14 @@ type RoleConstraints struct {
 	// AllowExclusive lets issued records claim exclusivity, and with it recovery,
 	// its override. Custody grants need this; nothing else should have it.
 	AllowExclusive bool `json:"allowExclusive,omitempty"`
+	// Policy names the commit policy profile records authored under this role
+	// are checked against, so a booking service can commit live abilities
+	// unattended under a profile that allows it while the org's staff stay under
+	// the default (plan §3.2). Empty is the host's default profile. The host
+	// resolves the name and refuses a role naming one it does not know. Naming
+	// one makes the constraints present, so allowRedelegation and
+	// allowExclusive must then be set where they are wanted.
+	Policy string `json:"policy,omitempty"`
 }
 
 // validate checks the constraints against the abilities of the role carrying them.

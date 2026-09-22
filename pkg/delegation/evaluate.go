@@ -293,7 +293,11 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 	if err := rec.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid delegation %s: %w", s.URI, err)
 	}
-	if revokedAt(rec, s.Tombstone, at) {
+	revoked, err := e.revokedAt(ctx, rec, s.Tombstone, at, walk{depth: depth})
+	if err != nil {
+		return nil, err
+	}
+	if revoked {
 		return nil, ErrRevoked
 	}
 	if !rec.Validity.Set().Contains(at) {
@@ -322,8 +326,8 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		if !from.CanHaveMembers() {
 			return nil, fmt.Errorf("%s authored by %s, but %s cannot have members", s.URI, author, rec.From)
 		}
-		need := append([]string{"delegation:create"}, rec.Abilities...)
-		ok, err := e.hasRole(ctx, rec.From, author, rec.Covers, need, s.CommittedAt, e.shapeCheck(ctx, s, at))
+		need := AuthoringNeed(rec)
+		ok, err := e.hasRole(ctx, rec.From, author, rec.Covers, need, s.CommittedAt, e.shapeCheck(ctx, s, at), walk{depth: depth})
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", s.URI, err)
 		}
@@ -331,7 +335,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 			return nil, fmt.Errorf("%s: author %s lacked authority when committed", s.URI, author)
 		}
 		if author == rec.To {
-			ok, err := e.approvedByAnother(ctx, s, author, need)
+			ok, err := e.approvedByAnother(ctx, s, author, walk{depth: depth})
 			if err != nil {
 				return nil, err
 			}
@@ -341,7 +345,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		}
 	}
 
-	member, liveMember, err := e.membership(ctx, rec, vehicle, at)
+	member, liveMember, err := e.membership(ctx, rec, vehicle, at, depth)
 	if err != nil {
 		return nil, err
 	}
@@ -521,6 +525,13 @@ func (e *Evaluator) shapeCheck(ctx context.Context, s *Stored, at time.Time) fun
 	}
 }
 
+// CoveredVehicles counts the vehicles rec applies to at time at: one for a
+// vehicle, the tag's size for a tag, and for covers.inherit the largest of its
+// bases. It is the count CommitContext.CoveredVehicles wants.
+func (e *Evaluator) CoveredVehicles(ctx context.Context, rec *Record, at time.Time) (int, error) {
+	return e.coveredVehicles(ctx, rec, at, 1)
+}
+
 // coveredVehicles counts the vehicles a record applies to, following
 // covers.inherit up the basis chain to the selector that actually chooses them.
 // Inheriting from several bases is bounded below by the largest of them, which
@@ -550,9 +561,13 @@ func (e *Evaluator) coveredVehicles(ctx context.Context, rec *Record, at time.Ti
 	return most, nil
 }
 
-// approvedByAnother reports whether someone other than the author approved this
-// write and held the same authority at commit time.
-func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, author string, need []string) (bool, error) {
+// approvedByAnother reports whether someone other than the author and the
+// recipient approved this write: the issuer itself, or a member who held, at
+// commit time, the ability that manages records of this kind over its scope.
+// The approver need not hold what the record hands out; the author already
+// does, or is the issuer. Asking more would make an org's first writes
+// impossible to approve, since before the first role nobody holds anything.
+func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, author string, w walk) (bool, error) {
 	rec := &s.Record
 	for _, approver := range s.ApprovedBy {
 		if approver == author || approver == rec.To {
@@ -561,7 +576,7 @@ func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, author str
 		if approver == rec.From {
 			return true, nil
 		}
-		ok, err := e.hasRole(ctx, rec.From, approver, rec.Covers, need, s.CommittedAt, nil)
+		ok, err := e.hasRole(ctx, rec.From, approver, rec.Covers, []string{ManageAbility(rec)}, s.CommittedAt, nil, w)
 		if err != nil {
 			return false, err
 		}
@@ -574,7 +589,7 @@ func (e *Evaluator) approvedByAnother(ctx context.Context, s *Stored, author str
 
 // membership returns the data-time set over which rec covers vehicle, and whether
 // the vehicle is covered at time at.
-func (e *Evaluator) membership(ctx context.Context, rec *Record, vehicle string, at time.Time) (Set, bool, error) {
+func (e *Evaluator) membership(ctx context.Context, rec *Record, vehicle string, at time.Time, depth int) (Set, bool, error) {
 	switch {
 	case rec.Covers.Inherit:
 		return All(), true, nil
@@ -596,12 +611,12 @@ func (e *Evaluator) membership(ctx context.Context, rec *Record, vehicle string,
 
 	var set Set
 	live := false
-	need := append([]string{"tag:write"}, rec.Abilities...)
+	need := MembershipNeed(rec)
 	for _, m := range memberships {
 		// Tag edits widen every delegation over the tag, so they count only when the
 		// author could have granted these abilities at commit time.
 		if m.CreatedBy != "" && m.CreatedBy != org {
-			ok, err := e.hasRole(ctx, org, m.CreatedBy, Covers{Tag: rec.Covers.Tag}, need, m.CommittedAt, nil)
+			ok, err := e.hasRole(ctx, org, m.CreatedBy, Covers{Tag: rec.Covers.Tag}, need, m.CommittedAt, nil, walk{depth: depth})
 			if err != nil {
 				return nil, false, err
 			}
@@ -814,6 +829,51 @@ func depthBudget(r *Record) (int, bool) {
 	return 0, false
 }
 
+// HeldRoles returns the roles member holds in org at time at: issued to them,
+// committed before at, inside their validity and not revoked. It is what an org
+// host reads to decide whether a caller is a member at all.
+func (e *Evaluator) HeldRoles(ctx context.Context, org, member string, at time.Time) ([]Stored, error) {
+	roles, err := e.Resolver.Roles(ctx, org, member)
+	if err != nil {
+		return nil, err
+	}
+	var out []Stored
+	for i := range roles {
+		active, err := e.roleActive(ctx, &roles[i], org, member, at, walk{})
+		if err != nil {
+			return nil, err
+		}
+		if active {
+			out = append(out, roles[i])
+		}
+	}
+	return out, nil
+}
+
+// RolesCovering returns the roles member holds in org at time at that cover
+// scope and carry every ability in need. It is the check an org host runs
+// before committing a member's write (plan §3.2); the evaluator runs the same
+// one when the record is later exercised, so what the host accepts is what
+// evaluation will honour. Each returned role's constraints still bound the
+// shape of what may be written under it: CheckCommit takes one at a time.
+func (e *Evaluator) RolesCovering(ctx context.Context, org, member string, scope Covers, need []string, at time.Time) ([]Stored, error) {
+	return e.rolesCovering(ctx, org, member, scope, need, at, walk{})
+}
+
+// walk bounds the recursion through roles and tombstones: how deep it has
+// gone, so a knot of them is an error rather than a hang, and which roles are
+// being checked on the way here, so a role cannot vouch for its own author.
+type walk struct {
+	depth int
+	seen  []string
+}
+
+func (w walk) deeper() walk { return walk{depth: w.depth + 1, seen: w.seen} }
+
+func (w walk) into(uri string) walk {
+	return walk{depth: w.depth + 1, seen: append(slices.Clone(w.seen), uri)}
+}
+
 // hasRole reports whether member held, at time at, a role in org covering scope
 // with every ability in need.
 //
@@ -824,29 +884,15 @@ func depthBudget(r *Record) (int, bool) {
 // none does, the shape rejection is returned rather than swallowed, because
 // "you may not issue this" and "you may not issue anything" are different
 // answers to the writer.
-func (e *Evaluator) hasRole(ctx context.Context, org, member string, scope Covers, need []string, at time.Time, shape func(*RoleConstraints) error) (bool, error) {
-	roles, err := e.Resolver.Roles(ctx, org, member)
+func (e *Evaluator) hasRole(ctx context.Context, org, member string, scope Covers, need []string, at time.Time, shape func(*RoleConstraints) error, w walk) (bool, error) {
+	roles, err := e.rolesCovering(ctx, org, member, scope, need, at, w)
 	if err != nil {
 		return false, err
 	}
 	var shapeErr error
 	for i := range roles {
-		r := &roles[i]
-		if !roleActive(r, org, member, at) {
-			continue
-		}
-		ok, err := e.roleScopeCovers(ctx, r.Record.Covers, scope, at)
-		if err != nil {
-			return false, err
-		}
-		if !ok {
-			continue
-		}
-		if !containsAll(r.Record.Abilities, need) {
-			continue
-		}
 		if shape != nil {
-			if err := shape(r.Record.Constraints); err != nil {
+			if err := shape(roles[i].Record.Constraints); err != nil {
 				shapeErr = err
 				continue
 			}
@@ -854,6 +900,33 @@ func (e *Evaluator) hasRole(ctx context.Context, org, member string, scope Cover
 		return true, nil
 	}
 	return false, shapeErr
+}
+
+func (e *Evaluator) rolesCovering(ctx context.Context, org, member string, scope Covers, need []string, at time.Time, w walk) ([]Stored, error) {
+	roles, err := e.Resolver.Roles(ctx, org, member)
+	if err != nil {
+		return nil, err
+	}
+	var out []Stored
+	for i := range roles {
+		r := &roles[i]
+		active, err := e.roleActive(ctx, r, org, member, at, w)
+		if err != nil {
+			return nil, err
+		}
+		if !active {
+			continue
+		}
+		ok, err := e.roleScopeCovers(ctx, r.Record.Covers, scope, at)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || !containsAll(r.Record.Abilities, need) {
+			continue
+		}
+		out = append(out, *r)
+	}
+	return out, nil
 }
 
 // useRole reports whether member may use delegations addressed to org for
@@ -869,7 +942,11 @@ func (e *Evaluator) useRole(ctx context.Context, org, member, vehicle string, ab
 	}
 	for i := range roles {
 		r := &roles[i]
-		if !roleActive(r, org, member, at) {
+		active, err := e.roleActive(ctx, r, org, member, at, walk{})
+		if err != nil {
+			return false, err
+		}
+		if !active {
 			continue
 		}
 		// Scope is resolved the same way hasRole resolves it, or a tag-scoped
@@ -889,15 +966,55 @@ func (e *Evaluator) useRole(ctx context.Context, org, member, vehicle string, ab
 	return false, nil
 }
 
-func roleActive(r *Stored, org, member string, at time.Time) bool {
+// roleActive reports whether the role r, issued by org to member, is in force
+// at time at.
+//
+// A role a member wrote is held to the same standard as a delegation a member
+// wrote: the author must have held, when it was committed, org:members and
+// every ability the role hands out over its scope, and a member may not write
+// themselves a role without a second approval. An org host checks this before
+// committing, but the evaluator is where it cannot be bypassed (spec §7). The
+// org's own writes are trusted, since the org is the authority every role
+// derives from.
+//
+// A role's author held their authority through other roles, and so on; the
+// walk bounds that as chain depth is bounded, and a role already being checked
+// cannot vouch for its own author, which is what a self-written role would
+// otherwise do.
+func (e *Evaluator) roleActive(ctx context.Context, r *Stored, org, member string, at time.Time, w walk) (bool, error) {
 	rec := &r.Record
 	if rec.Type != TypeRole || rec.From != org || rec.To != member || rec.Validate() != nil {
-		return false
+		return false, nil
+	}
+	if slices.Contains(w.seen, r.URI) {
+		return false, nil
 	}
 	if at.Before(r.CommittedAt) || !rec.Validity.Set().Contains(at) {
-		return false
+		return false, nil
 	}
-	return !revokedAt(rec, r.Tombstone, at)
+	revoked, err := e.revokedAt(ctx, rec, r.Tombstone, at, w.into(r.URI))
+	if err != nil || revoked {
+		return false, err
+	}
+	author, err := committedBy(r)
+	if err != nil {
+		return false, err
+	}
+	if author == org {
+		return true, nil
+	}
+	if w.depth >= e.maxDepth() {
+		return false, fmt.Errorf("%w: role authority at %s", ErrChainTooDeep, r.URI)
+	}
+	need := AuthoringNeed(rec)
+	ok, err := e.hasRole(ctx, org, author, rec.Covers, need, r.CommittedAt, nil, w.into(r.URI))
+	if err != nil || !ok {
+		return false, err
+	}
+	if author == rec.To {
+		return e.approvedByAnother(ctx, r, author, w.into(r.URI))
+	}
+	return true, nil
 }
 
 // roleScopeCovers reports whether a role's scope includes the target scope at
@@ -939,18 +1056,71 @@ func (e *Evaluator) roleScopeCovers(ctx context.Context, role, target Covers, at
 }
 
 // revokedAt reports whether an authorized tombstone is in effect at time at.
-func revokedAt(rec *Record, t *Tombstone, at time.Time) bool {
+//
+// A tombstone is authorized when a principal revocableBy names wrote it, or a
+// member acting for that principal did: somebody who held, when the tombstone
+// was written, a role in the principal covering the record and carrying the
+// ability that manages records of its kind (ManageAbility). Unlike authoring,
+// revoking does not require the abilities the record hands out: taking access
+// away is the safe direction, and a role that may issue grants over a scope may
+// end them too. Writes are org acts (spec §6.3), and a member's revocation is
+// one of them.
+//
+// Whether the member held that role can turn on another member's tombstone, so
+// the walk bounds the recursion as chain depth is bounded; a knot of
+// tombstones that never resolves is an error, which fails closed.
+func (e *Evaluator) revokedAt(ctx context.Context, rec *Record, t *Tombstone, at time.Time, w walk) (bool, error) {
 	if t == nil || at.Before(t.At) {
-		return false
+		return false, nil
 	}
+	principals := Revokers(rec)
+	if slices.Contains(principals, t.By) {
+		return true, nil
+	}
+	if t.By == "" {
+		return false, nil
+	}
+	if w.depth >= e.maxDepth() {
+		return false, fmt.Errorf("%w: tombstone authority", ErrChainTooDeep)
+	}
+	for _, p := range principals {
+		party, err := e.Resolver.Party(ctx, p)
+		if err != nil {
+			return false, err
+		}
+		if !party.CanHaveMembers() {
+			continue
+		}
+		ok, err := e.hasRole(ctx, p, t.By, rec.Covers, []string{ManageAbility(rec)}, t.At, nil, w.deeper())
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Revokers returns the principals whose own tombstone revokes rec, from
+// revocableBy. A member of one of them revokes it too, when they hold
+// ManageAbility over its scope (see Evaluator's revocation rule).
+func Revokers(rec *Record) []string {
 	switch rec.revocableBy() {
 	case RevocableByTo:
-		return t.By == rec.To
+		return []string{rec.To}
 	case RevocableByEither:
-		return t.By == rec.From || t.By == rec.To
+		return []string{rec.From, rec.To}
 	default:
-		return t.By == rec.From
+		return []string{rec.From}
 	}
+}
+
+// revokedByPrincipal is revokedAt without the member rule: whether a principal
+// revocableBy names has tombstoned rec by time at. It is what a resolver can
+// answer on its own when it lists exclusive holds.
+func revokedByPrincipal(rec *Record, t *Tombstone, at time.Time) bool {
+	return t != nil && !at.Before(t.At) && slices.Contains(Revokers(rec), t.By)
 }
 
 func containsAll(have, need []string) bool {

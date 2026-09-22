@@ -24,6 +24,7 @@ import (
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
+	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
@@ -139,7 +140,15 @@ func stores(t *testing.T) map[string]store.Store {
 	return out
 }
 
+// newHost builds a host over st that knows the booking commit policy, as the
+// binary does.
 func newHost(t *testing.T, st store.Store) *host {
+	t.Helper()
+	booking := agreement.CommitPolicy()
+	return newHostWith(t, st, Policies{booking.Name: booking})
+}
+
+func newHostWith(t *testing.T, st store.Store, policies Policies) *host {
 	t.Helper()
 	iss := newIssuer(t)
 	auth, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test")
@@ -156,10 +165,27 @@ func newHost(t *testing.T, st store.Store) *host {
 	h.repo = r
 	h.app = New(Options{
 		Repo: r, Auth: auth, Control: h.directory,
-		Issuers: []string{dauthDID}, Admins: []string{dimoDID},
+		Issuers: []string{dauthDID}, Admins: []string{dimoDID}, Policies: policies,
 		PageSize: 50, Log: zerolog.Nop(),
 	})
 	return h
+}
+
+// roleRecord is a role from org to member, valid from 2026.
+func roleRecord(org, member string, covers delegation.Covers, abilities ...string) delegation.Record {
+	return delegation.Record{
+		Type: delegation.TypeRole, From: org, To: member, Covers: covers, Abilities: abilities,
+		Validity:   delegation.Window{From: tp(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))},
+		Redelegate: delegation.Redelegate{Mode: delegation.RedelegateNone}, CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+// grantRole has the org write member a role and returns its URI.
+func (h *host) grantRole(org string, rec delegation.Record) string {
+	h.t.Helper()
+	status, body := h.do(http.MethodPost, "/orgs/"+org+"/"+delegation.CollectionRole, org, rec)
+	require.Equal(h.t, http.StatusCreated, status, body)
+	return body["uri"].(string)
 }
 
 // do sends a request as the given DID (or unauthenticated when as is "").
@@ -261,7 +287,21 @@ func TestRepositoryFlow(t *testing.T) {
 			assert.Equal(t, "at://"+org+"/network.dimo.org.tag/fleet", body["uri"])
 			assert.Equal(t, float64(1), body["seq"])
 
-			// Alice updates it. Same key, so an update commit.
+			// Nobody else may touch it until they hold a role.
+			status, body = h.do(http.MethodPut, "/orgs/"+org+"/network.dimo.org.tag/fleet", alice, `{"name":"Fleet","description":"Every car"}`)
+			require.Equal(t, http.StatusForbidden, status, body)
+			status, body = h.do(http.MethodGet, "/orgs/"+org+"/network.dimo.org.tag/fleet", bob, nil)
+			require.Equal(t, http.StatusForbidden, status, body)
+
+			// Roles from the org to Alice and Bob, keyed by fresh TIDs via POST.
+			fleet := delegation.Covers{Tag: "at://" + org + "/network.dimo.org.tag/fleet"}
+			roleURI := h.grantRole(org, roleRecord(org, alice, fleet, "delegation:create", "tag:write", "telemetry:read"))
+			_, _, roleKey, err := delegation.ParseURI(roleURI)
+			require.NoError(t, err)
+			require.NoError(t, repo.ValidateTID(roleKey))
+			h.grantRole(org, roleRecord(org, bob, fleet, "delegation:create"))
+
+			// Alice updates the tag. Same key, so an update commit.
 			status, body = h.do(http.MethodPut, "/orgs/"+org+"/network.dimo.org.tag/fleet", alice, `{"name":"Fleet","description":"Every car"}`)
 			require.Equal(t, http.StatusOK, status, body)
 			assert.Equal(t, "update", body["op"])
@@ -271,20 +311,6 @@ func TestRepositoryFlow(t *testing.T) {
 			assert.Equal(t, alice, body["committedBy"])
 			assert.Equal(t, map[string]any{"name": "Fleet", "description": "Every car"}, body["record"])
 			assert.Nil(t, body["tombstone"])
-
-			// A role from the org to Alice, keyed by a fresh TID via POST.
-			role := map[string]any{
-				"$type": delegation.TypeRole, "from": org, "to": alice, "basis": []string{},
-				"covers":     map[string]any{"tag": "at://" + org + "/network.dimo.org.tag/fleet"},
-				"abilities":  []string{"delegation:create", "tag:write", "telemetry:read"},
-				"validity":   map[string]any{"from": ts(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))},
-				"redelegate": map[string]any{"mode": "none"}, "createdAt": ts(time.Now()),
-			}
-			status, body = h.do(http.MethodPost, "/orgs/"+org+"/network.dimo.org.role", org, role)
-			require.Equal(t, http.StatusCreated, status, body)
-			_, _, roleKey, err := delegation.ParseURI(body["uri"].(string))
-			require.NoError(t, err)
-			require.NoError(t, repo.ValidateTID(roleKey))
 
 			// A delegation by Alice under a stable key, as a booking service would.
 			grant := delegationRecord(org, map[string]any{"createdBy": alice})
@@ -336,32 +362,36 @@ func TestRepositoryFlow(t *testing.T) {
 			assert.Equal(t, "create", body["op"])
 
 			// Read the whole log back and verify it offline against #dimo_org.
+			// The log carries the openings, so it takes org:admin or the org.
 			status, body = h.do(http.MethodGet, "/orgs/"+org+"/commits", bob, nil)
+			require.Equal(t, http.StatusForbidden, status, body)
+			status, body = h.do(http.MethodGet, "/orgs/"+org+"/commits", org, nil)
 			require.Equal(t, http.StatusOK, status, body)
 			raw, err := json.Marshal(body["commits"])
 			require.NoError(t, err)
 			var log []repo.Committed
 			require.NoError(t, json.Unmarshal(raw, &log))
-			require.Len(t, log, 9)
+			require.Len(t, log, 10)
 			heads, err := repo.VerifyLog(org, log, pub)
 			require.NoError(t, err)
-			assert.Equal(t, repo.Head{Seq: 2, Live: true}, heads["network.dimo.org.tag/fleet"])
-			assert.Equal(t, repo.Head{Seq: 9, Live: true}, heads["network.dimo.delegation/booking:42:renter"])
+			assert.Equal(t, repo.Head{Seq: 4, Live: true}, heads["network.dimo.org.tag/fleet"])
+			assert.Equal(t, repo.Head{Seq: 10, Live: true}, heads["network.dimo.delegation/booking:42:renter"])
 			assert.Equal(t, "", log[0].CommittedBy)
-			assert.Equal(t, alice, log[1].CommittedBy)
-			assert.Equal(t, bob, log[7].CommittedBy)
-			assert.Empty(t, log[7].Record)
+			assert.Equal(t, "", log[1].CommittedBy)
+			assert.Equal(t, alice, log[3].CommittedBy)
+			assert.Equal(t, bob, log[8].CommittedBy)
+			assert.Empty(t, log[8].Record)
 
 			// Paging the log.
-			status, body = h.do(http.MethodGet, "/orgs/"+org+"/commits?after=7&limit=1", bob, nil)
+			status, body = h.do(http.MethodGet, "/orgs/"+org+"/commits?after=8&limit=1", org, nil)
 			require.Equal(t, http.StatusOK, status, body)
 			assert.Len(t, body["commits"], 1)
 
 			// The head advanced with every commit.
 			status, body = h.do(http.MethodGet, "/orgs/"+org, alice, nil)
 			require.Equal(t, http.StatusOK, status, body)
-			assert.Equal(t, float64(9), body["head"].(map[string]any)["seq"])
-			assert.Equal(t, log[8].CID, body["head"].(map[string]any)["cid"])
+			assert.Equal(t, float64(10), body["head"].(map[string]any)["seq"])
+			assert.Equal(t, log[9].CID, body["head"].(map[string]any)["cid"])
 		})
 	}
 }
@@ -418,15 +448,16 @@ func TestStructuralChecks(t *testing.T) {
 
 	// createdBy that agrees with the witnessed author is fine, and so is an
 	// org writing under its own name.
+	h.grantRole(org, roleRecord(org, alice, delegation.Covers{Tag: "at://" + org + "/network.dimo.org.tag/fleet"}, "delegation:create", "telemetry:read"))
 	status, body = h.do(http.MethodPut, base+"network.dimo.delegation/ok1", alice, delegationRecord(org, map[string]any{"createdBy": alice}))
 	assert.Equal(t, http.StatusCreated, status, body)
 	status, body = h.do(http.MethodPut, base+"network.dimo.delegation/ok2", org, delegationRecord(org, map[string]any{"createdBy": org}))
 	assert.Equal(t, http.StatusCreated, status, body)
 
 	// Nothing invalid reached the log.
-	status, body = h.do(http.MethodGet, "/orgs/"+org+"/commits", alice, nil)
+	status, body = h.do(http.MethodGet, "/orgs/"+org+"/commits", org, nil)
 	require.Equal(t, http.StatusOK, status, body)
-	assert.Len(t, body["commits"], 2)
+	assert.Len(t, body["commits"], 3)
 }
 
 func TestRegisterWithSuppliedKey(t *testing.T) {
@@ -506,6 +537,7 @@ func TestConcurrentWritesKeepOneChain(t *testing.T) {
 			require.Equal(t, http.StatusCreated, status, body)
 			pub, err := dimocrypto.DecodeDIDKey(body["key"].(string))
 			require.NoError(t, err)
+			h.grantRole(org, roleRecord(org, "did:dimo:alice", delegation.Covers{Inherit: true}, "tag:write"))
 
 			const writers, perWriter = 8, 10
 			var wg sync.WaitGroup
@@ -524,10 +556,10 @@ func TestConcurrentWritesKeepOneChain(t *testing.T) {
 
 			log, err := h.repo.Log(t.Context(), org, 0, 0)
 			require.NoError(t, err)
-			require.Len(t, log, writers*perWriter)
+			require.Len(t, log, writers*perWriter+1)
 			heads, err := repo.VerifyLog(org, log, pub)
 			require.NoError(t, err)
-			assert.Len(t, heads, writers*perWriter)
+			assert.Len(t, heads, writers*perWriter+1)
 		})
 	}
 }

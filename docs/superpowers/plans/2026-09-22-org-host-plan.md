@@ -70,6 +70,23 @@ Every write is `PUT /orgs/:org/:collection/:rkey` or `DELETE` for a tombstone, w
 
 Records are stored with `createdBy` exactly as sent. The evaluator refuses a record whose `createdBy` contradicts `committedBy`, so the host should reject that at write time too, with a clear message, rather than let it land and fail later.
 
+As built (step 4), what each write takes, all resolved through `Evaluator.RolesCovering`, which is the evaluator's own `hasRole`, so a write the host accepts is one evaluation honours:
+
+| Write | Needs, over the record's scope |
+|---|---|
+| delegation | `delegation:create` plus every ability the record hands out (`delegation.AuthoringNeed`) |
+| role | `org:members` plus every ability the role hands out. The evaluator now checks this too (`roleActive`): a member-written role is only a role if its author held that, and a role to oneself needs a second approval, so a host bug cannot mint authority. |
+| tag | `tag:write` over the tag |
+| tagMembership | `tag:write` over the tag, then `tag:write` plus D's abilities for every live delegation D over the tag (§9.2, `delegation.MembershipNeed`); a write some D would ignore is refused naming those D. |
+| vehicleControl | `org:admin` over the vehicle, or the org itself |
+| custody | `delegation:create` over the vehicle: custody narrows grants host-wide (§7), so it takes the same authority as a grant |
+
+**The policy is per role, not per org.** A role names its profile in `constraints.policy` (`RoleConstraints.Policy`); the host holds a registry (`orghost.Policies`, the binary registers `agreement.CommitPolicy()` under its name) and refuses a role naming a profile it does not know. Naming one makes the constraints present, so a booking role also sets `allowExclusive`. The `policy_name` column on `orgs` in §4 was not built. A member holding several roles may commit under any one of them; when none passes, an approval requirement from any role wins over a refusal, since it is the more useful answer.
+
+**The org's own writes park like anyone else's.** The second signature is a record fact (decision D), so nothing depends on who holds the org key or on a signer with its own policy; the blast-radius rules of spec §7 bind the org's service DID too. What makes that possible is **what an approver must hold: the ability that manages records of that kind over the scope** (`delegation:create`, `org:members` for a role, `tag:write` for a membership), not everything the record hands out. The author already holds those, or is the org. The evaluator's `approvedByAnother` applies the same rule. Requiring the approver to hold what a role hands out, as first built, made an org's first writes impossible to approve: before the first role nobody holds anything. Bootstrap is therefore: the org writes an admin role with no live abilities, which commits directly, and every later write the policy flags, the booking role included, waits for that admin. The org may approve a member's write and a member may approve the org's; nobody approves their own.
+
+**Approval** re-runs steps 2 and 3 at approval time with `Approved: true`, so the author must still hold their authority then, which is what evaluation checks at the commit time. The approver must be neither the author nor the recipient. A pending write answers 202 with `{pending, uri, reasons}`; `GET /orgs/:org/pending` lists them for any member; `DELETE /orgs/:org/pending/:id` withdraws one, for its author or the org. Membership growth is counted only when the write adds a vehicle to the tag: re-writing a member's interval, or an interval that has already ended, grows nothing.
+
 ### 3.3 Read path for the issuer
 
 `POST /authorize` with `{uri, caller, clientId, vehicle, abilities, at?}` from dauth only (service-to-service auth). The host runs `Evaluator.Authorize` against a `Resolver` backed by its own database and the directory (`pkg/client.Control` for `ControlState`), and returns `delegation.Coverage` or a typed error (`not covered`, `exclusive hold` with the abilities, `unauthorized`). `at` defaults to now and is only honoured for callers allowed to ask about the past, which in v1 is nobody.
@@ -91,7 +108,7 @@ As built (step 3): `internal/orghost.Resolver` reads records from any repository
 
 ### 3.4 Other reads
 
-- `GET /orgs/:org/:collection[/:rkey]` for members with a read role or `org:admin`.
+- `GET /orgs/:org/:collection[/:rkey]` for members with a read role or `org:admin`. As built (step 4): the org itself, or any member holding a live role, reads every collection but `vehicleControl`; the openings, and `GET /orgs/:org/commits` which carries them, take `org:admin`. Scoping a member's reads to their role's covers is not done.
 - `GET /orgs/:org/delegations/:rkey/proof?vehicle=` returns the §11.3 bundle: chain records with their commits, memberships, the opening, and the era log. Anyone holding the delegation's `to` may fetch it.
 - `GET /orgs/:org/delegations/:rkey/descendants` for the delegation's `from`, resolved per vehicle. This is the consent transparency view (§9.3).
 - `GET /orgs/:org/pending` for approvers.
@@ -100,6 +117,8 @@ As built (step 3): `internal/orghost.Resolver` reads records from any repository
 
 - `DELETE` a record: tombstone commit with `by = committedBy`. The evaluator ignores tombstones by a principal `revocableBy` does not allow, so the host refuses those at write time as UX.
 - `POST /orgs/:org/revoke-authored-by {member, since}`: lists every record the member authored after `since`, returns it for review, and tombstones the reviewed set as one batch under one approval.
+
+As built (step 4): **a member's tombstone is the org's act.** The evaluator honours a tombstone written by a principal `revocableBy` names, or by a member of one who held, at tombstone time, a role covering the record with the ability that manages records of its kind (`delegation.ManageAbility`: `delegation:create`, or `org:members` for a role). Revoking takes less than authoring: the abilities the record hands out are not needed to take it away. Before this the plan as written meant only the org DID itself could revoke anything. The host's `DELETE` runs the same rule (`checkTombstone`), so a lien is the lender's, or its staff's, to release. The recursion through roles and tombstones is bounded by chain depth and a role cannot vouch for its own author. `revoke-authored-by` with `uris` checks every tombstone as a `DELETE` by the caller would be, before any is written, and answers 400 for a URI outside the listed set; "authored" means the record's current version was committed by the member after `since`.
 
 ## 4. Data model
 
@@ -137,7 +156,7 @@ Each step ends with something runnable.
 1. **CLI org keys.** `dimocli` can create an org DID with `#dimo_org` and set `#dimo_org_host`. Half a day. **Done 2026-09-22** (§5).
 2. **Repository core.** Commits, signing, heads, tombstones, `ValidateRKey` on every write, in-memory and Postgres stores, `GET` for members. No checks yet beyond structure. Test: write, read back, verify the chain and every signature offline. **Done 2026-09-22:** `pkg/repo` (commit, canonical JSON, TIDs, `VerifyLog`), `internal/orghost` (sealed keys behind `repo.Signer`, JWKS identity tokens, structural checks, write path) and `internal/orghost/store` (memory and Postgres), served by `cmd/org-host`. Until step 4 any authenticated DID may read or write any repository; the commit records who did. See §3.1 for what the commit gained.
 3. **Resolver and `/authorize`.** Implement `delegation.Resolver` over the store and directory. Test: the Avis fixtures from `pkg/agreement/evaluate_test.go` replayed through HTTP produce the same coverage. **Done 2026-09-22:** `internal/orghost.Resolver`, the store's resolver queries with partial expression indexes over the derived jsonb (memory and Postgres), the `parties` table and routes, `POST /authorize`, and `DIRECTORY_URL`, `ISSUER_DIDS`, `ADMIN_DIDS` settings. `TestCompiledGrantsAuthorizeOverHTTP` and `TestInsurerGrantAuthorizesOverHTTP` are the replay, driven at fixed host-clock times. See §3.3 for what was settled in the building.
-4. **Write-time checks and approval.** Roles, `CheckCommit`, `CheckMembershipGrowth`, pending writes, second approval, `revokeAuthoredBy`. Test: the spec §13.1 table, action by action.
+4. **Write-time checks and approval.** Roles, `CheckCommit`, `CheckMembershipGrowth`, pending writes, second approval, `revokeAuthoredBy`. Test: the spec §13.1 table, action by action. **Done 2026-09-22:** `internal/orghost/access.go` (the per-collection role checks, `CheckCommit` under the role's named policy, §9.2 and growth checks on memberships, approver rules, tombstone and read checks), `pending.go` (pending list, approve, withdraw, `revoke-authored-by`), the `pending` table and the `Authored` and `DelegationsOverTag` queries in both stores. `pkg/delegation` gained `RolesCovering`, `HeldRoles`, `CoveredVehicles`, `ManageAbility`, `AuthoringNeed`, `MembershipNeed`, `Revokers`, `RoleConstraints.Policy`, the member-tombstone rule and the role-author check. `TestAvisActions` is the §13.1 table over HTTP against both stores. See §3.2, §3.4 and §3.5 for what was settled in the building.
 5. **Booking SDK.** The `pkg/agreement` client from §5 against the running host. Test: booking → paid → picked up → returned driven from a test booking service, then `/authorize` for the renter and the blocked operator. The host's code does not change in this step.
 6. **Proofs and descendants.** Coverage proof bundle plus an offline verifier in `pkg/proof`; descendants listing. Test: a proof verifies with the host down.
 7. **dauth exchange**, then **dq clamping**, in their repos, against a running host.

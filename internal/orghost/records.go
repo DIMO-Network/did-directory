@@ -14,7 +14,7 @@ import (
 // signed (plan §6 step 2): the collection is one the host stores, the record
 // parses as that collection's type and validates, the key has the shape the
 // collection needs, and the record does not claim an author the host did not
-// witness. Role and policy checks come in step 4.
+// witness. The role and policy checks follow in Server.checkWrite.
 func checkRecord(org, collection, rkey string, record json.RawMessage, committedBy string) error {
 	if err := delegation.ValidateRKey(rkey); err != nil {
 		return err

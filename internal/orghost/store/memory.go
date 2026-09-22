@@ -20,6 +20,7 @@ type MemoryStore struct {
 	mu      sync.RWMutex
 	orgs    map[string]*memOrg
 	parties map[string]Party
+	pending map[string]Pending // org + "/" + id
 }
 
 type memOrg struct {
@@ -37,7 +38,7 @@ type memHead struct {
 
 // NewMemoryStore creates an empty in-memory store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{orgs: map[string]*memOrg{}, parties: map[string]Party{}}
+	return &MemoryStore{orgs: map[string]*memOrg{}, parties: map[string]Party{}, pending: map[string]Pending{}}
 }
 
 func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {
@@ -345,6 +346,108 @@ func (s *MemoryStore) Exclusives(_ context.Context, vehicle string, at time.Time
 		})
 	}
 	return out, nil
+}
+
+func (s *MemoryStore) DelegationsOverTag(_ context.Context, org, tag string) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	out := []Stored{}
+	o.each("network.dimo.delegation", func(st Stored, rec map[string]any) {
+		if field(rec, "covers", "tag") == tag {
+			out = append(out, st)
+		}
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) Authored(_ context.Context, org, member string, since time.Time) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	var heads []memHead
+	for _, h := range o.heads {
+		if h.tombstone < 0 {
+			heads = append(heads, h)
+		}
+	}
+	sort.Slice(heads, func(i, j int) bool { return heads[i].record < heads[j].record })
+	out := []Stored{}
+	for _, h := range heads {
+		if st := o.stored(h); st.CommittedBy == member && st.CommittedAt.After(since) {
+			out = append(out, st)
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) AddPending(_ context.Context, p Pending) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.orgs[p.Org]; !ok {
+		return ErrNotFound
+	}
+	p.ID, p.Org = strings.Clone(p.ID), strings.Clone(p.Org)
+	p.Collection, p.RKey = strings.Clone(p.Collection), strings.Clone(p.RKey)
+	p.Record = slices.Clone(p.Record)
+	p.CommittedBy = strings.Clone(p.CommittedBy)
+	p.Reasons = slices.Clone(p.Reasons)
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
+	}
+	s.pending[p.Org+"/"+p.ID] = p
+	return nil
+}
+
+func (s *MemoryStore) GetPending(_ context.Context, org, id string) (*Pending, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.pending[org+"/"+id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	p.Record = slices.Clone(p.Record)
+	p.Reasons = slices.Clone(p.Reasons)
+	return &p, nil
+}
+
+func (s *MemoryStore) ListPending(_ context.Context, org string) ([]Pending, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.orgs[org]; !ok {
+		return nil, ErrNotFound
+	}
+	out := []Pending{}
+	for _, p := range s.pending {
+		if p.Org == org {
+			p.Record = slices.Clone(p.Record)
+			p.Reasons = slices.Clone(p.Reasons)
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) DeletePending(_ context.Context, org, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.pending[org+"/"+id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.pending, org+"/"+id)
+	return nil
 }
 
 func (s *MemoryStore) SetParty(_ context.Context, p Party) error {

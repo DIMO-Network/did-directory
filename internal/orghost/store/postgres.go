@@ -8,6 +8,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 )
@@ -80,6 +81,17 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 			operator BOOLEAN NOT NULL,
 			set_at   TIMESTAMPTZ NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS pending (
+			org          TEXT NOT NULL REFERENCES orgs(did),
+			id           TEXT NOT NULL,
+			collection   TEXT NOT NULL,
+			rkey         TEXT NOT NULL,
+			record       TEXT NOT NULL,
+			committed_by TEXT NOT NULL,
+			reasons      TEXT[] NOT NULL,
+			created_at   TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (org, id)
+		);
 
 		-- The resolver's lookups (plan §3.3), as partial expression indexes over
 		-- the derived jsonb. They index every version of a record; the join to
@@ -94,9 +106,24 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'exclusive') = 'array';
 		CREATE INDEX IF NOT EXISTS commits_exclusive_tag_idx ON commits ((record_json->'covers'->>'tag'))
 			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'exclusive') = 'array';
+		CREATE INDEX IF NOT EXISTS commits_covers_tag_idx ON commits (org, (record_json->'covers'->>'tag'))
+			WHERE collection = 'network.dimo.delegation';
+		CREATE INDEX IF NOT EXISTS commits_author_idx ON commits (org, committed_by, committed_at);
 	`
-	_, err := s.pool.Exec(ctx, query)
-	return err
+	// Two instances starting at once would race to create the same tables,
+	// which Postgres reports as a duplicate type rather than tolerating.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('org_host_schema'))`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, query); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
@@ -364,6 +391,102 @@ func (s *PostgresStore) Exclusives(ctx context.Context, vehicle string, at time.
 			FROM heads mh JOIN commits m ON m.org = mh.org AND m.seq = mh.record_seq
 			WHERE mh.collection = 'network.dimo.org.tagMembership' AND mh.tombstone_seq IS NULL
 				AND m.record_json->>'vehicle' = $1 AND `+memberAtSQL("$2")+`))`, vehicle, at)
+}
+
+func (s *PostgresStore) DelegationsOverTag(ctx context.Context, org, tag string) ([]Stored, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
+		AND r.record_json->'covers'->>'tag' = $2`, org, tag)
+}
+
+func (s *PostgresStore) Authored(ctx context.Context, org, member string, since time.Time) ([]Stored, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	return s.queryStored(ctx, `h.org = $1 AND h.tombstone_seq IS NULL AND r.committed_by = $2 AND r.committed_at > $3`, org, member, since)
+}
+
+func (s *PostgresStore) AddPending(ctx context.Context, p Pending) error {
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now().UTC()
+	}
+	reasons := p.Reasons
+	if reasons == nil {
+		reasons = []string{}
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO pending (org, id, collection, rkey, record, committed_by, reasons, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		p.Org, p.ID, p.Collection, p.RKey, string(p.Record), p.CommittedBy, reasons, p.CreatedAt)
+	if err != nil {
+		if isForeignKeyViolation(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("insert pending: %w", err)
+	}
+	return nil
+}
+
+const pendingColumns = `org, id, collection, rkey, record, committed_by, reasons, created_at`
+
+func scanPending(row rowScanner) (*Pending, error) {
+	var p Pending
+	var record string
+	if err := row.Scan(&p.Org, &p.ID, &p.Collection, &p.RKey, &record, &p.CommittedBy, &p.Reasons, &p.CreatedAt); err != nil {
+		return nil, err
+	}
+	p.Record = []byte(record)
+	p.CreatedAt = p.CreatedAt.UTC()
+	return &p, nil
+}
+
+func (s *PostgresStore) GetPending(ctx context.Context, org, id string) (*Pending, error) {
+	p, err := scanPending(s.pool.QueryRow(ctx, `SELECT `+pendingColumns+` FROM pending WHERE org = $1 AND id = $2`, org, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query pending: %w", err)
+	}
+	return p, nil
+}
+
+func (s *PostgresStore) ListPending(ctx context.Context, org string) ([]Pending, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+pendingColumns+` FROM pending WHERE org = $1 ORDER BY created_at, id`, org)
+	if err != nil {
+		return nil, fmt.Errorf("query pending: %w", err)
+	}
+	defer rows.Close()
+	out := []Pending{}
+	for rows.Next() {
+		p, err := scanPending(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan pending: %w", err)
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) DeletePending(ctx context.Context, org, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM pending WHERE org = $1 AND id = $2`, org, id)
+	if err != nil {
+		return fmt.Errorf("delete pending: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// isForeignKeyViolation reports a Postgres foreign_key_violation.
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
 func (s *PostgresStore) SetParty(ctx context.Context, p Party) error {

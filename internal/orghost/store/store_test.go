@@ -363,3 +363,98 @@ func TestStore_ResolverQueries(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_AuthoredAndDelegationsOverTag(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			did := newOrg(t, s)
+			tag := "at://" + did + "/network.dimo.org.tag/fleet"
+			before := time.Now().UTC().Add(-time.Second)
+
+			head, _ := s.Head(ctx, did)
+			c1 := commit(did, head, repo.OpCreate, "network.dimo.delegation", "a", `{"covers":{"tag":"`+tag+`"},"to":"did:dimo:x"}`, "did:dimo:alice")
+			require.NoError(t, s.AppendAfter(ctx, head, c1))
+			head, _ = s.Head(ctx, did)
+			c2 := commit(did, head, repo.OpCreate, "network.dimo.delegation", "b", `{"covers":{"vehicle":"did:dimo:v"},"to":"did:dimo:y"}`, "did:dimo:alice")
+			require.NoError(t, s.AppendAfter(ctx, head, c2))
+			head, _ = s.Head(ctx, did)
+			c3 := commit(did, head, repo.OpCreate, "network.dimo.org.tag", "fleet", `{"name":"Fleet"}`, "did:dimo:bob")
+			require.NoError(t, s.AppendAfter(ctx, head, c3))
+			// Bob updates a, so its current version is his.
+			head, _ = s.Head(ctx, did)
+			c4 := commit(did, head, repo.OpUpdate, "network.dimo.delegation", "a", `{"covers":{"tag":"`+tag+`"},"to":"did:dimo:z"}`, "did:dimo:bob")
+			require.NoError(t, s.AppendAfter(ctx, head, c4))
+
+			over, err := s.DelegationsOverTag(ctx, did, tag)
+			require.NoError(t, err)
+			require.Len(t, over, 1)
+			assert.Equal(t, "a", over[0].RKey)
+			assert.Equal(t, "did:dimo:bob", over[0].CommittedBy)
+			over, err = s.DelegationsOverTag(ctx, did, "at://"+did+"/network.dimo.org.tag/other")
+			require.NoError(t, err)
+			assert.Empty(t, over)
+			_, err = s.DelegationsOverTag(ctx, "did:dimo:nobody", tag)
+			assert.True(t, IsNotFound(err))
+
+			byAlice, err := s.Authored(ctx, did, "did:dimo:alice", before)
+			require.NoError(t, err)
+			require.Len(t, byAlice, 1, "a is now bob's version")
+			assert.Equal(t, "b", byAlice[0].RKey)
+			byBob, err := s.Authored(ctx, did, "did:dimo:bob", before)
+			require.NoError(t, err)
+			assert.Len(t, byBob, 2)
+			byBob, err = s.Authored(ctx, did, "did:dimo:bob", time.Now().UTC().Add(time.Hour))
+			require.NoError(t, err)
+			assert.Empty(t, byBob)
+
+			// Tombstoned records are not authored anything any more.
+			head, _ = s.Head(ctx, did)
+			c5 := commit(did, head, repo.OpTombstone, "network.dimo.delegation", "b", "", "")
+			require.NoError(t, s.AppendAfter(ctx, head, c5))
+			byAlice, err = s.Authored(ctx, did, "did:dimo:alice", before)
+			require.NoError(t, err)
+			assert.Empty(t, byAlice)
+		})
+	}
+}
+
+func TestStore_Pending(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			did := newOrg(t, s)
+
+			assert.True(t, IsNotFound(s.AddPending(ctx, Pending{ID: "p0", Org: "did:dimo:nobody", Record: []byte(`{}`)})))
+			_, err := s.ListPending(ctx, "did:dimo:nobody")
+			assert.True(t, IsNotFound(err))
+
+			at := time.Now().UTC().Truncate(time.Microsecond)
+			p1 := Pending{ID: "p1", Org: did, Collection: "network.dimo.delegation", RKey: "a", Record: []byte(`{"x":1}`),
+				CommittedBy: "did:dimo:alice", Reasons: []string{"grants live ability command:unlock"}, CreatedAt: at}
+			p2 := Pending{ID: "p2", Org: did, Collection: "network.dimo.org.tagMembership", RKey: "b", Record: []byte(`{"y":2}`),
+				CommittedBy: "", Reasons: []string{"tag would cover 501 vehicles"}, CreatedAt: at.Add(time.Second)}
+			require.NoError(t, s.AddPending(ctx, p2))
+			require.NoError(t, s.AddPending(ctx, p1))
+
+			got, err := s.GetPending(ctx, did, "p1")
+			require.NoError(t, err)
+			assert.Equal(t, p1, *got)
+			_, err = s.GetPending(ctx, did, "p3")
+			assert.True(t, IsNotFound(err))
+
+			list, err := s.ListPending(ctx, did)
+			require.NoError(t, err)
+			require.Len(t, list, 2)
+			assert.Equal(t, "p1", list[0].ID, "oldest first")
+			assert.Equal(t, "p2", list[1].ID)
+
+			require.NoError(t, s.DeletePending(ctx, did, "p1"))
+			assert.True(t, IsNotFound(s.DeletePending(ctx, did, "p1")))
+			list, err = s.ListPending(ctx, did)
+			require.NoError(t, err)
+			require.Len(t, list, 1)
+			assert.Equal(t, "p2", list[0].ID)
+		})
+	}
+}

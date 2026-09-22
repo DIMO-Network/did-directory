@@ -135,7 +135,7 @@ func (m *memResolver) Exclusives(_ context.Context, vehicle string, at time.Time
 		if len(rec.Exclusive) == 0 || !m.coversVehicle(rec, vehicle, 0) {
 			continue
 		}
-		if !rec.Validity.Set().Contains(at) || revokedAt(rec, s.Tombstone, at) {
+		if !rec.Validity.Set().Contains(at) || revokedByPrincipal(rec, s.Tombstone, at) {
 			continue
 		}
 		holds = append(holds, ExclusiveHold{
@@ -177,7 +177,7 @@ func (m *memResolver) put(uri string, rec Record, committedAt time.Time) *Stored
 
 func (m *memResolver) role(org, member string, covers Covers, abilities []string, committedAt time.Time) *Stored {
 	s := Stored{
-		URI: fmt.Sprintf("at://%s/%s/%s", org, TypeRole, member),
+		URI: fmt.Sprintf("at://%s/%s/%s-%d", org, TypeRole, member, len(m.roles[org+"|"+member])),
 		Record: Record{
 			Type: TypeRole, From: org, To: member, Covers: covers, Abilities: abilities,
 		},

@@ -80,6 +80,20 @@ type Stored struct {
 // Live reports whether the record has not been tombstoned.
 func (s *Stored) Live() bool { return s.Tombstone == nil }
 
+// Pending is a write that needs a second approval before it is committed
+// (plan §3.2 step 4): the record as the author sent it, who sent it, and why
+// it stopped here. It is not in the log; approving it is what commits it.
+type Pending struct {
+	ID          string          `json:"id"`
+	Org         string          `json:"org"`
+	Collection  string          `json:"collection"`
+	RKey        string          `json:"rkey"`
+	Record      json.RawMessage `json:"record"`
+	CommittedBy string          `json:"committedBy"`
+	Reasons     []string        `json:"reasons"`
+	CreatedAt   time.Time       `json:"createdAt"`
+}
+
 // Party kinds, as the party table stores them.
 const (
 	KindPerson = "person"
@@ -142,6 +156,23 @@ type Store interface {
 	// through a tag the vehicle has a membership in at time at. Validity is the
 	// caller's to check.
 	Exclusives(ctx context.Context, vehicle string, at time.Time) ([]Stored, error)
+
+	// DelegationsOverTag returns org's live delegation records whose covers.tag
+	// is tag: the records a membership in the tag widens.
+	DelegationsOverTag(ctx context.Context, org, tag string) ([]Stored, error)
+	// Authored returns org's live records whose current version was committed
+	// by member after since, ordered by seq.
+	Authored(ctx context.Context, org, member string, since time.Time) ([]Stored, error)
+
+	// AddPending stores a write awaiting approval.
+	AddPending(ctx context.Context, p Pending) error
+	// GetPending returns one pending write, or ErrNotFound.
+	GetPending(ctx context.Context, org, id string) (*Pending, error)
+	// ListPending returns org's pending writes, oldest first.
+	ListPending(ctx context.Context, org string) ([]Pending, error)
+	// DeletePending removes a pending write, or returns ErrNotFound. It is
+	// called once the write is committed or withdrawn.
+	DeletePending(ctx context.Context, org, id string) error
 
 	// SetParty records or replaces a DID's party attributes.
 	SetParty(ctx context.Context, p Party) error
