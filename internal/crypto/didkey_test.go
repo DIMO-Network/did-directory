@@ -101,15 +101,16 @@ func TestDecodeDIDKey_Invalid(t *testing.T) {
 }
 
 func TestDecodeDIDKey_PointNotOnCurve(t *testing.T) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	pub, err := FromECDSA(&key.PublicKey)
-	require.NoError(t, err)
+	// x = 1 has no point on P-256: 1^3 - 3*1 + b is a quadratic non-residue
+	// mod p, so decompression must fail. Flipping bits in a real key's X is
+	// not a substitute, since about half of all X values do lie on the curve.
+	bad := make([]byte, 1+coordSize)
+	bad[0] = 0x02
+	bad[coordSize] = 1
+	_, err := unmarshalP256Compressed(bad)
+	assert.Error(t, err)
 
-	// Corrupt the X coordinate; with overwhelming probability there is no
-	// point on the curve with that X, so decompression must fail.
-	bad := pub.Compressed()
-	bad[5] ^= 0xff
+	bad[0] = 0x03
 	_, err = unmarshalP256Compressed(bad)
 	assert.Error(t, err)
 }
