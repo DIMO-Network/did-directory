@@ -34,4 +34,8 @@ Under `/orgs` the org itself may write anything to its own repository, subject t
 | `POST /authorize` | For the issuer: `{uri, caller, clientId?, vehicle, abilities}` runs `delegation.Evaluator.Authorize` at the host clock and returns the coverage plus `at`, or 403 with a `code` (`not_covered`, `exclusive_hold` with the `suspended` abilities, `unauthorized`, `revoked`, `not_valid`, ...) and 404 for a record that is not here. `at` in the request is refused in v1. |
 | `PUT /parties/:did` | Admins record `{kind: person\|org, operator}` for a DID (plan §1 decision E). `GET` reads it. An org with no row is an org and not an operator; any other unlisted DID is nobody in particular. |
 
+### Booking SDK
+
+`pkg/agreement/booking` is what an operator's booking service links (plan §5, decision F). `Client.Sync(ctx, agreement, catalog, now)` compiles the agreement with `agreement.Compile` and brings the operator's repository into line with it: custody legs under `bookingID:<leg start>`, every compiled grant under its stable key, and a tombstone for every key `agreement.Keys` lists that the compilation no longer produces (custody after the return, roadside once the incident closes, everything after a cancellation before pickup). It is stateless and idempotent, writes as the booking service with the identity token its role was written to, and returns the host's answer per write; a write the host parks for approval is reported as `OpPending` rather than as an error. The host never learns what a booking is.
+
 Tests run against the in-memory store by default; `make test-postgres` also runs them against a local `org_host_test` database.
