@@ -73,8 +73,8 @@ type exchangeRequest struct {
 	Vehicle   string
 	Abilities []string
 	Audience  []string
-	// Client is an app DID whose key is in the keystore; it is attested with
-	// its own identity token as client_assertion.
+	// Client is an app DID whose key is in the keystore; it attests the
+	// request with a client assertion signed by that key.
 	Client string
 }
 
@@ -97,7 +97,11 @@ func mintAccessToken(dauth string, req exchangeRequest) (*accessToken, error) {
 	}
 	base := strings.TrimRight(dauth, "/")
 
-	identity, _, err := signIn(base, req.Caller, priv, "signing", nil)
+	exchangeURL := base + "/exchange"
+
+	// The identity token is addressed to the exchange, which refuses one
+	// addressed anywhere else.
+	identity, _, err := signIn(base, req.Caller, priv, "signing", []string{exchangeURL})
 	if err != nil {
 		return nil, fmt.Errorf("sign in as %s: %w", req.Caller, err)
 	}
@@ -111,14 +115,13 @@ func mintAccessToken(dauth string, req exchangeRequest) (*accessToken, error) {
 		if err != nil {
 			return nil, err
 		}
-		assertion, _, err := signIn(base, req.Client, appKey, "signing", nil)
+		assertion, err := clientAssertion(appKey, req.Client, exchangeURL, &priv.PublicKey, time.Now())
 		if err != nil {
-			return nil, fmt.Errorf("sign in as app %s: %w", req.Client, err)
+			return nil, fmt.Errorf("client assertion for %s: %w", req.Client, err)
 		}
 		body["client_assertion"] = assertion
 	}
 
-	exchangeURL := base + "/exchange"
 	proof, err := dpopProof(priv, "POST", exchangeURL, "", time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("DPoP proof: %w", err)
@@ -137,28 +140,78 @@ func mintAccessToken(dauth string, req exchangeRequest) (*accessToken, error) {
 // request presents one. The signature is the JWS form of ECDSA, r||s over
 // SHA-256, which is the encoding SignOperation already produces.
 func dpopProof(key *ecdsa.PrivateKey, method, url, accessToken string, now time.Time) (string, error) {
-	if key.Curve != elliptic.P256() {
-		return "", errors.New("DPoP proofs need a P-256 key")
+	jwk, err := publicJWK(&key.PublicKey)
+	if err != nil {
+		return "", err
+	}
+	jti, err := newJTI()
+	if err != nil {
+		return "", err
+	}
+	claims := map[string]any{"jti": jti, "htm": method, "htu": url, "iat": now.Unix()}
+	if accessToken != "" {
+		sum := sha256.Sum256([]byte(accessToken))
+		claims["ath"] = base64.RawURLEncoding.EncodeToString(sum[:])
+	}
+	return signES256(key, map[string]any{"typ": "dpop+jwt", "alg": "ES256", "jwk": jwk}, claims)
+}
+
+// clientAssertion is what dauth's exchange takes as client_assertion: a JWT
+// the app signs with its #signing key, addressed to the exchange, good for two
+// minutes, and bound to the caller's DPoP key by that key's thumbprint, so it
+// attests this caller's request and no other.
+func clientAssertion(appKey *ecdsa.PrivateKey, app, exchangeURL string, dpopKey *ecdsa.PublicKey, now time.Time) (string, error) {
+	jwk, err := publicJWK(dpopKey)
+	if err != nil {
+		return "", err
+	}
+	jti, err := newJTI()
+	if err != nil {
+		return "", err
+	}
+	claims := map[string]any{
+		"iss": app, "sub": app, "aud": exchangeURL, "iat": now.Unix(), "exp": now.Add(2 * time.Minute).Unix(),
+		"jti": jti, "cnf": map[string]string{"jkt": jwkThumbprint(jwk)},
+	}
+	return signES256(appKey, map[string]any{"alg": "ES256", "kid": app + "#signing"}, claims)
+}
+
+// publicJWK is a P-256 public key as a JWK.
+func publicJWK(pub *ecdsa.PublicKey) (map[string]string, error) {
+	if pub.Curve != elliptic.P256() {
+		return nil, errors.New("ES256 needs a P-256 key")
+	}
+	raw, err := pub.Bytes() // 0x04 || x || y
+	if err != nil {
+		return nil, err
 	}
 	b64 := base64.RawURLEncoding.EncodeToString
-	size := (key.Curve.Params().BitSize + 7) / 8
-	header := map[string]any{
-		"typ": "dpop+jwt", "alg": "ES256",
-		"jwk": map[string]string{
-			"kty": "EC", "crv": "P-256",
-			"x": b64(key.X.FillBytes(make([]byte, size))),
-			"y": b64(key.Y.FillBytes(make([]byte, size))),
-		},
-	}
+	return map[string]string{"kty": "EC", "crv": "P-256", "x": b64(raw[1:33]), "y": b64(raw[33:65])}, nil
+}
+
+// jwkThumbprint is the RFC 7638 thumbprint of an EC JWK: SHA-256 over the
+// required members in lexicographic order, which is what cnf.jkt holds.
+func jwkThumbprint(jwk map[string]string) string {
+	canonical := fmt.Sprintf(`{"crv":%q,"kty":%q,"x":%q,"y":%q}`, jwk["crv"], jwk["kty"], jwk["x"], jwk["y"])
+	sum := sha256.Sum256([]byte(canonical))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func newJTI() (string, error) {
 	jti := make([]byte, 16)
 	if _, err := rand.Read(jti); err != nil {
 		return "", err
 	}
-	claims := map[string]any{"jti": hex.EncodeToString(jti), "htm": method, "htu": url, "iat": now.Unix()}
-	if accessToken != "" {
-		sum := sha256.Sum256([]byte(accessToken))
-		claims["ath"] = b64(sum[:])
+	return hex.EncodeToString(jti), nil
+}
+
+// signES256 assembles a compact JWS. The signature is the JWS form of ECDSA,
+// r||s over SHA-256, which is the encoding SignOperation already produces.
+func signES256(key *ecdsa.PrivateKey, header, claims map[string]any) (string, error) {
+	if key.Curve != elliptic.P256() {
+		return "", errors.New("ES256 needs a P-256 key")
 	}
+	b64 := base64.RawURLEncoding.EncodeToString
 	h, err := json.Marshal(header)
 	if err != nil {
 		return "", err

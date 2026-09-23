@@ -79,7 +79,7 @@ func (i *issuer) tokenWithHeader(t *testing.T, header, claims map[string]any) st
 // identity mints a fresh token for did, valid for an hour.
 func (i *issuer) identity(t *testing.T, did string) string {
 	now := time.Now().Unix()
-	return i.token(t, map[string]any{"iss": "https://auth.test", "sub": did, "iat": now, "nbf": now, "exp": now + 3600})
+	return i.token(t, map[string]any{"iss": "https://auth.test", "aud": hostAudience, "sub": did, "iat": now, "nbf": now, "exp": now + 3600})
 }
 
 type host struct {
@@ -151,7 +151,7 @@ func newHost(t *testing.T, st store.Store) *host {
 func newHostWith(t *testing.T, st store.Store, policies Policies) *host {
 	t.Helper()
 	iss := newIssuer(t)
-	auth, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test")
+	auth, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test", hostAudience)
 	require.NoError(t, err)
 	sealer, err := NewEphemeralSealer()
 	require.NoError(t, err)
@@ -561,17 +561,28 @@ func TestConcurrentWritesKeepOneChain(t *testing.T) {
 	}
 }
 
+// hostAudience is the aud the test host requires of identity tokens.
+const hostAudience = "https://orghost.test"
+
 func TestJWKSAuthenticator(t *testing.T) {
 	iss := newIssuer(t)
-	auth, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test")
+	auth, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test", hostAudience)
 	require.NoError(t, err)
 	ctx := t.Context()
 	now := time.Now().Unix()
-	good := map[string]any{"iss": "https://auth.test", "sub": "did:dimo:alice", "exp": now + 60}
+	good := map[string]any{"iss": "https://auth.test", "aud": hostAudience, "sub": "did:dimo:alice", "exp": now + 60}
 
 	did, err := auth.Authenticate(ctx, "Bearer "+iss.token(t, good))
 	require.NoError(t, err)
 	assert.Equal(t, "did:dimo:alice", did)
+
+	// aud may be an array naming this host among others.
+	_, err = auth.Authenticate(ctx, "Bearer "+iss.token(t, map[string]any{
+		"iss": "https://auth.test", "aud": []string{"dq", hostAudience}, "sub": "did:dimo:alice", "exp": now + 60}))
+	require.NoError(t, err)
+
+	_, err = NewJWKSAuthenticator(iss.jwks(), "https://auth.test", "")
+	require.Error(t, err, "an authenticator without an audience accepts every relying party's tokens")
 
 	with := func(k string, v any) map[string]any {
 		out := map[string]any{}
@@ -590,6 +601,9 @@ func TestJWKSAuthenticator(t *testing.T) {
 		"no exp":         "Bearer " + iss.token(t, with("exp", 0)),
 		"not yet valid":  "Bearer " + iss.token(t, with("nbf", now+600)),
 		"wrong issuer":   "Bearer " + iss.token(t, with("iss", "https://evil.test")),
+		"no audience":    "Bearer " + iss.token(t, with("aud", nil)),
+		"other audience": "Bearer " + iss.token(t, with("aud", "dimo")),
+		"audience list":  "Bearer " + iss.token(t, with("aud", []string{"dimo", "dq"})),
 		"sub not a DID":  "Bearer " + iss.token(t, with("sub", "0xabc")),
 		"other key":      "Bearer " + other.token(t, good),
 		"unknown kid":    "Bearer " + iss.tokenWithHeader(t, map[string]any{"alg": "RS256", "kid": "k2"}, good),

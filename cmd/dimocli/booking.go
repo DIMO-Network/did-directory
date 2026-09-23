@@ -73,7 +73,8 @@ func runBooking(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	token, _, err := signIn(*dauth, *didFlag, priv, "signing", nil)
+	// The token is addressed to the host, which refuses one addressed elsewhere.
+	token, _, err := signIn(*dauth, *didFlag, priv, "signing", []string{strings.TrimRight(*host, "/")})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: sign in as %s: %v\n", *didFlag, err)
 		os.Exit(1)

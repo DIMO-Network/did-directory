@@ -188,7 +188,9 @@ create() {
     echo "$did"
 }
 
-signin() { "$DIMOCLI" signin --dauth "$DAUTH_URL" --did "$1"; }
+# signin DID — an identity token addressed to the org host, which refuses a
+# token addressed anywhere else.
+signin() { "$DIMOCLI" signin --dauth "$DAUTH_URL" --did "$1" --audience "$ORG_HOST_URL"; }
 
 # host METHOD PATH TOKEN [JSON] — calls the org host; sets STATUS and BODY.
 host() {
@@ -368,7 +370,7 @@ step "Starting the org host (in memory) on :$ORG_HOST_PORT..."
 info "It trusts identity tokens from dauth's sign-in keys, lets $DAUTH_DID call"
 info "/authorize, and lets DIMO set party attributes."
 DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" \
-    IDENTITY_JWKS_URL="$DAUTH_URL/signin/keys" IDENTITY_ISSUER="$DAUTH_URL/signin" \
+    IDENTITY_JWKS_URL="$DAUTH_URL/signin/keys" IDENTITY_ISSUER="$DAUTH_URL/signin" IDENTITY_AUDIENCE="$ORG_HOST_URL" \
     ISSUER_DIDS="$DAUTH_DID" ADMIN_DIDS="$DIMO" CONTROL_CACHE_TTL=1s \
     "$BIN/org-host" -settings /dev/null >"$DEMO_DIR/org-host.log" 2>&1 &
 PIDS+=($!)
@@ -701,6 +703,22 @@ host PUT "/orgs/$BUYER/network.dimo.delegation/insurance" "$BUYER_TOKEN" "$REC"
 expect 201 "consent committed"
 mint "The insurer reads car 1 under the buyer's consent: the window starts at era 1" \
     "$INSURER" "at://$BUYER/network.dimo.delegation/insurance" "$CAR1" "telemetry:read"
+
+echo ""
+step "The buyer also consents to the insurer's claims app, and only through that app..."
+info "clientAllowlist names the apps a delegation may be used through (spec §2)."
+info "The app attests each request with a short assertion signed by its own DID's"
+info "key and bound to the caller's DPoP key, so it cannot be replayed or lent."
+CLAIMS_APP=$(create --alias "claims.insurer.example")
+created "ClaimsApp" "$CLAIMS_APP"
+REC=$(grant "$BUYER" "$INSURER" "{\"vehicle\":\"$CAR1\"}" "telemetry:read" \
+        "$(jq -cn --arg app "$CLAIMS_APP" '{purpose: "claims", clientAllowlist: [$app]}')")
+host PUT "/orgs/$BUYER/network.dimo.delegation/claims" "$BUYER_TOKEN" "$REC"
+expect 201 "consent committed, allowlisting the claims app"
+mint "The insurer, through the claims app" \
+    "$INSURER" "at://$BUYER/network.dimo.delegation/claims" "$CAR1" "telemetry:read" "$CLAIMS_APP"
+refuse client_not_allowed "The insurer, directly: no app attested, so the allowlist refuses" \
+    "$INSURER" "at://$BUYER/network.dimo.delegation/claims" "$CAR1" "telemetry:read"
 
 # ── Step 6: The data ──────────────────────────────────────────────────────
 

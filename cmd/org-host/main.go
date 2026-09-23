@@ -65,12 +65,15 @@ func main() {
 		log.Warn().Msg("Using in-memory store (no DATABASE_URL configured): org keys do not outlive this process")
 	}
 
+	if cfg.IdentityIssuer == "" || cfg.IdentityAudience == "" {
+		log.Fatal().Msg("IDENTITY_ISSUER and IDENTITY_AUDIENCE are required: a token for another service must not write here")
+	}
 	var auth orghost.Authenticator
 	switch {
 	case cfg.IdentityJWKSURL != "":
-		auth, err = orghost.NewJWKSAuthenticatorFromURL(ctx, cfg.IdentityJWKSURL, cfg.IdentityIssuer)
+		auth, err = orghost.NewJWKSAuthenticatorFromURL(ctx, cfg.IdentityJWKSURL, cfg.IdentityIssuer, cfg.IdentityAudience)
 	case cfg.IdentityJWKS != "":
-		auth, err = orghost.NewJWKSAuthenticator([]byte(cfg.IdentityJWKS), cfg.IdentityIssuer)
+		auth, err = orghost.NewJWKSAuthenticator([]byte(cfg.IdentityJWKS), cfg.IdentityIssuer, cfg.IdentityAudience)
 	default:
 		log.Fatal().Msg("IDENTITY_JWKS_URL or IDENTITY_JWKS is required: writes are attributed to the identity token's sub")
 	}
