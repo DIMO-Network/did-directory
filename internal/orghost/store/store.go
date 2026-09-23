@@ -136,6 +136,11 @@ type Store interface {
 	// Commits returns the org's commits with seq greater than afterSeq, in order,
 	// at most limit.
 	Commits(ctx context.Context, org string, afterSeq int64, limit int) ([]repo.Committed, error)
+	// KeyCommits returns every commit to one record key, creates, updates and
+	// tombstones, in seq order: its history, which repo.Versions splits into
+	// versions. An org not on this host is ErrNotFound; a key never written
+	// has no commits.
+	KeyCommits(ctx context.Context, org, collection, rkey string) ([]repo.Committed, error)
 
 	// The resolver queries (plan §3.3) read the current view of records. Each
 	// returns live records only unless it says otherwise, ordered by seq.

@@ -226,6 +226,9 @@ type bundle struct {
 	// org and seq, which is the order a host's store returns them in.
 	entries []*entry
 	byURI   map[string]*entry
+	// history is every commit of each record key in the bundle, in seq order,
+	// for the questions the evaluator asks of a record's past versions.
+	history map[string][]repo.Committed
 }
 
 // newBundle verifies every commit and replays them into record states.
@@ -238,7 +241,7 @@ func newBundle(p *Proof, keys map[string]string, state *control.State) (*bundle,
 		return commits[i].Seq < commits[j].Seq
 	})
 
-	b := &bundle{p: p, control: state, byURI: map[string]*entry{}}
+	b := &bundle{p: p, control: state, byURI: map[string]*entry{}, history: map[string][]repo.Committed{}}
 	for i := range commits {
 		c := &commits[i]
 		if err := checkCommit(c, keys); err != nil {
@@ -248,6 +251,7 @@ func newBundle(p *Proof, keys map[string]string, state *control.State) (*bundle,
 			return nil, fmt.Errorf("%w: %s seq %d appears twice", ErrInvalid, c.DID, c.Seq)
 		}
 		uri := c.URI()
+		b.history[uri] = append(b.history[uri], *c)
 		e, exists := b.byURI[uri]
 		switch c.Op {
 		case repo.OpCreate, repo.OpUpdate:
@@ -338,6 +342,32 @@ func (e *entry) stored() (*delegation.Stored, error) {
 	}, nil
 }
 
+// versions is the bundle's history of one record key as versions.
+func (b *bundle) versions(uri string) []repo.Version {
+	return repo.Versions(b.history[uri])
+}
+
+// storedVersion is one version of a delegation or role as the evaluator reads
+// it, as the host's resolver gives it.
+func storedVersion(org string, v *repo.Version) (*delegation.Stored, error) {
+	var rec delegation.Record
+	if err := json.Unmarshal(v.Record, &rec); err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, v.URI(), err)
+	}
+	out := &delegation.Stored{
+		URI: v.URI(), Record: rec, CommittedAt: v.CommittedAt, CommittedBy: v.CommittedBy,
+		ApprovedBy: v.ApprovedBy, Superseded: v.Superseded,
+	}
+	if t := v.Tombstone; t != nil {
+		by := t.CommittedBy
+		if by == "" {
+			by = org
+		}
+		out.Tombstone = &delegation.Tombstone{At: t.CommittedAt, By: by}
+	}
+	return out, nil
+}
+
 // Record implements delegation.Resolver.
 func (b *bundle) Record(_ context.Context, uri string) (*delegation.Stored, error) {
 	e, ok := b.byURI[uri]
@@ -351,7 +381,8 @@ func (b *bundle) Record(_ context.Context, uri string) (*delegation.Stored, erro
 }
 
 // Memberships implements delegation.Resolver over the bundle's live
-// membership records. CreatedBy is the commit's author, as on the host.
+// membership records, every version since each was last created, as the
+// host's resolver gives them. CreatedBy is the commit's author, as on the host.
 func (b *bundle) Memberships(_ context.Context, tag, vehicle string) ([]delegation.Membership, error) {
 	org, err := delegation.TagAuthority(tag)
 	if err != nil {
@@ -362,17 +393,19 @@ func (b *bundle) Memberships(_ context.Context, tag, vehicle string) ([]delegati
 		if e.org != org || e.collection != delegation.CollectionTagMembership || !e.live() {
 			continue
 		}
-		var m delegation.MembershipRecord
-		if err := json.Unmarshal(e.record, &m); err != nil {
-			return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, e.uri, err)
+		for _, v := range repo.SinceCreated(b.versions(e.uri)) {
+			var m delegation.MembershipRecord
+			if err := json.Unmarshal(v.Record, &m); err != nil {
+				return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, e.uri, err)
+			}
+			if m.Tag != tag || m.Vehicle != vehicle {
+				continue
+			}
+			out = append(out, delegation.Membership{
+				URI: e.uri, Tag: m.Tag, Vehicle: m.Vehicle, JoinedAt: m.JoinedAt, LeftAt: m.LeftAt,
+				CreatedBy: v.CommittedBy, CommittedAt: v.CommittedAt,
+			})
 		}
-		if m.Tag != tag || m.Vehicle != vehicle {
-			continue
-		}
-		out = append(out, delegation.Membership{
-			Tag: m.Tag, Vehicle: m.Vehicle, JoinedAt: m.JoinedAt, LeftAt: m.LeftAt,
-			CreatedBy: e.committedBy, CommittedAt: e.committedAt,
-		})
 	}
 	return out, nil
 }
@@ -413,12 +446,15 @@ func (b *bundle) Roles(_ context.Context, org, member string) ([]delegation.Stor
 		if e.org != org || e.collection != delegation.CollectionRole {
 			continue
 		}
-		s, err := e.stored()
-		if err != nil {
-			return nil, err
-		}
-		if s.Record.To == member {
-			out = append(out, *s)
+		versions := b.versions(e.uri)
+		for i := range versions {
+			s, err := storedVersion(org, &versions[i])
+			if err != nil {
+				return nil, err
+			}
+			if s.Record.To == member {
+				out = append(out, *s)
+			}
 		}
 	}
 	return out, nil
@@ -432,21 +468,21 @@ func (b *bundle) ControlState(_ context.Context, vehicle string) (*control.State
 	return b.control, nil
 }
 
-// Opening implements delegation.Resolver from the controller's live
-// vehicleControl record for the vehicle.
+// Opening implements delegation.Resolver from any version of the
+// controller's vehicleControl record for the vehicle, as the host's resolver
+// does: the opening is checked against the era's commitment either way.
 func (b *bundle) Opening(_ context.Context, vehicle string, era uint64, controller string) (*control.Opening, error) {
-	e, ok := b.byURI["at://"+controller+"/"+delegation.CollectionVehicleControl+"/"+vehicle]
-	if !ok || !e.live() {
-		return nil, nil
+	versions := b.versions("at://" + controller + "/" + delegation.CollectionVehicleControl + "/" + vehicle)
+	for i := len(versions) - 1; i >= 0; i-- {
+		var o control.Opening
+		if err := json.Unmarshal(versions[i].Record, &o); err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, versions[i].URI(), err)
+		}
+		if o.Era == era && o.Controller == controller {
+			return &o, nil
+		}
 	}
-	var o control.Opening
-	if err := json.Unmarshal(e.record, &o); err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, e.uri, err)
-	}
-	if o.Era != era {
-		return nil, nil
-	}
-	return &o, nil
+	return nil, nil
 }
 
 // Party implements delegation.Resolver from the host's asserted attributes.

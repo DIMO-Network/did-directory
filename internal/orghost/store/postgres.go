@@ -530,9 +530,20 @@ func (s *PostgresStore) Commits(ctx context.Context, org string, afterSeq int64,
 	if limit <= 0 {
 		limit = 1 << 30
 	}
+	return s.queryCommits(ctx, `org = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3`, org, afterSeq, limit)
+}
+
+func (s *PostgresStore) KeyCommits(ctx context.Context, org, collection, rkey string) ([]repo.Committed, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	return s.queryCommits(ctx, `org = $1 AND collection = $2 AND rkey = $3 ORDER BY seq ASC`, org, collection, rkey)
+}
+
+func (s *PostgresStore) queryCommits(ctx context.Context, where string, args ...any) ([]repo.Committed, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT org, seq, cid, prev, rev, op, collection, rkey, record, committed_by, approved_by, committed_at, sig
-		FROM commits WHERE org = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3`, org, afterSeq, limit)
+		FROM commits WHERE `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query commits: %w", err)
 	}

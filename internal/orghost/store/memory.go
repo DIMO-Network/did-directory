@@ -199,6 +199,22 @@ func (s *MemoryStore) Commits(_ context.Context, org string, afterSeq int64, lim
 	return out, nil
 }
 
+func (s *MemoryStore) KeyCommits(_ context.Context, org, collection, rkey string) ([]repo.Committed, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	out := []repo.Committed{}
+	for _, c := range o.commits {
+		if c.Collection == collection && c.RKey == rkey {
+			out = append(out, cloneCommitted(c))
+		}
+	}
+	return out, nil
+}
+
 // each calls fn with the current state of every live record in collection
 // whose parsed body is wanted, in seq order, across the given orgs.
 func (o *memOrg) each(collection string, fn func(st Stored, rec map[string]any)) {

@@ -121,6 +121,11 @@ type Stored struct {
 	// ApprovedBy lists principals who approved this write, beyond its author.
 	// Required for self-issued grants and for anything the policy gates.
 	ApprovedBy []string
+	// Superseded is when a later version of the same record replaced this one.
+	// Resolver.Roles returns every version of a role, so that a grant's author
+	// is judged by the role as it stood when the grant was committed; a nil
+	// Superseded is the current version.
+	Superseded *time.Time
 }
 
 // Tombstone marks a revoked record. By is the principal whose repository write
@@ -130,8 +135,13 @@ type Tombstone struct {
 	By string
 }
 
-// Membership is one interval of a vehicle in a tag.
+// Membership is one interval of a vehicle in a tag, as one version of its
+// record states it.
 type Membership struct {
+	// URI is the membership record. A resolver may return several versions of
+	// one record; the latest whose author could have written it is the one
+	// that counts.
+	URI         string
 	Tag         string
 	Vehicle     string
 	JoinedAt    time.Time
@@ -159,7 +169,8 @@ type CustodyPeriod struct {
 type Resolver interface {
 	// Record returns a delegation or role record by URI.
 	Record(ctx context.Context, uri string) (*Stored, error)
-	// Memberships returns every membership interval of vehicle in tag.
+	// Memberships returns every membership interval of vehicle in tag: each
+	// version of each live membership record since it was last created.
 	Memberships(ctx context.Context, tag, vehicle string) ([]Membership, error)
 	// TagSize returns how many vehicles the tag holds at time at.
 	TagSize(ctx context.Context, tag string, at time.Time) (int, error)
@@ -167,12 +178,15 @@ type Resolver interface {
 	// in org's repository, oldest first. Only the issuer of a grant can narrow it
 	// by custody, so custody recorded anywhere else is not asked for.
 	Custody(ctx context.Context, org, vehicle, holder string) ([]CustodyPeriod, error)
-	// Roles returns role records issued by org to member, including tombstoned ones.
+	// Roles returns role records issued by org to member, including tombstoned
+	// ones, one Stored per version with Superseded set on all but the current.
 	Roles(ctx context.Context, org, member string) ([]Stored, error)
 	// ControlState returns the vehicle's control eras from the DID directory.
 	ControlState(ctx context.Context, vehicle string) (*control.State, error)
-	// Opening returns controller's opening for the vehicle's era, or nil if the
-	// controller holds none.
+	// Opening returns controller's opening for the vehicle's era, from any
+	// version of its record, or nil if the controller holds none. An opening is
+	// checked against the era's commitment, so an old version proves its era
+	// as well as it ever did.
 	Opening(ctx context.Context, vehicle string, era uint64, controller string) (*control.Opening, error)
 	// Party returns the policy attributes of a DID.
 	Party(ctx context.Context, did string) (Party, error)
@@ -673,20 +687,46 @@ func (e *Evaluator) membership(ctx context.Context, rec *Record, vehicle string,
 		return nil, false, err
 	}
 
+	// Each record's interval is its latest version whose author could have
+	// written it: tag edits widen every delegation over the tag, so they count
+	// only when the author could have granted these abilities at commit time
+	// (§9.2). An edit that does not count leaves the version before it standing,
+	// rather than dropping the vehicle from the tag.
+	byRecord := map[string][]Membership{}
+	var order []string
+	for i, m := range memberships {
+		key := m.URI
+		if key == "" {
+			key = fmt.Sprintf("#%d", i)
+		}
+		if _, ok := byRecord[key]; !ok {
+			order = append(order, key)
+		}
+		byRecord[key] = append(byRecord[key], m)
+	}
+	need := MembershipNeed(rec)
 	var set Set
 	live := false
-	need := MembershipNeed(rec)
-	for _, m := range memberships {
-		// Tag edits widen every delegation over the tag, so they count only when the
-		// author could have granted these abilities at commit time.
-		if m.CreatedBy != "" && m.CreatedBy != org {
-			ok, err := e.hasRole(ctx, org, m.CreatedBy, Covers{Tag: rec.Covers.Tag}, need, m.CommittedAt, nil, walk{depth: depth})
-			if err != nil {
-				return nil, false, err
+	for _, key := range order {
+		versions := byRecord[key]
+		slices.SortStableFunc(versions, func(a, b Membership) int { return b.CommittedAt.Compare(a.CommittedAt) })
+		var m *Membership
+		for i := range versions {
+			v := &versions[i]
+			if v.CreatedBy != "" && v.CreatedBy != org {
+				ok, err := e.hasRole(ctx, org, v.CreatedBy, Covers{Tag: rec.Covers.Tag}, need, v.CommittedAt, nil, walk{depth: depth})
+				if err != nil {
+					return nil, false, err
+				}
+				if !ok {
+					continue
+				}
 			}
-			if !ok {
-				continue
-			}
+			m = v
+			break
+		}
+		if m == nil {
+			continue
 		}
 		left := m.LeftAt != nil && !m.LeftAt.After(at)
 		if left && rec.afterRemoval() == Drop {
@@ -1059,7 +1099,7 @@ func (e *Evaluator) roleActive(ctx context.Context, r *Stored, org, member strin
 	if slices.Contains(w.seen, r.URI) {
 		return false, nil
 	}
-	if at.Before(r.CommittedAt) || !rec.Validity.Set().Contains(at) {
+	if at.Before(r.CommittedAt) || (r.Superseded != nil && !at.Before(*r.Superseded)) || !rec.Validity.Set().Contains(at) {
 		return false, nil
 	}
 	revoked, err := e.revokedAt(ctx, rec, r.Tombstone, at, w.into(r.URI))
@@ -1114,7 +1154,7 @@ func (e *Evaluator) roleScopeCovers(ctx context.Context, role, target Covers, at
 		if err != nil {
 			return false, err
 		}
-		for _, m := range memberships {
+		for _, m := range latestVersions(memberships) {
 			if !at.Before(m.JoinedAt) && (m.LeftAt == nil || at.Before(*m.LeftAt)) {
 				return true, nil
 			}
@@ -1123,6 +1163,29 @@ func (e *Evaluator) roleScopeCovers(ctx context.Context, role, target Covers, at
 	default:
 		return role.Vehicle != "" && role.Vehicle == target.Vehicle, nil
 	}
+}
+
+// latestVersions keeps the current version of each membership record: what
+// the tag says now, before anybody's authority is asked about.
+func latestVersions(ms []Membership) []Membership {
+	latest := map[string]int{}
+	var out []Membership
+	for i, m := range ms {
+		if m.URI == "" {
+			out = append(out, m)
+			continue
+		}
+		j, ok := latest[m.URI]
+		if !ok {
+			latest[m.URI] = len(out)
+			out = append(out, m)
+			continue
+		}
+		if m.CommittedAt.After(out[j].CommittedAt) {
+			out[j] = ms[i]
+		}
+	}
+	return out
 }
 
 // revokedAt reports whether an authorized tombstone is in effect at time at.

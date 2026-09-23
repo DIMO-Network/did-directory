@@ -114,35 +114,19 @@ func (r *Resolver) Record(ctx context.Context, uri string) (*delegation.Stored, 
 	return stored(org, st)
 }
 
-// Memberships implements delegation.Resolver. CreatedBy is the commit's
-// witnessed author, never anything in the record (plan §7).
+// Memberships implements delegation.Resolver: every version of each live
+// membership record, CreatedBy the commit's witnessed author (plan §7).
 func (r *Resolver) Memberships(ctx context.Context, tag, vehicle string) ([]delegation.Membership, error) {
 	org, err := delegation.TagAuthority(tag)
 	if err != nil {
 		return nil, err
 	}
-	sts, err := r.Store.Memberships(ctx, org, tag, vehicle)
+	out, _, err := membershipVersions(ctx, r.Store, org, tag, vehicle)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
-	}
-	return membershipsOf(sts)
-}
-
-// membershipsOf converts membership records to what the evaluator reads.
-func membershipsOf(sts []store.Stored) ([]delegation.Membership, error) {
-	out := make([]delegation.Membership, 0, len(sts))
-	for i := range sts {
-		var m delegation.MembershipRecord
-		if err := json.Unmarshal(sts[i].Record, &m); err != nil {
-			return nil, fmt.Errorf("%s: %w", sts[i].URI, err)
-		}
-		out = append(out, delegation.Membership{
-			Tag: m.Tag, Vehicle: m.Vehicle, JoinedAt: m.JoinedAt, LeftAt: m.LeftAt,
-			CreatedBy: sts[i].CommittedBy, CommittedAt: sts[i].CommittedAt,
-		})
 	}
 	return out, nil
 }
@@ -187,27 +171,15 @@ func custodyOf(sts []store.Stored) ([]delegation.CustodyPeriod, error) {
 	return out, nil
 }
 
-// Roles implements delegation.Resolver.
+// Roles implements delegation.Resolver: every version of every role org
+// issued to member.
 func (r *Resolver) Roles(ctx context.Context, org, member string) ([]delegation.Stored, error) {
-	sts, err := r.Store.Roles(ctx, org, member)
+	out, _, err := roleVersions(ctx, r.Store, org, member)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
-	}
-	return storedAll(org, sts)
-}
-
-// storedAll converts every record in sts, all from org's repository.
-func storedAll(org string, sts []store.Stored) ([]delegation.Stored, error) {
-	out := make([]delegation.Stored, 0, len(sts))
-	for i := range sts {
-		s, err := stored(org, &sts[i])
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *s)
 	}
 	return out, nil
 }
@@ -240,33 +212,17 @@ func (r *Resolver) ControlState(ctx context.Context, vehicle string) (*control.S
 	return state, nil
 }
 
-// Opening implements delegation.Resolver: the controller's vehicleControl
-// record for the vehicle, if it names this era.
+// Opening implements delegation.Resolver from any version of the
+// controller's vehicleControl record for the vehicle.
 func (r *Resolver) Opening(ctx context.Context, vehicle string, era uint64, controller string) (*control.Opening, error) {
-	st, err := r.Store.Current(ctx, controller, delegation.CollectionVehicleControl, vehicle)
+	o, _, err := openingVersion(ctx, r.Store, vehicle, era, controller)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
 	}
-	return openingOf(st, era)
-}
-
-// openingOf reads a vehicleControl record as an opening for era, or nil if
-// the record is tombstoned or names another era.
-func openingOf(st *store.Stored, era uint64) (*control.Opening, error) {
-	if !st.Live() {
-		return nil, nil
-	}
-	var o control.Opening
-	if err := json.Unmarshal(st.Record, &o); err != nil {
-		return nil, fmt.Errorf("%s: %w", st.URI, err)
-	}
-	if o.Era != era {
-		return nil, nil
-	}
-	return &o, nil
+	return o, nil
 }
 
 // Party implements delegation.Resolver from the party table (plan §1 decision
