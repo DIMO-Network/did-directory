@@ -1,6 +1,7 @@
 package orghost
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -243,7 +244,12 @@ func (s *Server) write(c *fiber.Ctx, org, collection, rkey string) error {
 		return s.fail(c, err)
 	}
 	w := &write{org: org, collection: collection, rkey: rkey, record: record, committedBy: by}
-	if err := s.checkWrite(c.Context(), w); err != nil {
+	// The checks run under the org's write lock, against the head the commit
+	// follows (Repository.Check).
+	res, err := s.repo.Put(c.Context(), org, collection, rkey, record, by, nil, func(ctx context.Context, _ *store.Stored) error {
+		return s.checkWrite(ctx, w)
+	})
+	if err != nil {
 		var need *ApprovalRequiredError
 		if !errors.As(err, &need) {
 			return s.fail(c, err)
@@ -258,10 +264,6 @@ func (s *Server) write(c *fiber.Ctx, org, collection, rkey string) error {
 		s.log.Info().Str("uri", w.uri()).Str("pending", p.ID).Str("by", caller(c)).Strs("reasons", p.Reasons).Msg("write pending approval")
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"pending": p.ID, "uri": w.uri(), "reasons": p.Reasons})
 	}
-	res, err := s.repo.Put(c.Context(), org, collection, rkey, record, by, nil)
-	if err != nil {
-		return s.fail(c, err)
-	}
 	s.log.Info().Str("uri", res.URI).Str("op", res.Op).Str("by", caller(c)).Msg("record committed")
 	status := fiber.StatusOK
 	if res.Op == repo.OpCreate {
@@ -272,17 +274,13 @@ func (s *Server) write(c *fiber.Ctx, org, collection, rkey string) error {
 
 func (s *Server) tombstone(c *fiber.Ctx) error {
 	org, collection, rkey := params(c)
-	cur, err := s.repo.Get(c.Context(), org, collection, rkey)
-	if err != nil {
-		return s.fail(c, err)
-	}
-	if !cur.Live() {
-		return s.fail(c, ErrNotLive)
-	}
-	if err := s.checkTombstone(c.Context(), org, caller(c), cur); err != nil {
-		return s.fail(c, err)
-	}
-	res, err := s.repo.Delete(c.Context(), org, collection, rkey, committedBy(c, org), nil)
+	who := caller(c)
+	res, err := s.repo.Delete(c.Context(), org, collection, rkey, committedBy(c, org), nil, func(ctx context.Context, cur *store.Stored) error {
+		if cur == nil || !cur.Live() {
+			return nil // Delete answers not found or not live itself
+		}
+		return s.checkTombstone(ctx, org, who, cur)
+	})
 	if err != nil {
 		return s.fail(c, err)
 	}

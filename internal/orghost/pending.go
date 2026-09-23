@@ -1,7 +1,7 @@
 package orghost
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"strings"
 
@@ -39,17 +39,22 @@ func (s *Server) approve(c *fiber.Ctx) error {
 	if err != nil {
 		return s.fail(c, err)
 	}
+	// Claim the pending write before committing it, so two approvers cannot
+	// both commit it and a withdrawal cannot land between the check and the
+	// commit. If the commit does not happen, the write goes back to waiting.
+	if err := s.repo.Store.DeletePending(c.Context(), org, id); err != nil {
+		return s.fail(c, err)
+	}
 	approver := caller(c)
 	w := &write{org: p.Org, collection: p.Collection, rkey: p.RKey, record: record, committedBy: p.CommittedBy, approvedBy: approver}
-	if err := s.checkWrite(c.Context(), w); err != nil {
-		return s.fail(c, err)
-	}
-	res, err := s.repo.Put(c.Context(), p.Org, p.Collection, p.RKey, record, p.CommittedBy, []string{approver})
+	res, err := s.repo.Put(c.Context(), p.Org, p.Collection, p.RKey, record, p.CommittedBy, []string{approver}, func(ctx context.Context, _ *store.Stored) error {
+		return s.checkWrite(ctx, w)
+	})
 	if err != nil {
+		if rerr := s.repo.Store.AddPending(c.Context(), *p); rerr != nil {
+			s.log.Error().Err(rerr).Str("pending", id).Msg("restoring a pending write after a failed approval")
+		}
 		return s.fail(c, err)
-	}
-	if err := s.repo.Store.DeletePending(c.Context(), org, id); err != nil && !store.IsNotFound(err) {
-		s.log.Error().Err(err).Str("pending", id).Msg("delete pending after commit")
 	}
 	s.log.Info().Str("uri", res.URI).Str("op", res.Op).Str("by", p.CommittedBy).Str("approvedBy", approver).Msg("record committed with approval")
 	status := fiber.StatusOK
@@ -136,19 +141,25 @@ func (s *Server) revokeAuthoredBy(c *fiber.Ctx) error {
 		batch = append(batch, st)
 	}
 
-	by := committedBy(c, org)
-	revoked := make([]*Result, 0, len(batch))
-	for _, st := range batch {
-		res, err := s.repo.Delete(c.Context(), org, st.Collection, st.RKey, by, nil)
-		if errors.Is(err, ErrNotLive) {
-			// Somebody got there first; the outcome is the one asked for.
-			continue
+	// One append: every tombstone commits or none does. Each is checked again
+	// under the org's write lock, as a DELETE by the caller would be; one that
+	// somebody else already tombstoned is skipped, since the outcome is the one
+	// asked for.
+	keys := make([]Key, len(batch))
+	for i, st := range batch {
+		keys[i] = Key{Collection: st.Collection, RKey: st.RKey}
+	}
+	who := caller(c)
+	revoked, err := s.repo.DeleteAll(c.Context(), org, keys, committedBy(c, org), func(ctx context.Context, curs []*store.Stored) error {
+		for _, cur := range curs {
+			if err := s.checkTombstone(ctx, org, who, cur); err != nil {
+				return fmt.Errorf("%s: %w", cur.URI, err)
+			}
 		}
-		if err != nil {
-			s.log.Error().Err(err).Str("uri", st.URI).Int("revoked", len(revoked)).Msg("revoke-authored-by stopped partway")
-			return s.fail(c, err)
-		}
-		revoked = append(revoked, res)
+		return nil
+	})
+	if err != nil {
+		return s.fail(c, err)
 	}
 	s.log.Info().Str("org", org).Str("member", req.Member).Str("since", req.Since).Int("revoked", len(revoked)).Str("by", caller(c)).Msg("revoked records authored by member")
 	return c.JSON(fiber.Map{"revoked": revoked})

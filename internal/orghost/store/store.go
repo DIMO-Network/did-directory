@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/pkg/repo"
@@ -125,7 +126,9 @@ type Store interface {
 	// if the head is still expectedHead. It returns ErrHeadChanged if another
 	// writer got there first. The caller signs the commit before calling, so seq
 	// and prev are inside the signature; the head check is what makes them true.
-	AppendAfter(ctx context.Context, expectedHead Head, c repo.Committed) error
+	// Several commits append together or not at all: they must follow each
+	// other, the first following expectedHead.
+	AppendAfter(ctx context.Context, expectedHead Head, commits ...repo.Committed) error
 
 	// Current returns the state of a record key, tombstoned or not, or ErrNotFound
 	// if nothing was ever committed under it.
@@ -189,4 +192,21 @@ type Store interface {
 
 	// Close closes the store.
 	Close() error
+}
+
+// chained checks that commits follow head and each other, all in one org: the
+// shape AppendAfter appends.
+func chained(head Head, commits []repo.Committed) error {
+	prev := head
+	for i := range commits {
+		c := &commits[i]
+		if c.DID != commits[0].DID {
+			return fmt.Errorf("commit %d is for %s, not %s", i, c.DID, commits[0].DID)
+		}
+		if c.Seq != prev.Seq+1 || c.Prev != prev.CID {
+			return fmt.Errorf("commit %d (seq %d) does not follow seq %d", i, c.Seq, prev.Seq)
+		}
+		prev = Head{Seq: c.Seq, CID: c.CID, Rev: c.Rev}
+	}
+	return nil
 }

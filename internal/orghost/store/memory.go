@@ -87,30 +87,40 @@ func (o *memOrg) head() Head {
 	return Head{Seq: last.Seq, CID: last.CID, Rev: last.Rev}
 }
 
-func (s *MemoryStore) AppendAfter(_ context.Context, expectedHead Head, c repo.Committed) error {
+func (s *MemoryStore) AppendAfter(_ context.Context, expectedHead Head, commits ...repo.Committed) error {
+	if len(commits) == 0 {
+		return nil
+	}
 	// Handlers pass Fiber params, which alias a reused request buffer; the store
 	// must own its copies.
-	c = cloneCommitted(c)
+	for i := range commits {
+		commits[i] = cloneCommitted(commits[i])
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	o, ok := s.orgs[c.DID]
+	o, ok := s.orgs[commits[0].DID]
 	if !ok {
 		return ErrNotFound
 	}
 	if o.head() != expectedHead {
 		return ErrHeadChanged
 	}
-	idx := len(o.commits)
-	o.commits = append(o.commits, c)
-	key := c.Collection + "/" + c.RKey
-	switch c.Op {
-	case repo.OpTombstone:
-		h := o.heads[key]
-		h.tombstone = idx
-		o.heads[key] = h
-	default:
-		o.heads[key] = memHead{record: idx, tombstone: -1}
+	if err := chained(expectedHead, commits); err != nil {
+		return err
+	}
+	for _, c := range commits {
+		idx := len(o.commits)
+		o.commits = append(o.commits, c)
+		key := c.Collection + "/" + c.RKey
+		switch c.Op {
+		case repo.OpTombstone:
+			h := o.heads[key]
+			h.tombstone = idx
+			o.heads[key] = h
+		default:
+			o.heads[key] = memHead{record: idx, tombstone: -1}
+		}
 	}
 	return nil
 }

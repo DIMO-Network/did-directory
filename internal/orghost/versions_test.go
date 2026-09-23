@@ -180,6 +180,6 @@ func appendAs(t *testing.T, h *host, org, collection, rkey string, body any, by 
 	require.NoError(t, err)
 	rec, err := h.repo.Prepare(org, collection, rkey, data, by)
 	require.NoError(t, err)
-	_, err = h.repo.Put(t.Context(), org, collection, rkey, rec, by, nil)
+	_, err = h.repo.Put(t.Context(), org, collection, rkey, rec, by, nil, nil)
 	require.NoError(t, err)
 }
