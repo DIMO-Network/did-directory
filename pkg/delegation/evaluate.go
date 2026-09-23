@@ -25,7 +25,25 @@ var (
 	ErrSelfDealing      = errors.New("the author of a grant cannot be its recipient without a second approval")
 	ErrExclusiveHold    = errors.New("another party holds these abilities exclusively")
 	ErrExceedsRole      = errors.New("the grant exceeds the constraints of the role that authored it")
+	// ErrInvalidRecord is a record that does not hold up on its own terms: it
+	// is malformed, is not a delegation, or was authored by somebody who could
+	// not have written it.
+	ErrInvalidRecord = errors.New("invalid record")
 )
+
+// refusals are the errors that mean an evaluation said no, as opposed to the
+// resolver failing to answer.
+var refusals = []error{
+	ErrNotCovered, ErrRevoked, ErrNotValid, ErrNotNarrowing, ErrUnauthorized,
+	ErrClientNotAllowed, ErrChainTooDeep, ErrLienNotAllowed, ErrSelfDealing,
+	ErrExclusiveHold, ErrExceedsRole, ErrInvalidRecord,
+}
+
+// isRefusal reports whether err is an evaluation's answer rather than a
+// failure to reach one.
+func isRefusal(err error) bool {
+	return slices.ContainsFunc(refusals, func(r error) bool { return errors.Is(err, r) })
+}
 
 // ExclusiveHoldError is ErrExclusiveHold together with the abilities that are
 // suspended, so an issuer can tell the caller which ones somebody else holds
@@ -145,8 +163,10 @@ type Resolver interface {
 	Memberships(ctx context.Context, tag, vehicle string) ([]Membership, error)
 	// TagSize returns how many vehicles the tag holds at time at.
 	TagSize(ctx context.Context, tag string, at time.Time) (int, error)
-	// Custody returns every period in which holder had the vehicle, oldest first.
-	Custody(ctx context.Context, vehicle, holder string) ([]CustodyPeriod, error)
+	// Custody returns every period in which holder had the vehicle, as recorded
+	// in org's repository, oldest first. Only the issuer of a grant can narrow it
+	// by custody, so custody recorded anywhere else is not asked for.
+	Custody(ctx context.Context, org, vehicle, holder string) ([]CustodyPeriod, error)
 	// Roles returns role records issued by org to member, including tombstoned ones.
 	Roles(ctx context.Context, org, member string) ([]Stored, error)
 	// ControlState returns the vehicle's control eras from the DID directory.
@@ -156,7 +176,9 @@ type Resolver interface {
 	Opening(ctx context.Context, vehicle string, era uint64, controller string) (*control.Opening, error)
 	// Party returns the policy attributes of a DID.
 	Party(ctx context.Context, did string) (Party, error)
-	// Exclusives returns exclusive holds active over the vehicle at time at.
+	// Exclusives returns the exclusive holds claimed over the vehicle at time at.
+	// They are claims: the evaluator checks each one's own chain before it
+	// suspends anybody.
 	Exclusives(ctx context.Context, vehicle string, at time.Time) ([]ExclusiveHold, error)
 }
 
@@ -206,7 +228,7 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 		return nil, err
 	}
 	if s.Record.Type != TypeDelegation {
-		return nil, fmt.Errorf("%s is not a delegation", uri)
+		return nil, fmt.Errorf("%w: %s is not a delegation", ErrInvalidRecord, uri)
 	}
 	if s.Record.To != caller {
 		ok, err := e.useRole(ctx, s.Record.To, caller, vehicle, abilities, at)
@@ -218,7 +240,7 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 		}
 	}
 
-	cov, err := e.evaluate(ctx, s, vehicle, clientID, at, 1, map[string]bool{})
+	cov, err := e.evaluateTop(ctx, s, vehicle, clientID, at)
 	if err != nil {
 		// A suspended grant answers "somebody else is driving" only to a caller
 		// asking for something this grant actually carries. Asking for an ability
@@ -266,7 +288,32 @@ func (e *Evaluator) Coverage(ctx context.Context, uri, vehicle string, at time.T
 	if err != nil {
 		return nil, err
 	}
-	return e.evaluate(ctx, s, vehicle, anyClient, at, 1, map[string]bool{})
+	return e.evaluateTop(ctx, s, vehicle, anyClient, at)
+}
+
+// evaluateTop evaluates the record being authorized and then applies the
+// exclusive holds over the vehicle. Exclusivity applies to that record only, not
+// to links inside its own chain: a custody hold must not suspend the grant it
+// derives from.
+func (e *Evaluator) evaluateTop(ctx context.Context, s *Stored, vehicle, clientID string, at time.Time) (*Coverage, error) {
+	cov, err := e.evaluate(ctx, s, vehicle, clientID, at, 1, map[string]bool{})
+	if err != nil {
+		return nil, err
+	}
+	if len(cov.Live) == 0 {
+		return cov, nil
+	}
+	if err := e.applyExclusives(ctx, s, vehicle, at, cov); err != nil {
+		return nil, err
+	}
+	if cov.Empty() {
+		// Suspended is not the same answer as never granted: §12.2 wants the
+		// operator to see that somebody is driving their car, and the issuer to
+		// log it. Saying "not covered" here would hide a custody hold behind the
+		// same error as a missing grant.
+		return nil, &ExclusiveHoldError{Suspended: cov.Suspended}
+	}
+	return cov, nil
 }
 
 func (e *Evaluator) maxDepth() int {
@@ -282,16 +329,16 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		return nil, ErrChainTooDeep
 	}
 	if seen[s.URI] {
-		return nil, fmt.Errorf("delegation cycle at %s", s.URI)
+		return nil, fmt.Errorf("%w: delegation cycle at %s", ErrInvalidRecord, s.URI)
 	}
 	seen[s.URI] = true
 	defer delete(seen, s.URI)
 
 	if rec.Type != TypeDelegation {
-		return nil, fmt.Errorf("%s is not a delegation", s.URI)
+		return nil, fmt.Errorf("%w: %s is not a delegation", ErrInvalidRecord, s.URI)
 	}
 	if err := rec.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid delegation %s: %w", s.URI, err)
+		return nil, fmt.Errorf("%w: %s: %w", ErrInvalidRecord, s.URI, err)
 	}
 	revoked, err := e.revokedAt(ctx, rec, s.Tombstone, at, walk{depth: depth})
 	if err != nil {
@@ -324,7 +371,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 	// approval — staff are customers too.
 	if author != rec.From {
 		if !from.CanHaveMembers() {
-			return nil, fmt.Errorf("%s authored by %s, but %s cannot have members", s.URI, author, rec.From)
+			return nil, fmt.Errorf("%w: %s authored by %s, but %s cannot have members", ErrInvalidRecord, s.URI, author, rec.From)
 		}
 		need := AuthoringNeed(rec)
 		ok, err := e.hasRole(ctx, rec.From, author, rec.Covers, need, s.CommittedAt, e.shapeCheck(ctx, s, at), walk{depth: depth})
@@ -332,7 +379,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 			return nil, fmt.Errorf("%s: %w", s.URI, err)
 		}
 		if !ok {
-			return nil, fmt.Errorf("%s: author %s lacked authority when committed", s.URI, author)
+			return nil, fmt.Errorf("%w: %s: author %s lacked authority when committed", ErrInvalidRecord, s.URI, author)
 		}
 		if author == rec.To {
 			ok, err := e.approvedByAnother(ctx, s, author, walk{depth: depth})
@@ -365,7 +412,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 	cov := &Coverage{Vehicle: vehicle, Historical: map[string]Set{}, Chain: []string{s.URI}}
 	base := member.Intersect(rec.DataWindow.Set())
 	if rec.NarrowToCustody {
-		held, err := e.custody(ctx, vehicle, rec.To)
+		held, err := e.custody(ctx, rec.From, vehicle, rec.To)
 		if err != nil {
 			return nil, err
 		}
@@ -383,23 +430,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		}
 	}
 	cov.Chain = append(cov.Chain, chain...)
-
-	// Exclusivity applies to the record being authorized, not to links inside its
-	// own chain: a custody hold must not suspend the grant it derives from.
-	if depth == 1 && len(cov.Live) > 0 {
-		if err := e.applyExclusives(ctx, s, vehicle, at, cov); err != nil {
-			return nil, err
-		}
-	}
-
 	if cov.Empty() {
-		// Suspended is not the same answer as never granted: §12.2 wants the
-		// operator to see that somebody is driving their car, and the issuer to
-		// log it. Saying "not covered" here would hide a custody hold behind the
-		// same error as a missing grant.
-		if len(cov.Suspended) > 0 {
-			return nil, &ExclusiveHoldError{Suspended: cov.Suspended}
-		}
 		return nil, ErrNotCovered
 	}
 	return cov, nil
@@ -418,12 +449,12 @@ func committedBy(s *Stored) (string, error) {
 	rec := &s.Record
 	if s.CommittedBy == "" {
 		if rec.CreatedBy != "" && rec.CreatedBy != rec.From {
-			return "", fmt.Errorf("%s: createdBy claims %s but the repository witnessed no author", s.URI, rec.CreatedBy)
+			return "", fmt.Errorf("%w: %s: createdBy claims %s but the repository witnessed no author", ErrInvalidRecord, s.URI, rec.CreatedBy)
 		}
 		return rec.From, nil
 	}
 	if rec.CreatedBy != "" && rec.CreatedBy != s.CommittedBy {
-		return "", fmt.Errorf("%s: createdBy says %s but the repository witnessed %s", s.URI, rec.CreatedBy, s.CommittedBy)
+		return "", fmt.Errorf("%w: %s: createdBy says %s but the repository witnessed %s", ErrInvalidRecord, s.URI, rec.CreatedBy, s.CommittedBy)
 	}
 	return s.CommittedBy, nil
 }
@@ -445,7 +476,11 @@ func (e *Evaluator) applyExclusives(ctx context.Context, s *Stored, vehicle stri
 		if h.Holder == rec.To || slices.Contains(cov.Chain, h.URI) {
 			continue
 		}
-		for _, a := range h.Abilities {
+		held, err := e.heldExclusively(ctx, h, vehicle, at)
+		if err != nil {
+			return err
+		}
+		for _, a := range held {
 			// Where this record claims the same ability exclusively, only a strictly
 			// newer hold supersedes it. Suspending both sides of an overlap would
 			// lock two parties out of a car one of them is driving, which is the
@@ -478,6 +513,35 @@ func (e *Evaluator) applyExclusives(ctx context.Context, s *Stored, vehicle stri
 	return nil
 }
 
+// heldExclusively returns the abilities hold actually suspends: those its record
+// claims exclusively and can itself exercise over the vehicle at time at. A
+// claim is only a claim; anybody can write one into their own repository, so a
+// hold whose chain does not reach a controller suspends nothing. Holds are not
+// applied to the hold's own evaluation, which is what keeps this from
+// recursing, and a hold that evaluates to a refusal is ignored while a resolver
+// failure is returned: when the host cannot tell, the car's driver stays
+// protected.
+func (e *Evaluator) heldExclusively(ctx context.Context, h ExclusiveHold, vehicle string, at time.Time) ([]string, error) {
+	hs, err := e.Resolver.Record(ctx, h.URI)
+	if err != nil {
+		return nil, err
+	}
+	hc, err := e.evaluate(ctx, hs, vehicle, anyClient, at, 1, map[string]bool{})
+	if isRefusal(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var held []string
+	for _, a := range h.Abilities {
+		if slices.Contains(hs.Record.Exclusive, a) && slices.Contains(hc.Live, a) {
+			held = append(held, a)
+		}
+	}
+	return held, nil
+}
+
 // holdStart is when this record's own exclusive claim took effect, on the same
 // footing a resolver reports ExclusiveHold.Since: the validity start, or the
 // commit when the validity is open at the front.
@@ -492,8 +556,8 @@ func holdStart(s *Stored) time.Time {
 // has no end, because the car is still out and the window follows the holder
 // forward; closing it at return is what narrows the grant. A holder who never
 // picked the car up has no periods, so the record covers no data at all.
-func (e *Evaluator) custody(ctx context.Context, vehicle, holder string) (Set, error) {
-	periods, err := e.Resolver.Custody(ctx, vehicle, holder)
+func (e *Evaluator) custody(ctx context.Context, org, vehicle, holder string) (Set, error) {
+	periods, err := e.Resolver.Custody(ctx, org, vehicle, holder)
 	if err != nil {
 		return nil, err
 	}
@@ -747,7 +811,7 @@ func (e *Evaluator) parents(ctx context.Context, s *Stored, vehicle, clientID st
 // narrows checks the static rules a child must satisfy against a parent.
 func narrows(child, parent *Record) error {
 	if parent.Type != TypeDelegation {
-		return errors.New("basis must be a delegation")
+		return fmt.Errorf("%w: basis must be a delegation", ErrInvalidRecord)
 	}
 	if child.From != parent.To {
 		return fmt.Errorf("%w: from %s is not the recipient %s", ErrNotNarrowing, child.From, parent.To)
@@ -797,6 +861,12 @@ func narrows(child, parent *Record) error {
 		if !parent.Redelegate.Exclusive && !slices.Contains(parent.Exclusive, a) {
 			return fmt.Errorf("%w: basis does not permit an exclusive claim over %s", ErrNotNarrowing, a)
 		}
+	}
+	// Permission to claim exclusivity passes down only from a basis that has it.
+	// Without this a partner could switch it on for its own children, and a
+	// grandchild's hold would suspend the controller's commands.
+	if child.Redelegate.Exclusive && !parent.Redelegate.Exclusive {
+		return fmt.Errorf("%w: basis does not permit exclusive redelegation", ErrNotNarrowing)
 	}
 	// Recovery is exclusivity's override: it acts through somebody else's hold,
 	// so it cannot be cheaper to claim than the hold itself. A basis that never

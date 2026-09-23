@@ -422,7 +422,7 @@ During custody the renter holds `command:*` **exclusively**. The operator cannot
 
 Two overlapping holds do not deadlock: the **newer one is in force**, so a stale hold from a device that never synced its return is superseded rather than locking the next renter out, while the operator stays blocked by both. A suspended grant answers `ErrExclusiveHold` naming the abilities, never "not covered" — the operator learns that somebody is driving their car, which is a different fact from never having been granted it. A caller asking for an ability the grant never carried still gets "not covered".
 
-Exclusivity is permitted by the basis (`redelegate.exclusive`) and claimed by the time-bounded child, so a host permits it once at listing and only loses control for the booking window. It applies to the record being authorized, never to links inside its own chain.
+Exclusivity is permitted by the basis (`redelegate.exclusive`) and claimed by the time-bounded child, so a host permits it once at listing and only loses control for the booking window. It applies to the record being authorized, never to links inside its own chain. A child may set `redelegate.exclusive` only where its basis did, and a role must `allowExclusive` to issue it, so the permission never appears below where the controller granted it. A hold suspends others only once its own chain evaluates: a claim is not a hold.
 
 ### 12.3 Activation order
 

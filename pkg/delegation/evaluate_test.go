@@ -103,7 +103,7 @@ func (m *memResolver) TagSize(_ context.Context, tag string, at time.Time) (int,
 	return n, nil
 }
 
-func (m *memResolver) Custody(_ context.Context, vehicle, holder string) ([]CustodyPeriod, error) {
+func (m *memResolver) Custody(_ context.Context, _, vehicle, holder string) ([]CustodyPeriod, error) {
 	return m.custody[vehicle+"|"+holder], nil
 }
 

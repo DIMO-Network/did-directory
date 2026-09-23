@@ -283,17 +283,19 @@ func (s *MemoryStore) TagSize(_ context.Context, org, tag string, at time.Time) 
 	return len(vehicles), nil
 }
 
-func (s *MemoryStore) Custody(_ context.Context, vehicle, holder string) ([]Stored, error) {
+func (s *MemoryStore) Custody(_ context.Context, org, vehicle, holder string) ([]Stored, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := []Stored{}
-	for _, o := range s.orgs {
-		o.each("network.dimo.org.custody", func(st Stored, rec map[string]any) {
-			if field(rec, "vehicle") == vehicle && field(rec, "holder") == holder {
-				out = append(out, st)
-			}
-		})
+	o, ok := s.orgs[org]
+	if !ok {
+		return out, nil
 	}
+	o.each("network.dimo.org.custody", func(st Stored, rec map[string]any) {
+		if field(rec, "vehicle") == vehicle && field(rec, "holder") == holder {
+			out = append(out, st)
+		}
+	})
 	return out, nil
 }
 

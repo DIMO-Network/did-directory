@@ -89,7 +89,7 @@ func (f *fleet) role(org, member string, abilities []string, at time.Time) {
 // and records custody as the booking's own custody events.
 func (f *fleet) TagSize(context.Context, string, time.Time) (int, error) { return 1, nil }
 
-func (f *fleet) Custody(_ context.Context, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
+func (f *fleet) Custody(_ context.Context, _, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
 	var out []delegation.CustodyPeriod
 	for _, c := range f.custody {
 		if c.Vehicle == vehicle && c.Holder == holder {

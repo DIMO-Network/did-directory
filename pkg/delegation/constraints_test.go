@@ -191,14 +191,23 @@ func TestRoleConstraints_RedelegationAndExclusivityAreOptIn(t *testing.T) {
 	s.Record.Exclusive = []string{"command:unlock"}
 	_, err = e.Coverage(ctx, u, car, day(4))
 	assert.ErrorIs(t, err, ErrExceedsRole)
-	assert.ErrorContains(t, err, "exclusive or recovery")
+	assert.ErrorContains(t, err, "exclusive, recovery")
 
 	s.Record.Exclusive = nil
 	s.Record.Recovery = true
 	_, err = e.Coverage(ctx, u, car, day(4))
 	assert.ErrorIs(t, err, ErrExceedsRole, "recovery overrides someone else's hold, so it is the same privilege")
 
+	// Handing on the permission to claim exclusivity is the same privilege too,
+	// even where the role allows redelegation.
 	s.Record.Recovery = false
+	role.Record.Constraints = &RoleConstraints{MaxVehicles: 1, AllowRedelegation: true}
+	s.Record.Redelegate = Redelegate{Mode: RedelegateAttenuated, MaxDepth: 1, Exclusive: true}
+	_, err = e.Coverage(ctx, u, car, day(4))
+	assert.ErrorIs(t, err, ErrExceedsRole)
+	assert.ErrorContains(t, err, "exclusively redelegable")
+
+	s.Record.Redelegate = Redelegate{}
 	role.Record.Constraints = &RoleConstraints{MaxVehicles: 1, AllowExclusive: true, AllowRedelegation: true}
 	s.Record.Exclusive = []string{"command:unlock"}
 	_, err = e.Coverage(ctx, u, car, day(4))

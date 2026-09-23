@@ -387,11 +387,11 @@ func (b *bundle) TagSize(_ context.Context, tag string, _ time.Time) (int, error
 }
 
 // Custody implements delegation.Resolver over the bundle's live custody
-// records, oldest first.
-func (b *bundle) Custody(_ context.Context, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
+// records in org's repository, oldest first.
+func (b *bundle) Custody(_ context.Context, org, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
 	var out []delegation.CustodyPeriod
 	for _, e := range b.entries {
-		if e.collection != delegation.CollectionCustody || !e.live() {
+		if e.org != org || e.collection != delegation.CollectionCustody || !e.live() {
 			continue
 		}
 		var p delegation.CustodyPeriod

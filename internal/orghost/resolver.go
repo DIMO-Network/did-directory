@@ -163,10 +163,10 @@ func (r *Resolver) TagSize(ctx context.Context, tag string, at time.Time) (int, 
 	return n, nil
 }
 
-// Custody implements delegation.Resolver. Periods are read from every
-// repository on the host, oldest first.
-func (r *Resolver) Custody(ctx context.Context, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
-	sts, err := r.Store.Custody(ctx, vehicle, holder)
+// Custody implements delegation.Resolver. Periods are read from org's
+// repository, oldest first.
+func (r *Resolver) Custody(ctx context.Context, org, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
+	sts, err := r.Store.Custody(ctx, org, vehicle, holder)
 	if err != nil {
 		return nil, resolveErr(err)
 	}

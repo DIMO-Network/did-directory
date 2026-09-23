@@ -373,9 +373,9 @@ func (s *PostgresStore) TagSize(ctx context.Context, org, tag string, at time.Ti
 	return n, nil
 }
 
-func (s *PostgresStore) Custody(ctx context.Context, vehicle, holder string) ([]Stored, error) {
-	return s.queryStored(ctx, `h.collection = 'network.dimo.org.custody' AND h.tombstone_seq IS NULL
-		AND r.record_json->>'vehicle' = $1 AND r.record_json->>'holder' = $2`, vehicle, holder)
+func (s *PostgresStore) Custody(ctx context.Context, org, vehicle, holder string) ([]Stored, error) {
+	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.org.custody' AND h.tombstone_seq IS NULL
+		AND r.record_json->>'vehicle' = $2 AND r.record_json->>'holder' = $3`, org, vehicle, holder)
 }
 
 func (s *PostgresStore) Roles(ctx context.Context, org, member string) ([]Stored, error) {

@@ -91,8 +91,8 @@ func (r *recorder) TagSize(ctx context.Context, tag string, at time.Time) (int, 
 	return n, err
 }
 
-func (r *recorder) Custody(ctx context.Context, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
-	sts, err := r.Store.Custody(ctx, vehicle, holder)
+func (r *recorder) Custody(ctx context.Context, org, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
+	sts, err := r.Store.Custody(ctx, org, vehicle, holder)
 	if err != nil {
 		return nil, resolveErr(err)
 	}

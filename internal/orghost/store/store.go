@@ -145,9 +145,8 @@ type Store interface {
 	// TagSize counts the distinct vehicles with a live membership interval in
 	// org's tag that contains at.
 	TagSize(ctx context.Context, org, tag string, at time.Time) (int, error)
-	// Custody returns every live custody record for vehicle and holder, from
-	// every repository on this host.
-	Custody(ctx context.Context, vehicle, holder string) ([]Stored, error)
+	// Custody returns org's live custody records for vehicle and holder.
+	Custody(ctx context.Context, org, vehicle, holder string) ([]Stored, error)
 	// Roles returns org's role records addressed to member, tombstoned ones
 	// included: the evaluator decides for itself whether a tombstone counts.
 	Roles(ctx context.Context, org, member string) ([]Stored, error)

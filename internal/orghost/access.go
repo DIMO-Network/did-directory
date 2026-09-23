@@ -106,6 +106,24 @@ func (s *Server) checkWrite(ctx context.Context, w *write) error {
 	if _, err := s.repo.Store.GetOrg(ctx, w.org); err != nil {
 		return err
 	}
+	// An update takes the record at the key away as surely as a tombstone does,
+	// so overwriting takes what revoking takes, on top of what writing the new
+	// body takes. Otherwise a lien only the lender may release is released by
+	// rewriting its revocableBy, and a record outside the writer's scope is
+	// replaced by one inside it.
+	cur, err := s.repo.Get(ctx, w.org, w.collection, w.rkey)
+	switch {
+	case err == nil && cur.Live():
+		author := w.committedBy
+		if author == "" {
+			author = w.org
+		}
+		if err := s.checkTombstone(ctx, w.org, author, cur); err != nil {
+			return fmt.Errorf("overwriting %s: %w", w.uri(), err)
+		}
+	case err != nil && !store.IsNotFound(err):
+		return err
+	}
 	switch w.collection {
 	case delegation.CollectionDelegation, delegation.CollectionRole:
 		return s.checkRecordWrite(ctx, w)

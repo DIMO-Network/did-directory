@@ -195,8 +195,8 @@ func (c *RoleConstraints) check(rec *Record, coveredVehicles int) error {
 	if !c.AllowRedelegation && rec.redelegateMode() != RedelegateNone {
 		return fmt.Errorf("%w: may not issue redelegable grants", ErrExceedsRole)
 	}
-	if !c.AllowExclusive && (len(rec.Exclusive) > 0 || rec.Recovery) {
-		return fmt.Errorf("%w: may not issue exclusive or recovery grants", ErrExceedsRole)
+	if !c.AllowExclusive && (len(rec.Exclusive) > 0 || rec.Recovery || rec.Redelegate.Exclusive) {
+		return fmt.Errorf("%w: may not issue exclusive, recovery or exclusively redelegable grants", ErrExceedsRole)
 	}
 	return nil
 }
