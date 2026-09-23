@@ -239,12 +239,12 @@ A root is implicit for the controller: the controller holds every ability over i
 
 **Nobody grants themselves.** Staff are customers too. A member may not author a grant where they are the recipient unless a second principal, who held the same authority at commit time, approved the write. Enforced at evaluation, and surfaced at commit time as an approval reason.
 
-**Blast radius controls.** The issuer rejects, and the org host refuses to commit, any delegation that:
+**Blast radius controls.** The org host refuses to commit any delegation that:
 - covers more than N vehicles (default 500), or
 - includes an actuating ability (`command:*`, §5.1), or
 - sets `revocableBy: "to"`
 
-unless the commit carries a Turnkey policy approval (2-of-n org admins). Root rotation keys never sign routine writes.
+unless the commit carries a second approval (`approvedBy`, decision 24), under the policy the authoring role names. Root rotation keys never sign routine writes. In v1 this is checked when the record is committed, not again when it is evaluated (decision 27): the evaluator does not know which policy a role committed under, and a booking role's policy deliberately lets custody commands through without a second admin (§12.5).
 
 The vehicle count is checked at commit time and again whenever membership of a covering tag would push the count past N. A membership write that crosses the threshold needs the same approval, so a tag can't grow a small delegation into a fleet-wide one unnoticed.
 
@@ -523,7 +523,7 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Irrevocable liens | **Fleet only.** `revocableBy: "to"` is allowed only when the issuer is an attested operator (`Party.Operator`, §7), and needs policy approval. Consumer loans use `revocableBy: either`, and the org host notifies the lender on revocation. Enforced in `delegation.CheckCommit` and again at evaluation. |
+| 1 | Irrevocable liens | **Fleet only.** `revocableBy: "to"` is allowed only when the issuer is an attested operator (`Party.Operator`, §7), and needs policy approval. Consumer loans use `revocableBy: either`, and the org host notifies the lender on revocation. Enforced in `delegation.CheckCommit`; the operator rule is checked again at evaluation (`ErrLienNotAllowed`), the approval only at commit in v1 (decision 27). |
 | 2 | Commitment vs. plain pointer | **Hash commitment** (§10), with per-vehicle custody keys. |
 | 3 | Grantee countersignature | **Optional**, required only when `terms` is set. Enforced by the org host, not the evaluator. Not implemented yet. |
 | 4 | Blast-radius threshold | **500 vehicles** by default (`delegation.DefaultApprovalThreshold`), overridable per org tier. Also applies when tag growth pushes an existing delegation past it (`CheckMembershipGrowth`). |
@@ -587,6 +587,7 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 | 24 | Second approval | **A record fact** (`approvedBy`), collected in v1 by a second member approving a pending write. Not a vendor feature. |
 | 25 | Party attributes | **DIMO-administered table** per DID for v1. |
 | 26 | Agreement compilation | **Client side, in the booking service** (as §12 says). The host never learns what a booking is; `pkg/agreement` is an SDK. |
+| 27 | Blast-radius approvals at evaluation (2026-09-23) | **Commit time only, for v1.** The host checks the second approval for large, actuating or irrevocable delegations when they are committed, under the authoring role's policy; the evaluator does not check it again. Rechecking would need the evaluator to know every role's commit policy. What this relies on is that nothing reaches a repository except through the host's write checks, which since 2026-09-23 include updates (a `PUT` must pass the tombstone check) and run under the org's write lock. |
 
 **Open, added 2026-09-22.** `revokeSince` ends the era (§8) because a bearer SACD had no witnessed commit time. With SACDs gone every grant has one, so a compromise window alone could suffice. Ending the era still invalidates the old opening, which is a real property, so the mechanism stays until someone needs the simpler one.
 

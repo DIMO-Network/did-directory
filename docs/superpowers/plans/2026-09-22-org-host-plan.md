@@ -184,6 +184,8 @@ Each step ends with something runnable.
 
 ## 7. Open questions carried
 
+- ~~**Blast-radius approvals at evaluation.**~~ **Settled 2026-09-23 (spec decision 27):** checked at commit time only in v1; the evaluator does not know each role's commit policy.
+
 - **Cross-org chains and self-hosting.** A chain from Ford Pro's repo through Avis's repo is one database in v1. When an org self-hosts, `Record` and `Opening` have to fetch from another host, and that host has to decide whether to answer. Coverage proofs are the likely currency. Not designed.
 - **Membership author authority (§9.2)** is checked by the evaluator from `Membership.CreatedBy`. The host must populate that from `committedBy`, not from the request body, for the same reason as `Stored.CommittedBy`.
 - ~~**Custody and exclusives are host-wide.**~~ **Settled 2026-09-23.** The role checks did not bound them: anybody may register a repository, and an org's writes to its own repository need no authority over the vehicle, so a renter could forge custody that widened an operator's grant and anybody could suspend any car's commands with an exclusive claim. Now `Resolver.Custody(org, vehicle, holder)` reads only the grant issuer's repository (the evaluator passes `rec.From`), and an exclusive hold suspends nothing until the evaluator has evaluated the hold's own record (without holds, which keeps it from recursing) and found the claimed abilities live over the vehicle. A hold that refuses is ignored; a resolver failure fails the request. `Exclusives` still lists candidates host-wide. `TestForeignEvidenceCountsForNothing` is the attack.
