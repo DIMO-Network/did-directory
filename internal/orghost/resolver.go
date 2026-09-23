@@ -26,10 +26,10 @@ type ControlSource interface {
 	Control(ctx context.Context, did string) (*control.State, error)
 }
 
-// controlCacheTTL bounds how stale a cached control state may be. A transfer
-// or revocation in the directory takes effect on the host within this long,
-// which is well inside the token lifetimes spec §11.1 sets.
-const controlCacheTTL = 30 * time.Second
+// DefaultControlCacheTTL bounds how stale a cached control state may be. A
+// transfer or revocation in the directory takes effect on the host within this
+// long, which is well inside the token lifetimes spec §11.1 sets.
+const DefaultControlCacheTTL = 30 * time.Second
 
 // Resolver implements delegation.Resolver over this host's store and the DID
 // directory (plan §3.3). Records are read from any repository on the host, so
@@ -40,6 +40,9 @@ type Resolver struct {
 	Control ControlSource
 	// Now is the clock the cache ages by; nil means time.Now.
 	Now func() time.Time
+	// ControlCacheTTL is how long a fetched control state is served before the
+	// directory is asked again; zero means DefaultControlCacheTTL.
+	ControlCacheTTL time.Duration
 
 	mu    sync.Mutex
 	cache map[string]cachedControl
@@ -55,6 +58,13 @@ func (r *Resolver) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
+}
+
+func (r *Resolver) controlTTL() time.Duration {
+	if r.ControlCacheTTL > 0 {
+		return r.ControlCacheTTL
+	}
+	return DefaultControlCacheTTL
 }
 
 func resolveErr(err error) error {
@@ -203,12 +213,12 @@ func storedAll(org string, sts []store.Stored) ([]delegation.Stored, error) {
 }
 
 // ControlState implements delegation.Resolver over the directory, cached for
-// controlCacheTTL. A DID the directory does not hold has no eras, which the
+// ControlCacheTTL. A DID the directory does not hold has no eras, which the
 // evaluator turns into "not the controller of record".
 func (r *Resolver) ControlState(ctx context.Context, vehicle string) (*control.State, error) {
 	now := r.now()
 	r.mu.Lock()
-	if c, ok := r.cache[vehicle]; ok && now.Sub(c.fetched) < controlCacheTTL {
+	if c, ok := r.cache[vehicle]; ok && now.Sub(c.fetched) < r.controlTTL() {
 		r.mu.Unlock()
 		return c.state, nil
 	}

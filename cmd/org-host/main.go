@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/orghost"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
@@ -80,6 +81,12 @@ func main() {
 	if cfg.DirectoryURL == "" {
 		log.Fatal().Msg("DIRECTORY_URL is required: /authorize reads control state from the directory")
 	}
+	var controlTTL time.Duration
+	if cfg.ControlCacheTTL != "" {
+		if controlTTL, err = time.ParseDuration(cfg.ControlCacheTTL); err != nil || controlTTL <= 0 {
+			log.Fatal().Str("value", cfg.ControlCacheTTL).Msg("CONTROL_CACHE_TTL must be a positive duration")
+		}
+	}
 	if len(cfg.IssuerDIDs) == 0 {
 		log.Warn().Msg("No ISSUER_DIDS configured: nothing may call /authorize")
 	}
@@ -92,14 +99,15 @@ func main() {
 
 	repo := &orghost.Repository{Store: st, Signer: orghost.NewLocalSigner(st, sealer)}
 	app := orghost.New(orghost.Options{
-		Repo:     repo,
-		Auth:     auth,
-		Control:  client.New(cfg.DirectoryURL),
-		Issuers:  cfg.IssuerDIDs,
-		Admins:   cfg.AdminDIDs,
-		Policies: policies,
-		PageSize: cfg.PageSize,
-		Log:      log,
+		Repo:            repo,
+		Auth:            auth,
+		Control:         client.New(cfg.DirectoryURL),
+		Issuers:         cfg.IssuerDIDs,
+		Admins:          cfg.AdminDIDs,
+		Policies:        policies,
+		PageSize:        cfg.PageSize,
+		ControlCacheTTL: controlTTL,
+		Log:             log,
 	})
 
 	go func() {

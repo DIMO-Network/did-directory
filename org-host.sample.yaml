@@ -5,10 +5,13 @@ LOG_LEVEL: "info"
 #   openssl rand -base64 32
 MASTER_KEY: ""
 # Identity tokens (RS256, sub = member DID) are verified against this key set.
-IDENTITY_JWKS_URL: "http://localhost:3000/siwe/keys"
-IDENTITY_ISSUER: ""
+IDENTITY_JWKS_URL: "http://localhost:8080/signin/keys"
+IDENTITY_ISSUER: "http://localhost:8080/signin"
 # The DID directory, for control state.
-DIRECTORY_URL: "http://localhost:8080"
+DIRECTORY_URL: "http://localhost:8082"
+# How long a vehicle's control state read from the directory is served before
+# it is fetched again; empty means 30s. scripts/demo.sh sets 1s.
+CONTROL_CACHE_TTL: ""
 # DIDs that may call POST /authorize (dauth) and set party attributes (DIMO).
 # Comma-separated when given in the environment.
 ISSUER_DIDS: []

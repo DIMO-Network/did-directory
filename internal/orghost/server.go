@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
@@ -53,7 +54,10 @@ type Options struct {
 	Policies Policies
 	// PageSize bounds list and log responses; zero means 100.
 	PageSize int
-	Log      zerolog.Logger
+	// ControlCacheTTL is how long the resolver serves a cached control state;
+	// zero means DefaultControlCacheTTL.
+	ControlCacheTTL time.Duration
+	Log             zerolog.Logger
 }
 
 // New builds the Fiber app.
@@ -76,7 +80,7 @@ func New(o Options) *fiber.App {
 	}
 	s := &Server{
 		repo: o.Repo, auth: o.Auth,
-		resolver: &Resolver{Store: o.Repo.Store, Control: o.Control, Now: o.Repo.now},
+		resolver: &Resolver{Store: o.Repo.Store, Control: o.Control, Now: o.Repo.now, ControlCacheTTL: o.ControlCacheTTL},
 		policies: policies,
 		issuers:  set(o.Issuers), admins: set(o.Admins),
 		pageSize: o.PageSize, log: o.Log.With().Str("component", "orghost").Logger(),

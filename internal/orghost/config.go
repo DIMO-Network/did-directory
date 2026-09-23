@@ -31,6 +31,11 @@ type Settings struct {
 	AdminDIDs []string `yaml:"ADMIN_DIDS"`
 	// PageSize bounds list and log responses.
 	PageSize int `yaml:"PAGE_SIZE"`
+	// ControlCacheTTL is how long a vehicle's control state read from the
+	// directory is served before it is fetched again (a Go duration such as
+	// 30s); empty means DefaultControlCacheTTL. A demo against a directory on
+	// the same machine sets it low so a transfer shows at once.
+	ControlCacheTTL string `yaml:"CONTROL_CACHE_TTL"`
 }
 
 // LoadSettings reads path, then applies environment overrides.
@@ -53,6 +58,7 @@ func LoadSettings(path string) (*Settings, error) {
 	env("IDENTITY_JWKS", &s.IdentityJWKS)
 	env("IDENTITY_ISSUER", &s.IdentityIssuer)
 	env("DIRECTORY_URL", &s.DirectoryURL)
+	env("CONTROL_CACHE_TTL", &s.ControlCacheTTL)
 	// Comma-separated in the environment.
 	if v := os.Getenv("ISSUER_DIDS"); v != "" {
 		s.IssuerDIDs = splitList(v)
