@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -46,14 +47,14 @@ func (c *Client) logRequest(method, url string, body []byte) {
 	if !c.verbose {
 		return
 	}
-	fmt.Printf("\n\033[0;35m  ──── HTTP Request ────────────────────────────────────────────\033[0m\n")
-	fmt.Printf("  \033[1m%s\033[0m %s\n", method, url)
+	fmt.Fprintf(os.Stderr, "\n\033[0;35m  ──── HTTP Request ────────────────────────────────────────────\033[0m\n")
+	fmt.Fprintf(os.Stderr, "  \033[1m%s\033[0m %s\n", method, url)
 	if len(body) > 0 {
 		var pretty bytes.Buffer
 		if json.Indent(&pretty, body, "  ", "  ") == nil {
-			fmt.Printf("  %s\n", pretty.String())
+			fmt.Fprintf(os.Stderr, "  %s\n", pretty.String())
 		} else {
-			fmt.Printf("  %s\n", truncate(string(body), 500))
+			fmt.Fprintf(os.Stderr, "  %s\n", truncate(string(body), 500))
 		}
 	}
 }
@@ -66,16 +67,16 @@ func (c *Client) logResponse(status int, body []byte) {
 	if status >= 400 {
 		color = "\033[0;31m" // red
 	}
-	fmt.Printf("\n\033[0;35m  ──── HTTP Response (%s%d\033[0;35m) ─────────────────────────────────────\033[0m\n", color, status)
+	fmt.Fprintf(os.Stderr, "\n\033[0;35m  ──── HTTP Response (%s%d\033[0;35m) ─────────────────────────────────────\033[0m\n", color, status)
 	if len(body) > 0 {
 		var pretty bytes.Buffer
 		if json.Indent(&pretty, body, "  ", "  ") == nil {
-			fmt.Printf("  %s\n", pretty.String())
+			fmt.Fprintf(os.Stderr, "  %s\n", pretty.String())
 		} else {
-			fmt.Printf("  %s\n", truncate(string(body), 500))
+			fmt.Fprintf(os.Stderr, "  %s\n", truncate(string(body), 500))
 		}
 	}
-	fmt.Printf("\033[0;35m  ─────────────────────────────────────────────────────────────\033[0m\n")
+	fmt.Fprintf(os.Stderr, "\033[0;35m  ─────────────────────────────────────────────────────────────\033[0m\n")
 }
 
 func truncate(s string, n int) string {

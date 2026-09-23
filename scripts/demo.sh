@@ -4,7 +4,7 @@ set -euo pipefail
 # ============================================================================
 # DIMO orgs, fleets and delegation — end-to-end demo
 #
-# Org host plan §6 step 8: the first time the whole model runs. Three services
+# Org host plan §6 step 8: the first time the whole model runs. Four services
 # on this machine, all in memory:
 #
 #   DID directory  (:8082)  who controls which vehicle, as commitments and eras
@@ -25,8 +25,9 @@ set -euo pipefail
 # the car: a new era starts, the lender and the partner lose the car, the
 # insurer and the renter keep their history, and the buyer starts clean. At
 # every step a party asks dauth for a token and we show what it carries, and
-# at the end three parties query the same car's telemetry and each gets the
-# slice their delegation allows.
+# at the end the same car's telemetry is queried under three grants — the
+# renter's, the insurer's from Avis and the insurer's from the buyer — and
+# each gets the slice its delegation allows.
 #
 # Nothing here touches a chain. Every authorization is a signed record in an
 # org's repository, evaluated by the host, checkable offline.
@@ -115,6 +116,14 @@ created() {
 die() {
     fail "$1"
     exit 1
+}
+
+# CLI_ERR holds a dimocli command's stderr, kept apart from the JSON it prints
+# on stdout. verbose_log shows it when DEMO_VERBOSE asked for request logs.
+CLI_ERR="$DEMO_DIR/cli.err"
+verbose_log() {
+    [ "${DIMO_VERBOSE:-0}" = "1" ] && [ -s "$CLI_ERR" ] && show < "$CLI_ERR"
+    return 0
 }
 
 on_exit() {
@@ -235,7 +244,8 @@ mint() {
     [ -n "$client" ] && args+=(--client "$client")
     step "$desc"
     local claims
-    claims=$("$DIMOCLI" exchange "${args[@]}" 2>&1) || die "expected a token: $claims"
+    claims=$("$DIMOCLI" exchange "${args[@]}" 2>"$CLI_ERR") || die "expected a token: $(cat "$CLI_ERR")"
+    verbose_log
     if [ "$PRESENT" = 1 ]; then
         success "$(echo "$claims" | jq -r '"token for \(.sub), \((.exp - .iat) / 60 | floor) min"')"
         echo "$claims" | jq -r '
@@ -249,19 +259,21 @@ mint() {
     fi
 }
 
-# refuse DESCRIPTION CALLER GRANT-URI VEHICLE ABILITIES — expects dauth to refuse
-# and shows the code the host answered with.
+# refuse CODE DESCRIPTION CALLER GRANT-URI VEHICLE ABILITIES — expects dauth to
+# refuse with CODE, the code the host answered with, and shows it. Any other
+# failure (a service down, a sign-in refused) stops the demo rather than
+# passing for the refusal.
 refuse() {
-    local desc=$1 caller=$2 uri=$3 vehicle=$4 abilities=$5
+    local want=$1 desc=$2 caller=$3 uri=$4 vehicle=$5 abilities=$6
     step "$desc"
-    local out
-    if out=$("$DIMOCLI" exchange --dauth "$DAUTH_URL" --did "$caller" --grant "$uri" --vehicle "$vehicle" --abilities "$abilities" 2>&1); then
-        die "expected a refusal, got a token"
+    if "$DIMOCLI" exchange --dauth "$DAUTH_URL" --did "$caller" --grant "$uri" --vehicle "$vehicle" --abilities "$abilities" >/dev/null 2>"$CLI_ERR"; then
+        die "expected a refusal ($want), got a token"
     fi
-    local code
-    code=$(echo "$out" | grep -o '{.*}' | jq -r '[.error, .error_description] | map(select(. != null and . != "")) | join(" — ")' 2>/dev/null || true)
-    [ -n "$code" ] || code=$out
-    success "refused: $code"
+    local body code
+    body=$(grep -o '{.*}' "$CLI_ERR" | tail -1 || true)
+    code=$(echo "$body" | jq -r '.error // empty' 2>/dev/null || true)
+    [ "$code" = "$want" ] || die "expected a refusal with $want, got: $(cat "$CLI_ERR")"
+    success "refused: $(echo "$body" | jq -r '[.error, .error_description] | map(select(. != null and . != "")) | join(" — ")')"
 }
 
 SIGNALS_QUERY='query($subject:String!,$from:Time!,$to:Time!){ signals(subject:$subject, interval:"5m", from:$from, to:$to){ timestamp speed(agg:MAX) } }'
@@ -275,23 +287,30 @@ query() {
     [ -n "$vars" ] && args+=(--variables "$vars")
     step "$desc"
     local out
-    out=$("$DIMOCLI" query "${args[@]}" 2>&1) || die "expected data: $out"
+    out=$("$DIMOCLI" query "${args[@]}" 2>"$CLI_ERR") || die "expected data: $(cat "$CLI_ERR")"
+    verbose_log
     success "dq answered"
     echo "$out" | jq 'if .signals then {buckets: (.signals | length), first: .signals[0].timestamp, last: .signals[-1].timestamp, speed: [.signals[].speed]} else . end' | show
 }
 
-# query_refused DESCRIPTION CALLER GRANT-URI VEHICLE ABILITIES QUERY [VARIABLES-JSON]
-# — expects dq to refuse the query and shows why.
+# query_refused REASON DESCRIPTION CALLER GRANT-URI VEHICLE ABILITIES QUERY
+# [VARIABLES-JSON] — expects dq itself to refuse the query with a message
+# containing REASON, and shows it.
 query_refused() {
-    local desc=$1 caller=$2 uri=$3 vehicle=$4 abilities=$5 q=$6 vars=${7:-}
+    local want=$1 desc=$2 caller=$3 uri=$4 vehicle=$5 abilities=$6 q=$7 vars=${8:-}
     local args=(--dauth "$DAUTH_URL" --dq "$DQ_URL" --did "$caller" --grant "$uri" --vehicle "$vehicle" --abilities "$abilities" --query "$q")
     [ -n "$vars" ] && args+=(--variables "$vars")
     step "$desc"
-    local out
-    if out=$("$DIMOCLI" query "${args[@]}" 2>&1); then
+    local out reason
+    if out=$("$DIMOCLI" query "${args[@]}" 2>"$CLI_ERR"); then
         die "expected dq to refuse, got: $out"
     fi
-    success "refused: $(echo "$out" | grep -o 'dq: .*' | head -1 | sed 's/^dq: //')"
+    reason=$(grep -o 'dq: .*' "$CLI_ERR" | head -1 | sed 's/^dq: //' || true)
+    case "$reason" in
+        *"$want"*) ;;
+        *) die "expected dq to refuse with \"$want\", got: $(cat "$CLI_ERR")" ;;
+    esac
+    success "refused: $reason"
 }
 
 # ── Step 0: Prerequisites ────────────────────────────────────────────────
@@ -304,7 +323,7 @@ done
 [ -d "$DAUTH_DIR/cmd/dauth" ] || die "dauth checkout not found at $DAUTH_DIR (set DAUTH_DIR)"
 [ -d "$DQ_DIR/cmd/dq" ] || die "dq checkout not found at $DQ_DIR (set DQ_DIR)"
 for port in "$DIRECTORY_PORT" "$ORG_HOST_PORT" "$DAUTH_PORT" "$DQ_PORT"; do
-    if curl -s "http://localhost:$port/" >/dev/null 2>&1; then
+    if curl -s --max-time 2 "http://localhost:$port/" >/dev/null 2>&1; then
         die "port $port is in use; stop what is listening there or set DIRECTORY_PORT, ORG_HOST_PORT, DAUTH_PORT and DQ_PORT"
     fi
 done
@@ -515,9 +534,10 @@ echo ""
 step "Ford Pro, over ford-pro-enrolled: telemetry plus lock and unlock..."
 info "Commands are live abilities; nobody on staff holds them, so the org writes"
 info "it as itself and Carol approves. The grant permits one level of attenuated"
-info "redelegation, which is how Ford Pro will pass telemetry to its integrator."
+info "redelegation, which is how Ford Pro will pass telemetry to its integrator,"
+info "and drops at transfer: when Avis sells a car, Ford Pro loses it entirely."
 REC=$(grant "$AVIS" "$FORD_PRO" "{\"tag\":\"$FORD_PRO_ENROLLED\"}" "telemetry:read,command:lock,command:unlock" \
-        '{"redelegate":{"mode":"attenuated","maxDepth":1},"purpose":"telematics"}')
+        '{"redelegate":{"mode":"attenuated","maxDepth":1},"afterTransfer":"drop","purpose":"telematics"}')
 host PUT "/orgs/$AVIS/network.dimo.delegation/fordpro" "$AVIS_TOKEN" "$REC"
 expect 202 "Ford Pro grant parked: $(echo "$BODY" | jq -r '.reasons | join(", ")')"
 approve "$AVIS" "$(echo "$BODY" | jq -r .pending)" "$CAROL_TOKEN" "Carol approves"
@@ -550,9 +570,9 @@ mint "Ford Pro locks car 1 (live: no window, a 15-minute token)" \
     "$FORD_PRO" "$FORD_PRO_URI" "$CAR1" "command:lock"
 mint "The integrator reads car 1's telemetry through a chain of two repositories" \
     "$INTEGRATOR" "$INTEGRATOR_URI" "$CAR1" "telemetry:read"
-refuse "The integrator asks to lock car 1: Ford Pro attenuated its grant to telemetry" \
+refuse not_covered "The integrator asks to lock car 1: Ford Pro attenuated its grant to telemetry" \
     "$INTEGRATOR" "$INTEGRATOR_URI" "$CAR1" "command:lock"
-refuse "The insurer asks about car 3's location: never granted" \
+refuse not_covered "The insurer asks about car 3's location: never granted" \
     "$INSURER" "$INSURER_URI" "$CAR3" "location:precise"
 
 echo ""
@@ -599,11 +619,11 @@ ROADSIDE_URI="at://$AVIS/network.dimo.delegation/$BOOKING:roadside:roadside:inc-
 pause
 echo ""
 mint "The renter unlocks car 1" "$RENTER" "$CUSTODY_URI" "$CAR1" "command:unlock"
-refuse "Ford Pro tries to lock car 1 while the renter holds it (spec §12.2)" \
+refuse exclusive_hold "Ford Pro tries to lock car 1 while the renter holds it (spec §12.2)" \
     "$FORD_PRO" "$FORD_PRO_URI" "$CAR1" "command:lock"
 mint "Ford Pro can still read car 1's telemetry: only the commands are suspended" \
     "$FORD_PRO" "$FORD_PRO_URI" "$CAR1" "telemetry:read"
-refuse "The renter's history before the device has synced a pickup: nothing driven, nothing to read (narrowToCustody)" \
+refuse not_covered "The renter's history before the device has synced a pickup: nothing driven, nothing to read (narrowToCustody)" \
     "$RENTER" "$HISTORY_URI" "$CAR1" "telemetry:read"
 
 pause
@@ -628,8 +648,8 @@ jq --arg end "$RETURN" --arg closed "$INCIDENT_CLOSED" '
 "$DIMOCLI" booking --dauth "$DAUTH_URL" --server "$DIRECTORY_URL" --did "$BACKEND" --agreement "$AGREEMENT" | show
 
 echo ""
-refuse "The renter's commands are gone" "$RENTER" "$CUSTODY_URI" "$CAR1" "command:unlock"
-refuse "Roadside is done" "$ROADSIDE" "$ROADSIDE_URI" "$CAR1" "location:precise"
+refuse revoked "The renter's commands are gone" "$RENTER" "$CUSTODY_URI" "$CAR1" "command:unlock"
+refuse revoked "Roadside is done" "$ROADSIDE" "$ROADSIDE_URI" "$CAR1" "location:precise"
 mint "Ford Pro gets its car back" "$FORD_PRO" "$FORD_PRO_URI" "$CAR1" "command:lock"
 mint "The renter keeps the history of the drive, and nothing else" "$RENTER" "$HISTORY_URI" "$CAR1" "telemetry:read"
 
@@ -651,9 +671,13 @@ curl -s "$DIRECTORY_URL/$CAR1/control" | jq '.eras | map({number, start, end})' 
 
 pause
 echo ""
-refuse "Ford Credit's lien on car 1 dropped with the transfer" "$FORD_CREDIT" "$FORD_CREDIT_URI" "$CAR1" "location:precise"
+refuse not_covered "Ford Credit's lien on car 1 dropped with the transfer" "$FORD_CREDIT" "$FORD_CREDIT_URI" "$CAR1" "location:precise"
 mint "Ford Credit still locates car 2, which Avis still finances" "$FORD_CREDIT" "$FORD_CREDIT_URI" "$CAR2" "location:precise"
-refuse "Ford Pro cannot lock a car Avis no longer controls" "$FORD_PRO" "$FORD_PRO_URI" "$CAR1" "command:lock"
+refuse not_covered "Ford Pro cannot lock a car Avis no longer controls" "$FORD_PRO" "$FORD_PRO_URI" "$CAR1" "command:lock"
+refuse not_covered "Nor read it: the partner's grant drops at transfer, so it keeps no history either" \
+    "$FORD_PRO" "$FORD_PRO_URI" "$CAR1" "telemetry:read"
+refuse not_covered "And the integrator's grant, which narrows Ford Pro's, goes with it" \
+    "$INTEGRATOR" "$INTEGRATOR_URI" "$CAR1" "telemetry:read"
 mint "The insurer keeps car 1's Avis-era history: the window now ends at the transfer" \
     "$INSURER" "$INSURER_URI" "$CAR1" "telemetry:read"
 mint "The renter keeps the drive" "$RENTER" "$HISTORY_URI" "$CAR1" "telemetry:read"
@@ -680,13 +704,13 @@ mint "The insurer reads car 1 under the buyer's consent: the window starts at er
 
 # ── Step 6: The data ──────────────────────────────────────────────────────
 
-header "Step 6: Three parties query the same car"
+header "Step 6: The same car, three grants"
 info "dq serves telemetry from a DuckLake catalog that din normally fills. Here"
 info "a seed tool plays din: a speed reading every two seconds for car 1 over the"
 info "last hour, decoded into the lake before dq starts, since the file catalog"
 info "has one writer. Every query carries an access token from dauth and a DPoP"
 info "proof for the request, and dq clamps the requested range to the token's"
-info "windows (spec §11.4). Same car, same data, three different slices."
+info "windows (spec §11.4). Same car, same data, three grants, three slices."
 
 LAKE="$DEMO_DIR/lake"
 mkdir -p "$LAKE/data" "$LAKE/blobs"
@@ -727,7 +751,7 @@ info "The drive was $PICKUP to $RETURN; the sale was at $(iso "$SALE_EPOCH")."
 echo ""
 query "The renter, under the history grant: only the drive's buckets come back" \
     "$RENTER" "$HISTORY_URI" "$CAR1" "telemetry:read" "$SIGNALS_QUERY" "$RANGE"
-query_refused "The renter asks for the latest reading: the window closed at return" \
+query_refused "not covered" "The renter asks for the latest reading: the window closed at return" \
     "$RENTER" "$HISTORY_URI" "$CAR1" "telemetry:read" "$LATEST_QUERY"
 query "The insurer under Avis's grant: the whole hour up to the sale, nothing after" \
     "$INSURER" "$INSURER_URI" "$CAR1" "telemetry:read" "$SIGNALS_QUERY" "$RANGE"
@@ -781,7 +805,7 @@ echo -e "    4. Three partner grants, one redelegated through a second repositor
 echo -e "    5. A booking compiled into grants: exclusive custody, roadside for an incident, history kept"
 echo -e "    6. A sale: one directory operation, and every grant's own policy decided what it kept"
 echo -e "    7. A consumer consent on the same records, and a proof that verifies with the host gone"
-echo -e "    8. Three parties queried one car's telemetry and dq clamped each to its delegation's windows"
+echo -e "    8. One car's telemetry queried under three grants, and dq clamped each to its windows"
 echo ""
 echo -e "  ${BOLD}Every token came from dauth's /exchange, DPoP-bound, carrying what the host computed,${NC}"
 echo -e "  ${BOLD}and dq served exactly that.${NC}"
