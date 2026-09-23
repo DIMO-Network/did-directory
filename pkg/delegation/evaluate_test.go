@@ -391,6 +391,30 @@ func TestRevocationWindow(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// A window reaches back over the controller's earlier eras: the directory
+// carries a window into the eras after it, but an earlier era never learns of
+// a later compromise, so a root forged during one used to read the earlier
+// eras' history regardless.
+func TestRevocationWindowVoidsEarlierEras(t *testing.T) {
+	r, e, u := avisFleet(t)
+	// A first revokeSince ends era 0 at day 8; a second, in era 1, records a
+	// window over days 12 to 14 and ends era 1 at day 14.
+	r.addEra(t, car, avis, tp(day(8)))
+	r.addEra(t, car, avis, tp(day(14)))
+	w2 := control.Revocation{From: day(12), To: day(14)}
+	r.states[car].Eras[1].Revocations = []control.Revocation{w2}
+	r.states[car].Eras[2].Revocations = []control.Revocation{w2}
+
+	r.records[u].CommittedAt = day(13)
+	_, err := e.Coverage(ctx, u, car, day(20))
+	assert.ErrorIs(t, err, ErrNotCovered, "a root forged inside the window reads no era, era 0 included")
+
+	r.records[u].CommittedAt = day(2)
+	cov, err := e.Coverage(ctx, u, car, day(20))
+	require.NoError(t, err, "a root from before the window keeps every era")
+	assert.Equal(t, Span(tp(day(3)), nil), cov.Historical["telemetry:read"])
+}
+
 func TestLien(t *testing.T) {
 	r, e, u := avisFleet(t)
 	r.records[u].Record.RevocableBy = RevocableByTo

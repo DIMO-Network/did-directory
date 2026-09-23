@@ -752,8 +752,8 @@ func (e *Evaluator) root(ctx context.Context, s *Stored, vehicle string, at time
 		return nil, nil, err
 	}
 
-	var eras Set
-	liveEra := false
+	// The eras rec.From controlled, each proven by its opening.
+	var controlled []*control.Era
 	for i := range state.Eras {
 		era := &state.Eras[i]
 		opening, err := e.Resolver.Opening(ctx, vehicle, era.Number, rec.From)
@@ -766,9 +766,22 @@ func (e *Evaluator) root(ctx context.Context, s *Stored, vehicle string, at time
 		if control.Verify(era.Commitment, *opening) != nil {
 			continue
 		}
+		controlled = append(controlled, era)
+	}
+	// A root committed inside a compromise window of this controller's is void
+	// for good (§8), whichever era it would read: the directory carries a window
+	// forward into later eras, but an earlier era does not learn of a later one,
+	// so a root forged during a later compromise would otherwise still read the
+	// earlier eras' history.
+	for _, era := range controlled {
 		if era.Revoked(s.CommittedAt) {
-			continue
+			return nil, nil, fmt.Errorf("%w: %s was committed inside a revocation window", ErrNotCovered, s.URI)
 		}
+	}
+
+	var eras Set
+	liveEra := false
+	for _, era := range controlled {
 		ended := era.End != nil && !era.End.After(at)
 		if ended && rec.afterTransfer() == Drop {
 			continue
