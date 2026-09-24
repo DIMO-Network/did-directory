@@ -119,6 +119,16 @@ fail()    { echo -e "  ${RED}[FAIL]  $1${NC}" | named; }
 info()    { echo -e "  ${CYAN}$1${NC}" | named; }
 show()    { named | sed 's/^/        /'; }
 json()    { jq . | show; }
+# policy prints a stored record's ODRL policy. On a terminal it is highlighted,
+# with the DIMO profile's terms in magenta so they stand apart from ODRL's own.
+ESC=$(printf '\033')
+policy() {
+    if [ -t 1 ]; then
+        jq -C .record | sed -E "s/${ESC}\[(1;34|0;32)m\"dimo:/${ESC}[1;35m\"dimo:/g" | show
+    else
+        jq .record | show
+    fi
+}
 # created NAME DID announces a new DID with its real identifier and names it.
 created() {
     name "$2" "$1"
@@ -247,6 +257,7 @@ peek() {
     fi
     if [ "$show_them" = 1 ]; then
         local status=$STATUS body=$BODY uri org rest token
+        [ -t 1 ] && echo -e "  ${DIM}ODRL's own terms in blue, the DIMO profile's in ${NC}\033[1;35mmagenta${NC}"
         for uri in $(sort -u "$WRITTEN"); do
             rest=${uri#at://}
             org=${rest%%/*}
@@ -258,7 +269,7 @@ peek() {
             410) echo -e "  ${BOLD}$uri${NC} ${DIM}(tombstoned; this is what it granted)${NC}" | named ;;
             *) echo -e "  ${BOLD}$uri${NC} ${DIM}(not committed: HTTP $STATUS)${NC}" | named; continue ;;
             esac
-            echo "$BODY" | jq .record | show
+            echo "$BODY" | policy
         done
         STATUS=$status BODY=$body
         if [ "$PRESENT" = 1 ]; then
@@ -607,7 +618,7 @@ if [ "$PRESENT" != 1 ] && [ "$ODRL" != 1 ]; then
     # One policy by default; presenter mode offers every one, DEMO_ODRL shows them all.
     info "What Alice sent is an ODRL Agreement; the host committed it with its uid:"
     host GET "/orgs/$AVIS/network.dimo.delegation/insurer" "$ALICE_TOKEN"
-    echo "$BODY" | jq .record | show
+    echo "$BODY" | policy
     : >"$WRITTEN"
 fi
 INSURER_URI="at://$AVIS/network.dimo.delegation/insurer"
