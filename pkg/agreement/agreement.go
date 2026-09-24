@@ -1,4 +1,4 @@
-// Package agreement models a purchased service as an ODRL agreement and
+// Package agreement models a purchased service in ODRL's terms and
 // compiles it into delegation records.
 //
 // A renter is not an org member and not a partner. They bought a service, and
@@ -11,6 +11,8 @@
 // an agreement has an assigner, an assignee, a target, permissions (here, the
 // services actually purchased) and duties. Duties are what earn ODRL its place:
 // they gate the permissions, so an unpaid booking compiles to nothing at all.
+// The agreement itself is this package's JSON, held by the booking service; the
+// records it compiles to cross the wire as ODRL policies (pkg/odrl).
 //
 // The package is a library. It reads no clock, no storage and no network:
 // Compile takes the evaluation time as a parameter so the same agreement always

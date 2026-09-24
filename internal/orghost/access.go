@@ -11,6 +11,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 )
 
 // ErrForbidden is a request the caller's roles do not allow.
@@ -192,10 +193,11 @@ func describe(c delegation.Covers) string {
 // checkRecordWrite is the delegation and role path: role resolution, then
 // delegation.CheckCommit under each candidate role's policy, then the approver.
 func (s *Server) checkRecordWrite(ctx context.Context, w *write) error {
-	var rec delegation.Record
-	if err := json.Unmarshal(w.record, &rec); err != nil {
+	decoded, err := odrl.Decode(w.record)
+	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
+	rec := *decoded
 	if rec.Type == delegation.TypeRole && rec.Constraints != nil && rec.Constraints.Policy != "" {
 		if _, ok := s.policies[rec.Constraints.Policy]; !ok {
 			return fmt.Errorf("%w: constraints.policy %q is not a policy this host knows", ErrInvalid, rec.Constraints.Policy)

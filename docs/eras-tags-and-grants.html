@@ -639,7 +639,7 @@
           </ul>
         </div>
       </div>
-      <figcaption><b>Duties gate the output.</b> A rental is an ODRL agreement whose duties — payment, return by a date, retention — decide what may be minted. Nothing is granted before its duty is met.</figcaption>
+      <figcaption><b>Duties gate the output.</b> A rental is an agreement whose duties — payment, return by a date, retention — decide what may be minted, and what it compiles to are ODRL Agreements. Nothing is granted before its duty is met.</figcaption>
     </figure>
 
     <figure>
@@ -806,7 +806,7 @@
           <tr><td>single-car grants</td><td>A delegation with <code>covers: {vehicle}</code>, same engine — the separate SACD document was dropped on 2026-09-22</td></tr>
           <tr><td>role constraints, custody narrowing</td><td>Built — an unattended booking service can issue one rental and not the fleet</td></tr>
           <tr><td>agreements, duties, the compiler</td><td>Built — <code>pkg/agreement</code>, 97% test coverage</td></tr>
-          <tr><td>ODRL wire format</td><td>Built — <code>pkg/odrl</code>, lossless both ways</td></tr>
+          <tr><td>ODRL wire format</td><td>Built — <code>pkg/odrl</code>, lossless both ways; the org host takes, stores and serves delegations and roles as ODRL</td></tr>
           <tr><td>org record store</td><td>Not built — commits, coverage proofs, the internal stream</td></tr>
           <tr><td>dauth exchange, dq windows</td><td>Not built — next agent</td></tr>
         </tbody>

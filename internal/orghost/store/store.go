@@ -155,6 +155,11 @@ type Store interface {
 	TagSize(ctx context.Context, org, tag string, at time.Time) (int, error)
 	// Custody returns org's live custody records for vehicle and holder.
 	Custody(ctx context.Context, org, vehicle, holder string) ([]Stored, error)
+	// Delegations and roles are stored as ODRL policies (spec §5), so the
+	// lookups below read the policy's own terms: assignee for to, the single
+	// permission's target for covers, and the profile's dimo:basis and
+	// dimo:exclusive.
+
 	// Roles returns org's role records addressed to member, tombstoned ones
 	// included: the evaluator decides for itself whether a tombstone counts.
 	Roles(ctx context.Context, org, member string) ([]Stored, error)
@@ -164,7 +169,7 @@ type Store interface {
 	// caller's to check.
 	Exclusives(ctx context.Context, vehicle string, at time.Time) ([]Stored, error)
 
-	// DelegationsOverTag returns org's live delegation records whose covers.tag
+	// DelegationsOverTag returns org's live delegation records whose target
 	// is tag: the records a membership in the tag widens.
 	DelegationsOverTag(ctx context.Context, org, tag string) ([]Stored, error)
 	// DelegationsWithBasis returns the live delegation records, from every

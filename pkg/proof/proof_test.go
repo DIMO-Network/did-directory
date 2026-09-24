@@ -12,6 +12,7 @@ import (
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +65,14 @@ func (l *log) commit(op, collection, rkey string, record any, by string, at time
 		Collection: collection, RKey: rkey, CommittedBy: by, ApprovedBy: approved, CommittedAt: at,
 	}}
 	if record != nil {
-		raw, err := json.Marshal(record)
+		var raw []byte
+		var err error
+		if rec, ok := record.(delegation.Record); ok {
+			// Delegations and roles are stored as the ODRL policies they are.
+			raw, err = odrl.Marshal(&rec, c.URI())
+		} else {
+			raw, err = json.Marshal(record)
+		}
 		require.NoError(l.t, err)
 		c.Record, err = repo.CanonicalRecord(raw)
 		require.NoError(l.t, err)
@@ -167,7 +175,7 @@ func TestProofRefusesTampering(t *testing.T) {
 			if p.Commits[i].RKey == "insurer" {
 				var rec map[string]any
 				require.NoError(t, json.Unmarshal(p.Commits[i].Record, &rec))
-				rec["abilities"] = []string{"events:read", "location:precise"}
+				rec["permission"].([]any)[0].(map[string]any)["action"] = []string{odrl.Action("events:read"), odrl.Action("location:precise")}
 				raw, _ := json.Marshal(rec)
 				p.Commits[i].Record, _ = repo.CanonicalRecord(raw)
 			}

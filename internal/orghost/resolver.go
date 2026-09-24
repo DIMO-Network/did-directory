@@ -13,6 +13,7 @@ import (
 	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 )
 
 // ErrResolve marks a failure to read something an evaluation needed: the store
@@ -77,12 +78,12 @@ func resolveErr(err error) error {
 // the issuer; a tombstone's By is compared to the record's from directly, so
 // the org's own tombstone has to name it.
 func stored(org string, st *store.Stored) (*delegation.Stored, error) {
-	var rec delegation.Record
-	if err := json.Unmarshal(st.Record, &rec); err != nil {
+	rec, err := odrl.Decode(st.Record)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", st.URI, err)
 	}
 	out := &delegation.Stored{
-		URI: st.URI, Record: rec, CommittedAt: st.CommittedAt, CommittedBy: st.CommittedBy, ApprovedBy: st.ApprovedBy,
+		URI: st.URI, Record: *rec, CommittedAt: st.CommittedAt, CommittedBy: st.CommittedBy, ApprovedBy: st.ApprovedBy,
 	}
 	if st.Tombstone != nil {
 		by := st.Tombstone.By
@@ -272,8 +273,8 @@ func (r *Resolver) Exclusives(ctx context.Context, vehicle string, at time.Time)
 func holdsOf(sts []store.Stored, at time.Time) ([]delegation.ExclusiveHold, error) {
 	var holds []delegation.ExclusiveHold
 	for i := range sts {
-		var rec delegation.Record
-		if err := json.Unmarshal(sts[i].Record, &rec); err != nil {
+		rec, err := odrl.Decode(sts[i].Record)
+		if err != nil {
 			return nil, fmt.Errorf("%s: %w", sts[i].URI, err)
 		}
 		if len(rec.Exclusive) == 0 || !rec.Validity.Set().Contains(at) {

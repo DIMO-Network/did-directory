@@ -247,6 +247,17 @@ func (o *memOrg) each(collection string, fn func(st Stored, rec map[string]any))
 	}
 }
 
+// target is what a delegation policy's one permission covers: a vehicle DID or
+// a tag URI.
+func target(rec map[string]any) string {
+	perms, _ := rec["permission"].([]any)
+	if len(perms) == 0 {
+		return ""
+	}
+	perm, _ := perms[0].(map[string]any)
+	return field(perm, "target")
+}
+
 func field(rec map[string]any, path ...string) string {
 	var cur any = rec
 	for _, p := range path {
@@ -344,7 +355,7 @@ func (s *MemoryStore) Roles(_ context.Context, org, member string) ([]Stored, er
 	for _, h := range heads {
 		st := o.stored(h)
 		var rec map[string]any
-		if json.Unmarshal(st.Record, &rec) == nil && field(rec, "to") == member {
+		if json.Unmarshal(st.Record, &rec) == nil && field(rec, "assignee") == member {
 			out = append(out, st)
 		}
 	}
@@ -365,10 +376,10 @@ func (s *MemoryStore) Exclusives(_ context.Context, vehicle string, at time.Time
 	out := []Stored{}
 	for _, o := range s.orgs {
 		o.each("network.dimo.delegation", func(st Stored, rec map[string]any) {
-			if ex, _ := rec["exclusive"].([]any); len(ex) == 0 {
+			if ex, _ := rec["dimo:exclusive"].([]any); len(ex) == 0 {
 				return
 			}
-			if field(rec, "covers", "vehicle") == vehicle || tags[field(rec, "covers", "tag")] {
+			if t := target(rec); t == vehicle || tags[t] {
 				out = append(out, st)
 			}
 		})
@@ -385,7 +396,7 @@ func (s *MemoryStore) DelegationsOverTag(_ context.Context, org, tag string) ([]
 	}
 	out := []Stored{}
 	o.each("network.dimo.delegation", func(st Stored, rec map[string]any) {
-		if field(rec, "covers", "tag") == tag {
+		if target(rec) == tag {
 			out = append(out, st)
 		}
 	})
@@ -403,7 +414,7 @@ func (s *MemoryStore) DelegationsWithBasis(_ context.Context, uri string) ([]Sto
 	out := []Stored{}
 	for _, did := range orgs {
 		s.orgs[did].each("network.dimo.delegation", func(st Stored, rec map[string]any) {
-			basis, _ := rec["basis"].([]any)
+			basis, _ := rec["dimo:basis"].([]any)
 			if slices.Contains(basis, any(uri)) {
 				out = append(out, st)
 			}

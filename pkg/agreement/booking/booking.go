@@ -4,7 +4,7 @@
 //
 // The host is generic and never learns what a booking is. This package
 // compiles an agreement with agreement.Compile, writes each grant to the
-// operator's repository under its stable key and each custody leg under its
+// operator's repository as an ODRL policy under its stable key and each custody leg under its
 // own, and tombstones the grants an earlier compilation produced that this one
 // no longer does. Every write is made as the booking service, with the
 // identity token of the DID its booking role was written to, so the host's
@@ -30,6 +30,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 )
 
 // OpPending is the Outcome.Op of a write the host parked for a second
@@ -148,7 +149,12 @@ func (c *Client) Sync(ctx context.Context, a *agreement.Agreement, cat agreement
 	for i := range grants {
 		g := &grants[i]
 		produced[g.Key] = true
-		out, err := c.put(ctx, org, delegation.CollectionDelegation, g.Key, g.Record)
+		// A grant crosses the wire as the ODRL policy it is (spec §5).
+		policy, err := odrl.ToPolicy(&g.Record, "at://"+org+"/"+delegation.CollectionDelegation+"/"+g.Key)
+		if err != nil {
+			return nil, fmt.Errorf("grant %s: %w", g.Key, err)
+		}
+		out, err := c.put(ctx, org, delegation.CollectionDelegation, g.Key, policy)
 		if err != nil {
 			return nil, err
 		}

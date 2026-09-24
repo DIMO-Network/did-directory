@@ -312,7 +312,7 @@ func TestStore_ResolverQueries(t *testing.T) {
 
 			// Roles come back tombstoned or not; the evaluator reads the tombstone.
 			role := func(to string) string {
-				return `{"$type":"network.dimo.org.role","from":"` + org + `","to":"` + to + `","basis":[],"covers":{"tag":"` + tag + `"},"abilities":["tag:write"],"validity":{},"redelegate":{"mode":"none"},"createdAt":"` + day(1) + `"}`
+				return `{"@type":"Set","assigner":"` + org + `","assignee":"` + to + `","permission":[{"target":"` + tag + `","@type":"AssetCollection","action":["dimo:tag.write"]}],"dcterms:issued":"` + day(1) + `"}`
 			}
 			appendRecord(t, s, org, repo.OpCreate, roles, "r1", role(alice), "")
 			appendRecord(t, s, org, repo.OpCreate, roles, "r2", role(alice), "")
@@ -330,16 +330,16 @@ func TestStore_ResolverQueries(t *testing.T) {
 			// Exclusives: over the car directly, over a tag the car is in at the
 			// time, from any repository; not a record without an exclusive claim,
 			// not a tombstoned one, not one over a tag the car has left.
-			grant := func(covers, exclusive string) string {
-				return `{"$type":"network.dimo.delegation","from":"` + org + `","to":"` + renter + `","basis":[],"covers":` + covers + `,"abilities":["command:unlock"],"dataWindow":{},"validity":{"from":"` + day(10) + `"},"redelegate":{"mode":"none"}` + exclusive + `,"createdAt":"` + day(1) + `"}`
+			grant := func(target, exclusive string) string {
+				return `{"@type":"Agreement","assigner":"` + org + `","assignee":"` + renter + `","permission":[{"target":"` + target + `","action":["dimo:command.unlock"]}]` + exclusive + `,"dcterms:issued":"` + day(1) + `"}`
 			}
-			appendRecord(t, s, org, repo.OpCreate, delegations, "g1", grant(`{"vehicle":"`+car+`"}`, `,"exclusive":["command:unlock"]`), "")
-			appendRecord(t, s, org, repo.OpCreate, delegations, "g2", grant(`{"vehicle":"`+car+`"}`, ``), "")
-			appendRecord(t, s, org, repo.OpCreate, delegations, "g3", grant(`{"vehicle":"`+car+`"}`, `,"exclusive":["command:unlock"]`), "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g1", grant(car, `,"dimo:exclusive":["dimo:command.unlock"]`), "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g2", grant(car, ``), "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g3", grant(car, `,"dimo:exclusive":["dimo:command.unlock"]`), "")
 			appendRecord(t, s, org, repo.OpTombstone, delegations, "g3", "", "")
-			appendRecord(t, s, org, repo.OpCreate, delegations, "g4", grant(`{"tag":"`+tag+`"}`, `,"exclusive":["command:unlock"]`), "")
-			appendRecord(t, s, other, repo.OpCreate, delegations, "g5", grant(`{"vehicle":"`+car+`"}`, `,"exclusive":["command:unlock"]`), "")
-			appendRecord(t, s, org, repo.OpCreate, delegations, "g6", grant(`{"vehicle":"`+van+`"}`, `,"exclusive":["command:unlock"]`), "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g4", grant(tag, `,"dimo:exclusive":["dimo:command.unlock"]`), "")
+			appendRecord(t, s, other, repo.OpCreate, delegations, "g5", grant(car, `,"dimo:exclusive":["dimo:command.unlock"]`), "")
+			appendRecord(t, s, org, repo.OpCreate, delegations, "g6", grant(van, `,"dimo:exclusive":["dimo:command.unlock"]`), "")
 			keys := func(sts []Stored) []string {
 				out := []string{}
 				for _, st := range sts {
@@ -377,17 +377,17 @@ func TestStore_AuthoredAndDelegationsOverTag(t *testing.T) {
 			before := time.Now().UTC().Add(-time.Second)
 
 			head, _ := s.Head(ctx, did)
-			c1 := commit(did, head, repo.OpCreate, "network.dimo.delegation", "a", `{"covers":{"tag":"`+tag+`"},"to":"did:dimo:x"}`, "did:dimo:alice")
+			c1 := commit(did, head, repo.OpCreate, "network.dimo.delegation", "a", `{"permission":[{"target":"`+tag+`"}],"assignee":"did:dimo:x"}`, "did:dimo:alice")
 			require.NoError(t, s.AppendAfter(ctx, head, c1))
 			head, _ = s.Head(ctx, did)
-			c2 := commit(did, head, repo.OpCreate, "network.dimo.delegation", "b", `{"covers":{"vehicle":"did:dimo:v"},"to":"did:dimo:y"}`, "did:dimo:alice")
+			c2 := commit(did, head, repo.OpCreate, "network.dimo.delegation", "b", `{"permission":[{"target":"did:dimo:v"}],"assignee":"did:dimo:y"}`, "did:dimo:alice")
 			require.NoError(t, s.AppendAfter(ctx, head, c2))
 			head, _ = s.Head(ctx, did)
 			c3 := commit(did, head, repo.OpCreate, "network.dimo.org.tag", "fleet", `{"name":"Fleet"}`, "did:dimo:bob")
 			require.NoError(t, s.AppendAfter(ctx, head, c3))
 			// Bob updates a, so its current version is his.
 			head, _ = s.Head(ctx, did)
-			c4 := commit(did, head, repo.OpUpdate, "network.dimo.delegation", "a", `{"covers":{"tag":"`+tag+`"},"to":"did:dimo:z"}`, "did:dimo:bob")
+			c4 := commit(did, head, repo.OpUpdate, "network.dimo.delegation", "a", `{"permission":[{"target":"`+tag+`"}],"assignee":"did:dimo:z"}`, "did:dimo:bob")
 			require.NoError(t, s.AppendAfter(ctx, head, c4))
 
 			over, err := s.DelegationsOverTag(ctx, did, tag)
@@ -473,21 +473,21 @@ func TestStore_DelegationsWithBasis(t *testing.T) {
 			delegations := "network.dimo.delegation"
 
 			head, _ := s.Head(ctx, owner)
-			require.NoError(t, s.AppendAfter(ctx, head, commit(owner, head, repo.OpCreate, delegations, "consent", `{"basis":[],"to":"`+dealer+`"}`, "")))
+			require.NoError(t, s.AppendAfter(ctx, head, commit(owner, head, repo.OpCreate, delegations, "consent", `{"dimo:basis":[],"assignee":"`+dealer+`"}`, "")))
 			// Two descendants in the dealer's repository, one of them later
 			// tombstoned; a record with another basis; a role naming the root.
 			head, _ = s.Head(ctx, dealer)
-			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "a", `{"basis":["`+root+`"],"to":"did:dimo:x"}`, "")))
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "a", `{"dimo:basis":["`+root+`"],"assignee":"did:dimo:x"}`, "")))
 			head, _ = s.Head(ctx, dealer)
-			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "b", `{"basis":["at://did:dimo:other/network.dimo.delegation/k","`+root+`"],"to":"did:dimo:y"}`, "")))
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "b", `{"dimo:basis":["at://did:dimo:other/network.dimo.delegation/k","`+root+`"],"assignee":"did:dimo:y"}`, "")))
 			head, _ = s.Head(ctx, dealer)
-			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "c", `{"basis":["`+root+`"],"to":"did:dimo:z"}`, "")))
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "c", `{"dimo:basis":["`+root+`"],"assignee":"did:dimo:z"}`, "")))
 			head, _ = s.Head(ctx, dealer)
 			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpTombstone, delegations, "c", "", "")))
 			head, _ = s.Head(ctx, dealer)
-			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "d", `{"basis":["at://did:dimo:other/network.dimo.delegation/k"],"to":"did:dimo:w"}`, "")))
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, delegations, "d", `{"dimo:basis":["at://did:dimo:other/network.dimo.delegation/k"],"assignee":"did:dimo:w"}`, "")))
 			head, _ = s.Head(ctx, dealer)
-			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, "network.dimo.org.role", "r", `{"basis":["`+root+`"],"to":"did:dimo:v"}`, "")))
+			require.NoError(t, s.AppendAfter(ctx, head, commit(dealer, head, repo.OpCreate, "network.dimo.org.role", "r", `{"dimo:basis":["`+root+`"],"assignee":"did:dimo:v"}`, "")))
 
 			got, err := s.DelegationsWithBasis(ctx, root)
 			require.NoError(t, err)

@@ -215,24 +215,43 @@ approve() { # org pending-id approver-token description
     expect 201 "$4"
 }
 
-# Record builders. Every record is plain JSON the host validates structurally
-# and then checks against the writer's role (plan §3.2).
-role() { # org to covers-json abilities-csv [constraints-json]
-    jq -cn --arg from "$1" --arg to "$2" --argjson covers "$3" --arg abilities "$4" \
-        --argjson constraints "${5:-null}" --arg now "$NOW" --arg from_when "$VALID_FROM" '
-        {"$type": "network.dimo.org.role", from: $from, to: $to, basis: [], covers: $covers,
-         abilities: ($abilities | split(",")), dataWindow: {}, validity: {from: $from_when},
-         redelegate: {mode: "none"}, createdAt: $now}
-        + (if $constraints then {constraints: $constraints} else {} end)'
+# Record builders. Delegations and roles are ODRL policies with the DIMO
+# profile (spec §5): a grant is an Agreement, a role is a Set. The host parses
+# each one, checks it structurally and against the writer's role (plan §3.2),
+# and commits it with its uid set to where it lives. Tags, memberships and
+# custody are facts, not permissions, and stay plain JSON.
+#
+# The jq below is the whole mapping a client needs: from/to are assigner and
+# assignee, covers is the permission's target (a tag is an AssetCollection),
+# abilities are dimo: actions, validity and purpose are ODRL constraints, and
+# everything ODRL has no word for is a dimo: profile term.
+ODRL_POLICY='
+    def target: if .tag then {target: .tag, "@type": "AssetCollection"}
+        elif .vehicle then {target: .vehicle, "@type": "Asset"}
+        else {target: "dimo:inherit"} end;
+    def actions: split(",") | map("dimo:" + sub(":"; "."));
+    {"@context": ["http://www.w3.org/ns/odrl.jsonld", "https://schema.dimo.zone/odrl/v1"],
+     "@type": $type, profile: "https://schema.dimo.zone/odrl/v1",
+     assigner: $from, assignee: $to,
+     permission: [($covers | target) + {action: ($abilities | actions),
+         constraint: ([{leftOperand: "dateTime", operator: "gteq", rightOperand: $from_when}]
+             + $constraints)}],
+     "dcterms:issued": $now}'
+role() { # org to covers-json abilities-csv [issue-constraints-json]
+    jq -cn --arg type Set --arg from "$1" --arg to "$2" --argjson covers "$3" --arg abilities "$4" \
+        --argjson issue "${5:-null}" --argjson constraints '[]' --arg now "$NOW" --arg from_when "$VALID_FROM" \
+        "$ODRL_POLICY"' + (if $issue then {"dimo:issueConstraints": $issue} else {} end)'
 }
-grant() { # from to covers-json abilities-csv [extra-json]
-    local extra='{}'
-    [ $# -ge 5 ] && extra=$5
-    jq -cn --arg from "$1" --arg to "$2" --argjson covers "$3" --arg abilities "$4" \
-        --argjson extra "$extra" --arg now "$NOW" --arg from_when "$VALID_FROM" '
-        {"$type": "network.dimo.delegation", from: $from, to: $to, basis: [], covers: $covers,
-         abilities: ($abilities | split(",")), dataWindow: {}, validity: {from: $from_when},
-         redelegate: {mode: "none"}, createdAt: $now} + $extra'
+grant() { # from to covers-json abilities-csv purpose [profile-terms-json] [client]
+    local terms=${6:-} client=${7:-} constraints
+    [ -n "$terms" ] || terms='{}'
+    # Built into variables first: bash 3.2 mangles JSON inside "$(...)" arguments.
+    constraints=$(jq -cn --arg purpose "$5" --arg client "$client" '
+        [{leftOperand: "purpose", operator: "eq", rightOperand: $purpose}]
+        + (if $client != "" then [{leftOperand: "dimo:client", operator: "isAnyOf", rightOperand: [$client]}] else [] end)')
+    jq -cn --arg type Agreement --arg from "$1" --arg to "$2" --argjson covers "$3" --arg abilities "$4" \
+        --argjson terms "$terms" --argjson constraints "$constraints" --arg now "$NOW" --arg from_when "$VALID_FROM" \
+        "$ODRL_POLICY"' + $terms'
 }
 membership() { # tag-uri vehicle
     jq -cn --arg tag "$1" --arg vehicle "$2" --arg from_when "$VALID_FROM" '{tag: $tag, vehicle: $vehicle, joinedAt: $from_when}'
@@ -511,9 +530,12 @@ step "The insurer, over fl-fleet, written by Alice..."
 info "Inside her role, nothing live: it commits directly. The record carries"
 info "afterTransfer: retainHistory by default, so a sale keeps the insurer's"
 info "Avis-era history."
-REC=$(grant "$AVIS" "$INSURER" "{\"tag\":\"$FL_FLEET\"}" "telemetry:read,events:read" '{"purpose":"fleet-insurance"}')
+REC=$(grant "$AVIS" "$INSURER" "{\"tag\":\"$FL_FLEET\"}" "telemetry:read,events:read" fleet-insurance)
 host PUT "/orgs/$AVIS/network.dimo.delegation/insurer" "$ALICE_TOKEN" "$REC"
 expect 201 "insurer grant committed by Alice"
+info "What Alice sent is an ODRL Agreement; the host committed it with its uid:"
+host GET "/orgs/$AVIS/network.dimo.delegation/insurer" "$ALICE_TOKEN"
+echo "$BODY" | jq .record | show
 INSURER_URI="at://$AVIS/network.dimo.delegation/insurer"
 
 echo ""
@@ -521,8 +543,8 @@ step "Ford Credit's lien, over financed-fc..."
 info "Revocable only by the lender and dropped on transfer. Only an attested"
 info "operator may issue such a record, and it waits for a second approval:"
 info "the org writes it, Carol approves. The lender could not approve its own."
-REC=$(grant "$AVIS" "$FORD_CREDIT" "{\"tag\":\"$FINANCED_FC\"}" "location:precise,health:read" \
-        '{"revocableBy":"to","afterTransfer":"drop","purpose":"lien"}')
+REC=$(grant "$AVIS" "$FORD_CREDIT" "{\"tag\":\"$FINANCED_FC\"}" "location:precise,health:read" lien \
+        '{"dimo:revocableBy":"to","dimo:afterTransfer":"drop"}')
 host PUT "/orgs/$AVIS/network.dimo.delegation/fordcredit" "$AVIS_TOKEN" "$REC"
 expect 202 "lien parked: $(echo "$BODY" | jq -r '.reasons | join(", ")')"
 PENDING=$(echo "$BODY" | jq -r .pending)
@@ -538,8 +560,8 @@ info "Commands are live abilities; nobody on staff holds them, so the org writes
 info "it as itself and Carol approves. The grant permits one level of attenuated"
 info "redelegation, which is how Ford Pro will pass telemetry to its integrator,"
 info "and drops at transfer: when Avis sells a car, Ford Pro loses it entirely."
-REC=$(grant "$AVIS" "$FORD_PRO" "{\"tag\":\"$FORD_PRO_ENROLLED\"}" "telemetry:read,command:lock,command:unlock" \
-        '{"redelegate":{"mode":"attenuated","maxDepth":1},"afterTransfer":"drop","purpose":"telematics"}')
+REC=$(grant "$AVIS" "$FORD_PRO" "{\"tag\":\"$FORD_PRO_ENROLLED\"}" "telemetry:read,command:lock,command:unlock" telematics \
+        '{"dimo:redelegate":{"mode":"attenuated","maxDepth":1},"dimo:afterTransfer":"drop"}')
 host PUT "/orgs/$AVIS/network.dimo.delegation/fordpro" "$AVIS_TOKEN" "$REC"
 expect 202 "Ford Pro grant parked: $(echo "$BODY" | jq -r '.reasons | join(", ")')"
 approve "$AVIS" "$(echo "$BODY" | jq -r .pending)" "$CAROL_TOKEN" "Carol approves"
@@ -552,7 +574,7 @@ host POST "/orgs/$FORD_PRO" "$FORD_PRO_TOKEN" "$(jq -cn --arg k "$(jq -r .privat
 expect 201 "Ford Pro's repository registered"
 host PUT "/parties/$FORD_PRO" "$DIMO_TOKEN" '{"kind":"org","operator":true}'
 expect 200 "DIMO attests Ford Pro"
-REC=$(grant "$FORD_PRO" "$INTEGRATOR" '{"inherit":true}' "telemetry:read" "{\"basis\":[\"$FORD_PRO_URI\"],\"purpose\":\"analytics\"}")
+REC=$(grant "$FORD_PRO" "$INTEGRATOR" '{"inherit":true}' "telemetry:read" analytics "{\"dimo:basis\":[\"$FORD_PRO_URI\"]}")
 host PUT "/orgs/$FORD_PRO/network.dimo.delegation/integrator" "$FORD_PRO_TOKEN" "$REC"
 expect 201 "integrator grant committed in Ford Pro's repository, basis = Avis's grant to Ford Pro"
 INTEGRATOR_URI="at://$FORD_PRO/network.dimo.delegation/integrator"
@@ -587,8 +609,9 @@ echo "$BODY" | jq '.descendants[] | {uri, to, depth, abilities, coverage: (.cove
 
 header "Step 4: A booking"
 info "A renter is not a member and not a partner: they bought a service. The"
-info "booking service holds the agreement (an ODRL agreement with duties) and"
-info "compiles it into grants after every change, under its constrained role."
+info "booking service holds the agreement, whose duties (payment, return,"
+info "retention) gate what it compiles to, and after every change writes the"
+info "grants it produces as ODRL Agreements, under its constrained role."
 info "The host never learns what a booking is (plan decision F)."
 
 RENTER=$(create --alias "renter.example")
@@ -698,7 +721,7 @@ expect 201 "repository registered with a host-generated key"
 "$DIMOCLI" update -server "$DIRECTORY_URL" --did "$BUYER" --org-key "$(echo "$BODY" | jq -r .key)" --org-host "$ORG_HOST_URL" | show
 host PUT "/orgs/$BUYER/network.dimo.org.vehicleControl/$CAR1" "$BUYER_TOKEN" "$(cat "$KEYS/${CAR1#did:dimo:}.control.json")"
 expect 201 "era-1 opening committed to the buyer's repository"
-REC=$(grant "$BUYER" "$INSURER" "{\"vehicle\":\"$CAR1\"}" "telemetry:read" '{"purpose":"consumer-insurance"}')
+REC=$(grant "$BUYER" "$INSURER" "{\"vehicle\":\"$CAR1\"}" "telemetry:read" consumer-insurance)
 host PUT "/orgs/$BUYER/network.dimo.delegation/insurance" "$BUYER_TOKEN" "$REC"
 expect 201 "consent committed"
 mint "The insurer reads car 1 under the buyer's consent: the window starts at era 1" \
@@ -711,8 +734,7 @@ info "The app attests each request with a short assertion signed by its own DID'
 info "key and bound to the caller's DPoP key, so it cannot be replayed or lent."
 CLAIMS_APP=$(create --alias "claims.insurer.example")
 created "ClaimsApp" "$CLAIMS_APP"
-REC=$(grant "$BUYER" "$INSURER" "{\"vehicle\":\"$CAR1\"}" "telemetry:read" \
-        "$(jq -cn --arg app "$CLAIMS_APP" '{purpose: "claims", clientAllowlist: [$app]}')")
+REC=$(grant "$BUYER" "$INSURER" "{\"vehicle\":\"$CAR1\"}" "telemetry:read" claims '{}' "$CLAIMS_APP")
 host PUT "/orgs/$BUYER/network.dimo.delegation/claims" "$BUYER_TOKEN" "$REC"
 expect 201 "consent committed, allowlisting the claims app"
 mint "The insurer, through the claims app" \

@@ -32,6 +32,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 )
 
@@ -332,12 +333,12 @@ func checkCommit(c *repo.Committed, keys map[string]string) error {
 }
 
 func (e *entry) stored() (*delegation.Stored, error) {
-	var rec delegation.Record
-	if err := json.Unmarshal(e.record, &rec); err != nil {
+	rec, err := odrl.Decode(e.record)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, e.uri, err)
 	}
 	return &delegation.Stored{
-		URI: e.uri, Record: rec, CommittedAt: e.committedAt, CommittedBy: e.committedBy,
+		URI: e.uri, Record: *rec, CommittedAt: e.committedAt, CommittedBy: e.committedBy,
 		ApprovedBy: e.approvedBy, Tombstone: e.tombstone,
 	}, nil
 }
@@ -350,12 +351,12 @@ func (b *bundle) versions(uri string) []repo.Version {
 // storedVersion is one version of a delegation or role as the evaluator reads
 // it, as the host's resolver gives it.
 func storedVersion(org string, v *repo.Version) (*delegation.Stored, error) {
-	var rec delegation.Record
-	if err := json.Unmarshal(v.Record, &rec); err != nil {
+	rec, err := odrl.Decode(v.Record)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrInvalid, v.URI(), err)
 	}
 	out := &delegation.Stored{
-		URI: v.URI(), Record: rec, CommittedAt: v.CommittedAt, CommittedBy: v.CommittedBy,
+		URI: v.URI(), Record: *rec, CommittedAt: v.CommittedAt, CommittedBy: v.CommittedBy,
 		ApprovedBy: v.ApprovedBy, Superseded: v.Superseded,
 	}
 	if t := v.Tombstone; t != nil {
