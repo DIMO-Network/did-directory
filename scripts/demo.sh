@@ -608,9 +608,9 @@ info "The insurer and the lender are plain DIDs; Ford Pro is an org with its own
 
 echo ""
 step "The insurer, over fl-fleet, written by Alice..."
-info "Inside her role, nothing live: it commits directly. The record carries"
-info "afterTransfer: retainHistory by default, so a sale keeps the insurer's"
-info "Avis-era history."
+info "Inside her role, nothing live: it commits directly. The grant does not"
+info "say what happens at a sale, and the default is retainHistory, so a sale"
+info "keeps the insurer's Avis-era history."
 REC=$(grant "$AVIS" "$INSURER" "{\"tag\":\"$FL_FLEET\"}" "telemetry:read,events:read" fleet-insurance)
 host PUT "/orgs/$AVIS/network.dimo.delegation/insurer" "$ALICE_TOKEN" "$REC"
 expect 201 "insurer grant committed by Alice"
