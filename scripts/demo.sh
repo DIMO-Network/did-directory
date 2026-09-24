@@ -36,6 +36,10 @@ set -euo pipefail
 # steps and before the key moments, tokens as one line per grant. DIDs are
 # shown by name throughout (car-1, Avis, Renter); the closing summary has the
 # real identifiers. DEMO_VERBOSE=1 logs every CLI request.
+#
+# Every delegation and role the host stores is an ODRL policy. In presenter
+# mode, a step that wrote any offers to show them before moving on: press o.
+# DEMO_ODRL=1 prints them after every step, presenter mode or not.
 # ============================================================================
 
 RED='\033[0;31m'
@@ -68,6 +72,10 @@ DIMOCLI="$BIN/dimocli"
 KEYS="$HOME/.dimo/keys"
 PIDS=()
 PRESENT="${DEMO_PRESENT:-0}"
+ODRL="${DEMO_ODRL:-0}"
+# The delegations and roles written since the last chance to look at them.
+WRITTEN="$DEMO_DIR/written"
+: >"$WRITTEN"
 [ "${DEMO_VERBOSE:-0}" = "1" ] && export DIMO_VERBOSE=1
 
 # Every DID the story creates gets a name here; output helpers replace the
@@ -79,8 +87,10 @@ named() { sed -f "$NAMES_SED"; }
 
 # ── Output helpers ────────────────────────────────────────────────────────
 
-# pause waits for a keypress in presenter mode and does nothing otherwise.
+# pause waits for a keypress in presenter mode and does nothing otherwise. If
+# policies were written since the last one, the keypress can be o to see them.
 pause() {
+    peek && return 0
     [ "$PRESENT" = 1 ] || return 0
     echo ""
     echo -en "  ${DIM}— press any key —${NC}"
@@ -93,6 +103,8 @@ header() {
     if [ "$PRESENT" = 1 ]; then
         [ "$FIRST_HEADER" = 1 ] || pause
         clear
+    else
+        peek || true
     fi
     FIRST_HEADER=0
     echo ""
@@ -101,7 +113,7 @@ header() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 }
-step()    { echo -e "  ${YELLOW}>>>  $1${NC}" | named; }
+step()    { peek || true; echo -e "  ${YELLOW}>>>  $1${NC}" | named; }
 success() { echo -e "  ${GREEN}[OK]  $1${NC}" | named; }
 fail()    { echo -e "  ${RED}[FAIL]  $1${NC}" | named; }
 info()    { echo -e "  ${CYAN}$1${NC}" | named; }
@@ -130,6 +142,10 @@ on_exit() {
     local code=$?
     for pid in "${PIDS[@]:-}"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
+    # Let them exit before the directory goes: dq is still writing its catalog.
+    for pid in "${PIDS[@]:-}"; do
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
     done
     if [ "$code" -ne 0 ]; then
         echo ""
@@ -200,6 +216,60 @@ host() {
     [ -n "$data" ] && args+=(--data-binary "$data")
     STATUS=$(curl "${args[@]}" "$ORG_HOST_URL$path")
     BODY=$(cat "$DEMO_DIR/body")
+    case "$method $path $STATUS" in
+    PUT*/network.dimo.delegation*\ 20[012] | POST*/network.dimo.delegation*\ 20[012] | \
+        PUT*/network.dimo.org.role*\ 20[012] | POST*/network.dimo.org.role*\ 20[012])
+        echo "$BODY" | jq -r '.uri // empty' >>"$WRITTEN" ;;
+    esac
+}
+
+# booking runs the booking service's sync and remembers the grants it wrote.
+booking() {
+    local out
+    out=$("$DIMOCLI" booking --dauth "$DAUTH_URL" --server "$DIRECTORY_URL" --did "$BACKEND" --agreement "$AGREEMENT")
+    echo "$out" | show
+    echo "$out" | grep -o 'at://[^ ]*/network\.dimo\.delegation/[^ ]*' >>"$WRITTEN" || true
+}
+
+# peek offers the ODRL policies written since it last ran: in presenter mode
+# on a keypress, with DEMO_ODRL=1 always. It returns 0 when it waited for a
+# key, so pause need not wait again.
+peek() {
+    [ -s "$WRITTEN" ] || return 1
+    local show_them=$ODRL waited=1 key=
+    [ "$PRESENT" = 1 ] && waited=0
+    if [ "$PRESENT" = 1 ] && [ "$ODRL" != 1 ]; then
+        echo ""
+        echo -en "  ${DIM}— o: see the ODRL just stored · any other key: go on —${NC}"
+        { read -r -s -n1 key </dev/tty; } 2>/dev/null || true
+        echo -en "\r\033[K"
+        case $key in o | O) show_them=1 ;; esac
+    fi
+    if [ "$show_them" = 1 ]; then
+        local status=$STATUS body=$BODY uri org rest token
+        for uri in $(sort -u "$WRITTEN"); do
+            rest=${uri#at://}
+            org=${rest%%/*}
+            token=$(signin "$org")
+            host GET "/orgs/$rest" "$token"
+            echo ""
+            case $STATUS in
+            200) echo -e "  ${BOLD}$uri${NC}" | named ;;
+            410) echo -e "  ${BOLD}$uri${NC} ${DIM}(tombstoned; this is what it granted)${NC}" | named ;;
+            *) echo -e "  ${BOLD}$uri${NC} ${DIM}(not committed: HTTP $STATUS)${NC}" | named; continue ;;
+            esac
+            echo "$BODY" | jq .record | show
+        done
+        STATUS=$status BODY=$body
+        if [ "$PRESENT" = 1 ]; then
+            echo ""
+            echo -en "  ${DIM}— press any key —${NC}"
+            { read -r -s -n1 </dev/tty; } 2>/dev/null || true
+            echo -en "\r\033[K"
+        fi
+    fi
+    : >"$WRITTEN"
+    return $waited
 }
 
 expect() { # status description
@@ -533,9 +603,13 @@ info "Avis-era history."
 REC=$(grant "$AVIS" "$INSURER" "{\"tag\":\"$FL_FLEET\"}" "telemetry:read,events:read" fleet-insurance)
 host PUT "/orgs/$AVIS/network.dimo.delegation/insurer" "$ALICE_TOKEN" "$REC"
 expect 201 "insurer grant committed by Alice"
-info "What Alice sent is an ODRL Agreement; the host committed it with its uid:"
-host GET "/orgs/$AVIS/network.dimo.delegation/insurer" "$ALICE_TOKEN"
-echo "$BODY" | jq .record | show
+if [ "$PRESENT" != 1 ] && [ "$ODRL" != 1 ]; then
+    # One policy by default; presenter mode offers every one, DEMO_ODRL shows them all.
+    info "What Alice sent is an ODRL Agreement; the host committed it with its uid:"
+    host GET "/orgs/$AVIS/network.dimo.delegation/insurer" "$ALICE_TOKEN"
+    echo "$BODY" | jq .record | show
+    : >"$WRITTEN"
+fi
 INSURER_URI="at://$AVIS/network.dimo.delegation/insurer"
 
 echo ""
@@ -635,7 +709,7 @@ jq -n --arg id "$BOOKING" --arg avis "$AVIS" --arg renter "$RENTER" --arg car "$
      terms: "sha256:9f2c", createdBy: $backend}' >"$AGREEMENT"
 
 step "Paid, and car 1 assigned at the desk 40 minutes ago. The booking service syncs the agreement:"
-"$DIMOCLI" booking --dauth "$DAUTH_URL" --server "$DIRECTORY_URL" --did "$BACKEND" --agreement "$AGREEMENT" | show
+booking
 success "two grants under stable keys: custody (commands, exclusive, dies at return) and history (telemetry, kept)"
 CUSTODY_URI="at://$AVIS/network.dimo.delegation/$BOOKING:rental:custody"
 HISTORY_URI="at://$AVIS/network.dimo.delegation/$BOOKING:rental:history"
@@ -660,7 +734,7 @@ jq --arg start "$PICKUP" --arg responder "$ROADSIDE" --arg opened "$INCIDENT_OPE
     .state = "pickedUp" | .custody = [{start: $start}]
     | .services += [{code: "roadside"}]
     | .incidents = [{id: "inc-1", responder: $responder, openedAt: $opened}]' "$AGREEMENT" >"$AGREEMENT.next" && mv "$AGREEMENT.next" "$AGREEMENT"
-"$DIMOCLI" booking --dauth "$DAUTH_URL" --server "$DIRECTORY_URL" --did "$BACKEND" --agreement "$AGREEMENT" | show
+booking
 mint "Roadside locates car 1 while the incident is open" "$ROADSIDE" "$ROADSIDE_URI" "$CAR1" "location:precise"
 
 pause
@@ -670,7 +744,7 @@ info "Custody and roadside drop out of the compilation and are tombstoned by the
 info "booking service; the custody leg closes; history narrows to the drive."
 jq --arg end "$RETURN" --arg closed "$INCIDENT_CLOSED" '
     .state = "returned" | .custody[0].end = $end | .incidents[0].closedAt = $closed' "$AGREEMENT" >"$AGREEMENT.next" && mv "$AGREEMENT.next" "$AGREEMENT"
-"$DIMOCLI" booking --dauth "$DAUTH_URL" --server "$DIRECTORY_URL" --did "$BACKEND" --agreement "$AGREEMENT" | show
+booking
 
 echo ""
 refuse revoked "The renter's commands are gone" "$RENTER" "$CUSTODY_URI" "$CAR1" "command:unlock"
