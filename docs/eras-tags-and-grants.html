@@ -477,7 +477,7 @@
               <div class="node key">
                 <span class="name">vehicleControl</span>
                 <span class="sub mono">{ controller, era, salt }</span>
-                <span class="sub">opens the commitment — proof Avis controls this car</span>
+                <span class="sub">opens the commitment — proof RentalCo controls this car</span>
               </div>
               <div class="node">
                 <span class="name">tag &amp; membership</span>
@@ -485,7 +485,7 @@
               </div>
               <div class="node">
                 <span class="name">roles &amp; grants</span>
-                <span class="sub">who at Avis may do what; what each partner gets</span>
+                <span class="sub">who at RentalCo may do what; what each partner gets</span>
               </div>
             </div>
             <div class="tally">
@@ -497,7 +497,7 @@
           </div>
         </div>
       </div>
-      <figcaption><b>Fleet composition never goes public.</b> Two Avis cars carry different commitments because each has its own salt, which is also what makes each car's genesis record, and its DID, unique.</figcaption>
+      <figcaption><b>Fleet composition never goes public.</b> Two RentalCo cars carry different commitments because each has its own salt, which is also what makes each car's genesis record, and its DID, unique.</figcaption>
     </figure>
   </section>
 
@@ -512,7 +512,7 @@
           <div class="tl-row">
             <span class="tl-name">control era</span>
             <div class="tl-track">
-              <div class="tl-bar" style="--from:0; --to:75"><span>era 0 · Avis controls</span></div>
+              <div class="tl-bar" style="--from:0; --to:75"><span>era 0 · RentalCo controls</span></div>
               <div class="tl-bar dim" style="--from:75; --to:100"><span>era 1 · buyer</span></div>
             </div>
           </div>
@@ -564,7 +564,7 @@
         <div class="chain">
           <div class="step">
             <div class="node key">
-              <span class="name">Avis</span>
+              <span class="name">RentalCo</span>
               <span class="sub mono">telemetry:read</span>
               <span class="sub mono">location:precise</span>
               <span class="sub mono">command:lock / unlock</span>
@@ -574,7 +574,7 @@
           <div class="hop conn hot"><span class="glyph">→</span><span class="cl">covers tag</span></div>
           <div class="step">
             <div class="node">
-              <span class="name">Ford Pro</span>
+              <span class="name">FleetCo</span>
               <span class="sub mono">telemetry:read</span>
               <span class="sub mono">command:lock</span>
               <span class="sub">may pass on once</span>
@@ -585,14 +585,14 @@
             <div class="node">
               <span class="name">Integrator</span>
               <span class="sub mono">telemetry:read</span>
-              <span class="sub">inherits Ford Pro's coverage</span>
+              <span class="sub">inherits FleetCo's coverage</span>
             </div>
           </div>
           <div class="hop conn no"><span class="glyph">→</span><span class="cl">rejected</span></div>
           <div class="step">
             <div class="node bad">
               <span class="name">Marketing vendor</span>
-              <span class="sub">depth exhausted — Ford Pro could pass it on once, and did</span>
+              <span class="sub">depth exhausted — FleetCo could pass it on once, and did</span>
             </div>
           </div>
         </div>
@@ -615,7 +615,7 @@
     <p class="eyebrow">Checkout</p>
     <h2>The renter bought a service, and the purchase is the grant</h2>
     <p>A renter is not staff and not a partner. They paid for something, and the purchase is what creates the access. So the record is the agreement, and the grants are compiled from it.</p>
-    <p>Avis writes thousands of bookings a day. Nobody signs a delegation by hand.</p>
+    <p>RentalCo writes thousands of bookings a day. Nobody signs a delegation by hand.</p>
 
     <figure>
       <div class="frame">
@@ -707,7 +707,7 @@
         <div class="flow wide">
           <div class="stack">
             <div class="node">
-              <span class="name">Ford Credit</span>
+              <span class="name">FinancialCo</span>
               <span class="sub">service account with its own key</span>
               <span class="sub">asks for location on car 1</span>
             </div>
@@ -750,15 +750,15 @@
 
   <section>
     <p class="eyebrow">Case study</p>
-    <h2>One Avis car, six relationships</h2>
+    <h2>One RentalCo car, six relationships</h2>
 
     <figure>
       <div class="frame">
         <div class="case">
           <div class="node key">
-            <span class="name">Avis</span>
+            <span class="name">RentalCo</span>
             <span class="sub">controller of record</span>
-            <span class="sub mono">tags: fl-fleet · ford-pro-enrolled · financed-fc · tx-franchise</span>
+            <span class="sub mono">tags: fl-fleet · fleetco-enrolled · financed · tx-franchise</span>
             <span class="sub">issues every grant below, and can move a car between groups without anyone countersigning</span>
           </div>
           <div class="case-list">
@@ -768,11 +768,11 @@
             </div>
             <div class="case-item hot">
               <span class="glyph" aria-hidden="true">→</span>
-              <span><span class="who">Ford Pro</span><span class="how">telemetry and commands over ford-pro-enrolled; may pass a narrower grant to its integrator</span></span>
+              <span><span class="who">FleetCo</span><span class="how">telemetry and commands over fleetco-enrolled; may pass a narrower grant to its integrator</span></span>
             </div>
             <div class="case-item hot">
               <span class="glyph" aria-hidden="true">→</span>
-              <span><span class="who">Ford Credit</span><span class="how">lien over financed-fc; Avis cannot revoke it, and it drops at the sale</span></span>
+              <span><span class="who">FinancialCo</span><span class="how">lien over financed; RentalCo cannot revoke it, and it drops at the sale</span></span>
             </div>
             <div class="case-item hot">
               <span class="glyph" aria-hidden="true">→</span>
