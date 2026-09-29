@@ -1,2 +1,4 @@
 bin/
 /dimocli
+docs/odrl-builder/builder.wasm
+docs/odrl-builder/wasm_exec.js

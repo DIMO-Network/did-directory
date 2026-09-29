@@ -1,4 +1,4 @@
-.PHONY: build run test lint fmt docker clean
+.PHONY: build run test lint fmt docker clean odrl-builder odrl-builder-serve
 
 BINARY := did-directory
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -31,7 +31,16 @@ docker:
 	docker build -t dimo/did-directory:$(VERSION) .
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ docs/odrl-builder/builder.wasm docs/odrl-builder/wasm_exec.js
+
+# The ODRL builder page: pkg/odrl compiled to WebAssembly, next to docs/odrl-builder/index.html.
+odrl-builder:
+	GOOS=js GOARCH=wasm go build -ldflags "-s -w" -o docs/odrl-builder/builder.wasm ./cmd/odrl-builder
+	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" docs/odrl-builder/
+
+odrl-builder-serve: odrl-builder
+	@echo "http://localhost:8765/"
+	python3 -m http.server 8765 --directory docs/odrl-builder
 
 tools:
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
