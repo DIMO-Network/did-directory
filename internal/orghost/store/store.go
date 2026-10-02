@@ -163,6 +163,11 @@ type Store interface {
 	// Roles returns org's role records addressed to member, tombstoned ones
 	// included: the evaluator decides for itself whether a tombstone counts.
 	Roles(ctx context.Context, org, member string) ([]Stored, error)
+	// Assigned returns the records in collection, from every repository on
+	// this host, addressed to assignee, tombstoned ones included, ordered by
+	// org and seq. It is how a caller finds what it holds without knowing
+	// which orgs to ask.
+	Assigned(ctx context.Context, collection, assignee string) ([]Stored, error)
 	// Exclusives returns the live delegation records, from every repository on
 	// this host, that claim exclusive abilities and cover vehicle: directly, or
 	// through a tag the vehicle has a membership in at time at. Validity is the

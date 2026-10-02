@@ -362,6 +362,36 @@ func (s *MemoryStore) Roles(_ context.Context, org, member string) ([]Stored, er
 	return out, nil
 }
 
+func (s *MemoryStore) Assigned(_ context.Context, collection, assignee string) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	orgs := make([]string, 0, len(s.orgs))
+	for did := range s.orgs {
+		orgs = append(orgs, did)
+	}
+	sort.Strings(orgs)
+	prefix := collection + "/"
+	out := []Stored{}
+	for _, did := range orgs {
+		o := s.orgs[did]
+		var heads []memHead
+		for k, h := range o.heads {
+			if strings.HasPrefix(k, prefix) {
+				heads = append(heads, h)
+			}
+		}
+		sort.Slice(heads, func(i, j int) bool { return heads[i].record < heads[j].record })
+		for _, h := range heads {
+			st := o.stored(h)
+			var rec map[string]any
+			if json.Unmarshal(st.Record, &rec) == nil && field(rec, "assignee") == assignee {
+				out = append(out, st)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) Exclusives(_ context.Context, vehicle string, at time.Time) ([]Stored, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

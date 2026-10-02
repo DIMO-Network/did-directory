@@ -101,6 +101,10 @@ func New(o Options) *fiber.App {
 	parties.Get("/:did", s.getParty)
 	parties.Put("/:did", s.setParty)
 
+	me := app.Group("/me", s.authenticate)
+	me.Get("/roles", s.myRoles)
+	me.Get("/delegations", s.myDelegations)
+
 	orgs := app.Group("/orgs", s.authenticate)
 	orgs.Post("/:org", s.register)
 	orgs.Get("/:org", s.getOrg)

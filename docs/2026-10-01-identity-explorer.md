@@ -62,7 +62,7 @@ Add two routes, scoped to the caller:
 | `GET /me/roles` | Live roles addressed to the caller, from every repository on the host, with each role's org |
 | `GET /me/delegations` | Live delegations whose `assignee` is the caller, from every repository on the host |
 
-Both need a new store query, in the memory and Postgres stores alike: live records in one collection, from every repository on the host, by `assignee`. Nothing does that today. `Store.Roles` takes an org and returns tombstoned roles too, because the evaluator judges tombstones itself; Postgres's `commits_role_assignee_idx` leads with `org`, so a host-wide lookup needs an index on `assignee` alone. The routes then evaluate each record (`HeldRoles` for roles, the evaluator for delegations) and return only the live ones, with the refusal code for any that fail, as `/descendants` does. With one DIMO-hosted org host in v1, this answers the question completely. Once orgs self-host, a grantee's delegations can sit on hosts it has never heard of, which needs an inbox or for grantees to register the hosts they use. That can wait until self-hosting is real.
+**Built:** both routes are in `internal/orghost/me.go`, over a new `Store.Assigned(collection, assignee)`: the records in one collection, from every repository on the host, addressed to the caller, tombstones included, since the evaluator decides whether a tombstone counts. Postgres has `commits_assignee_idx` for it; the existing `commits_role_assignee_idx` leads with `org` and could not serve a host-wide lookup. `/me/roles` lists only the roles `HeldRoles` finds live, in orgs that can have members, which is what `checkRead` admits. `/me/delegations` cannot do the same, because a delegation gives something only over a vehicle. Without `?vehicle=` it lists the records as stored; with it, each is resolved over that vehicle, with coverage or a refusal code, as `/descendants` does. This tells the grantee nothing `/proof` does not already: the recipient may ask that for any vehicle. Neither route pages yet. With one DIMO-hosted org host in v1, this answers the question completely. Once orgs self-host, a grantee's delegations can sit on hosts it has never heard of, which needs an inbox or for grantees to register the hosts they use. That can wait until self-hosting is real.
 
 ### Gap 2: scoped reads
 
@@ -89,7 +89,7 @@ This is a deviation from the spec, not a missing feature, and it exists today wh
 
 ## Order of work
 
-1. **`/me/roles` and `/me/delegations`.** A host-wide store query by `assignee` in both stores, with its Postgres index, and two routes that evaluate what it returns. Without them no app can start.
+1. **`/me/roles` and `/me/delegations`.** Built (see gap 1). Without them no app could start.
 2. **Scoped reads.** This brings the host back in line with spec §6.2, so it is due regardless. It must land before any app lets members browse a repository.
 3. **The per-vehicle access view, and `/descendants` for recipients.** These are the views owners and partners will care about most.
 

@@ -104,6 +104,9 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		-- the one permission's target, basis and exclusive are profile terms.
 		CREATE INDEX IF NOT EXISTS commits_role_assignee_idx ON commits (org, (record_json->>'assignee'))
 			WHERE collection = 'network.dimo.org.role';
+		-- The same, host-wide, for a caller asking what it holds.
+		CREATE INDEX IF NOT EXISTS commits_assignee_idx ON commits ((record_json->>'assignee'), collection)
+			WHERE collection IN ('network.dimo.org.role', 'network.dimo.delegation');
 		CREATE INDEX IF NOT EXISTS commits_exclusive_target_idx ON commits ((record_json->'permission'->0->>'target'))
 			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'dimo:exclusive') = 'array';
 		CREATE INDEX IF NOT EXISTS commits_target_idx ON commits (org, (record_json->'permission'->0->>'target'))
@@ -392,6 +395,10 @@ func (s *PostgresStore) Roles(ctx context.Context, org, member string) ([]Stored
 		return nil, err
 	}
 	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.org.role' AND r.record_json->>'assignee' = $2`, org, member)
+}
+
+func (s *PostgresStore) Assigned(ctx context.Context, collection, assignee string) ([]Stored, error) {
+	return s.queryStored(ctx, `h.collection = $1 AND r.record_json->>'assignee' = $2`, collection, assignee)
 }
 
 func (s *PostgresStore) Exclusives(ctx context.Context, vehicle string, at time.Time) ([]Stored, error) {

@@ -505,3 +505,46 @@ func TestStore_DelegationsWithBasis(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_Assigned(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			a, b := newOrg(t, s), newOrg(t, s)
+			member := a + "-member"
+			roles, delegations := "network.dimo.org.role", "network.dimo.delegation"
+			add := func(org, op, coll, rkey, record string) {
+				t.Helper()
+				head, err := s.Head(ctx, org)
+				require.NoError(t, err)
+				require.NoError(t, s.AppendAfter(ctx, head, commit(org, head, op, coll, rkey, record, "")))
+			}
+			add(a, repo.OpCreate, roles, "r1", `{"assignee":"`+member+`"}`)
+			add(a, repo.OpCreate, roles, "r2", `{"assignee":"did:dimo:someone"}`)
+			add(b, repo.OpCreate, roles, "r3", `{"assignee":"`+member+`"}`)
+			add(b, repo.OpTombstone, roles, "r3", "")
+			add(b, repo.OpCreate, delegations, "d1", `{"assignee":"`+member+`"}`)
+
+			got, err := s.Assigned(ctx, roles, member)
+			require.NoError(t, err)
+			uris := []string{}
+			for _, st := range got {
+				uris = append(uris, st.URI)
+			}
+			assert.ElementsMatch(t, []string{"at://" + a + "/" + roles + "/r1", "at://" + b + "/" + roles + "/r3"}, uris,
+				"both repositories, tombstones included")
+			for _, st := range got {
+				assert.Equal(t, st.RKey == "r3", !st.Live())
+			}
+
+			got, err = s.Assigned(ctx, delegations, member)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			assert.Equal(t, "d1", got[0].RKey)
+
+			got, err = s.Assigned(ctx, roles, "did:dimo:nobody")
+			require.NoError(t, err)
+			assert.Empty(t, got)
+		})
+	}
+}
