@@ -466,38 +466,134 @@ func (s *Server) checkTombstone(ctx context.Context, org, caller string, cur *st
 	}
 }
 
-// checkRead decides whether caller may read org's repository (plan §3.4): the
-// org itself, or a member holding any live role. The control openings, and the
-// commit log that carries them, need org:admin. Scoping a member's reads to
-// their role's covers is not done in v1.
-func (s *Server) checkRead(ctx context.Context, org, caller, collection string) error {
+// reader is what one caller may read in one org's repository (spec §6.2).
+// The org itself and holders of org:admin read everything. Any other member
+// reads the records they wrote, and, through each org:read role they hold,
+// the records inside that role's scope; no other ability implies reading.
+// The control openings and the commit log that carries them are org:admin's
+// alone.
+type reader struct {
+	s      *Server
+	org    string
+	caller string
+	at     time.Time
+	all    bool
+	scopes []delegation.Covers
+}
+
+// reader resolves caller's read access to org. A caller holding no role there
+// is refused outright; one whose roles grant no reads gets a reader that
+// admits only their own records.
+func (s *Server) reader(ctx context.Context, org, caller string) (*reader, error) {
 	if _, err := s.repo.Store.GetOrg(ctx, org); err != nil {
-		return err
+		return nil, err
 	}
+	r := &reader{s: s, org: org, caller: caller, at: s.repo.now()}
 	if caller == org {
-		return nil
+		r.all = true
+		return r, nil
 	}
 	if party, err := s.resolver.Party(ctx, org); err != nil {
-		return err
+		return nil, err
 	} else if !party.CanHaveMembers() {
-		return forbidden("%s cannot have members", org)
+		return nil, forbidden("%s cannot have members", org)
 	}
-	roles, err := s.evaluator().HeldRoles(ctx, org, caller, s.repo.now())
+	roles, err := s.evaluator().HeldRoles(ctx, org, caller, r.at)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(roles) == 0 {
-		return forbidden("%s holds no role in %s", caller, org)
+		return nil, forbidden("%s holds no role in %s", caller, org)
 	}
-	if collection == delegation.CollectionVehicleControl || collection == "" {
-		for i := range roles {
-			if slices.Contains(roles[i].Record.Abilities, delegation.AbilityOrgAdmin) {
-				return nil
+	for i := range roles {
+		switch abilities := roles[i].Record.Abilities; {
+		case slices.Contains(abilities, delegation.AbilityOrgAdmin):
+			r.all = true
+		case slices.Contains(abilities, delegation.AbilityOrgRead):
+			r.scopes = append(r.scopes, roles[i].Record.Covers)
+		}
+	}
+	return r, nil
+}
+
+// requireAdmin refuses a caller who does not read everything: the control
+// openings and the log are not scoped.
+func (r *reader) requireAdmin() error {
+	if r.all {
+		return nil
+	}
+	return forbidden("%s needs %s in %s to read this", r.caller, delegation.AbilityOrgAdmin, r.org)
+}
+
+// canRead reports whether the caller may read one record of the repository.
+func (r *reader) canRead(ctx context.Context, uri, collection string, record json.RawMessage, committedBy string) (bool, error) {
+	if r.all {
+		return true, nil
+	}
+	if collection == delegation.CollectionVehicleControl {
+		return false, nil
+	}
+	if committedBy == r.caller {
+		return true, nil
+	}
+	if len(r.scopes) == 0 {
+		return false, nil
+	}
+	targets, err := recordScope(uri, collection, record)
+	if err != nil {
+		return false, err
+	}
+	return r.covers(ctx, targets...)
+}
+
+// covers reports whether any of the caller's read scopes includes any target.
+func (r *reader) covers(ctx context.Context, targets ...delegation.Covers) (bool, error) {
+	ev := r.s.evaluator()
+	for _, scope := range r.scopes {
+		for _, target := range targets {
+			ok, err := ev.RoleScopeCovers(ctx, scope, target, r.at)
+			if err != nil || ok {
+				return ok, err
 			}
 		}
-		return forbidden("%s needs %s in %s to read this", caller, delegation.AbilityOrgAdmin, org)
 	}
-	return nil
+	return false, nil
+}
+
+// canReadStored is canRead for a committed record.
+func (r *reader) canReadStored(ctx context.Context, st *store.Stored) (bool, error) {
+	return r.canRead(ctx, st.URI, st.Collection, st.Record, st.CommittedBy)
+}
+
+// recordScope is what a record is about, as role scopes are written: a
+// delegation or role by what it covers, a tag by itself, a membership by its
+// tag and by its vehicle, custody by its vehicle. A record that covers by
+// inheritance is in no scope narrower than the whole org.
+func recordScope(uri, collection string, record json.RawMessage) ([]delegation.Covers, error) {
+	switch collection {
+	case delegation.CollectionDelegation, delegation.CollectionRole:
+		rec, err := odrl.Decode(record)
+		if err != nil {
+			return nil, err
+		}
+		return []delegation.Covers{rec.Covers}, nil
+	case delegation.CollectionTag:
+		return []delegation.Covers{{Tag: uri}}, nil
+	case delegation.CollectionTagMembership:
+		var m delegation.MembershipRecord
+		if err := json.Unmarshal(record, &m); err != nil {
+			return nil, err
+		}
+		return []delegation.Covers{{Tag: m.Tag}, {Vehicle: m.Vehicle}}, nil
+	case delegation.CollectionCustody:
+		var p delegation.CustodyPeriod
+		if err := json.Unmarshal(record, &p); err != nil {
+			return nil, err
+		}
+		return []delegation.Covers{{Vehicle: p.Vehicle}}, nil
+	default:
+		return nil, nil
+	}
 }
 
 // parseSince reads an RFC 3339 time.

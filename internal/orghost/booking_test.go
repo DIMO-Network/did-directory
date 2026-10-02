@@ -99,8 +99,9 @@ func TestBookingServiceDrivesTheHost(t *testing.T) {
 			roadsideURI := "at://" + org + "/" + delegation.CollectionDelegation + "/bk-1:roadside:roadside:inc-1"
 			valetURI := "at://" + org + "/" + delegation.CollectionDelegation + "/valet"
 			legKey := booking.CustodyKey("bk-1", day(10))
+			// Counted as the org: the booking service reads only what it wrote.
 			delegations := func() int {
-				status, body := h.do(http.MethodGet, "/orgs/"+org+"/"+delegation.CollectionDelegation, backend, nil)
+				status, body := h.do(http.MethodGet, "/orgs/"+org+"/"+delegation.CollectionDelegation, org, nil)
 				require.Equal(t, http.StatusOK, status, body)
 				return len(body["records"].([]any))
 			}

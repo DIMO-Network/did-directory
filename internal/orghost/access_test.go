@@ -86,6 +86,28 @@ func (h *host) control(car, controller string) {
 	require.Equal(h.t, http.StatusCreated, status, body)
 }
 
+// records returns the records in a collection that as can list.
+func (a *avis) records(collection, as string) []map[string]any {
+	a.t.Helper()
+	status, body := a.do(http.MethodGet, "/orgs/"+a.org+"/"+collection, as, nil)
+	require.Equal(a.t, http.StatusOK, status, body)
+	out := []map[string]any{}
+	for _, r := range body["records"].([]any) {
+		out = append(out, r.(map[string]any))
+	}
+	return out
+}
+
+// listed returns the URIs of the records in a collection that as can list.
+func (a *avis) listed(collection, as string) []string {
+	a.t.Helper()
+	out := []string{}
+	for _, r := range a.records(collection, as) {
+		out = append(out, r["uri"].(string))
+	}
+	return out
+}
+
 func (a *avis) path(collection, rkey string) string {
 	return "/orgs/" + a.org + "/" + collection + "/" + rkey
 }
@@ -151,9 +173,18 @@ func TestAvisActions(t *testing.T) {
 				assert.Equal(t, http.StatusForbidden, status, body)
 				status, body = a.approve(id, alice)
 				assert.Equal(t, http.StatusForbidden, status, body, "alice's role does not cover financed-fc")
-				status, body = a.do(http.MethodGet, "/orgs/"+a.org+"/pending", carol, nil)
-				require.Equal(t, http.StatusOK, status, body)
-				assert.Len(t, body["pending"], 1)
+				// The pending list shows each member what they wrote or could
+				// approve, nothing else.
+				pending := func(as string) int {
+					t.Helper()
+					status, body := a.do(http.MethodGet, "/orgs/"+a.org+"/pending", as, nil)
+					require.Equal(t, http.StatusOK, status, body)
+					return len(body["pending"].([]any))
+				}
+				assert.Equal(t, 1, pending(carol), "carol may approve it")
+				assert.Equal(t, 1, pending(bob), "bob wrote it")
+				assert.Equal(t, 0, pending(alice), "outside alice's scope")
+				assert.Equal(t, 0, pending(dave), "dave issues no grants")
 				status, body = a.approve(id, carol)
 				require.Equal(t, http.StatusCreated, status, body)
 				status, body = a.approve(id, carol)
@@ -190,6 +221,8 @@ func TestAvisActions(t *testing.T) {
 				id = body["pending"].(string)
 				status, body = a.approve(id, a.org)
 				assert.Equal(t, http.StatusForbidden, status, body, "the org cannot approve its own write")
+				assert.Equal(t, 1, pending(carol), "carol may approve what she could not write")
+				assert.Equal(t, 0, pending(bob))
 				status, body = a.approve(id, bob)
 				assert.Equal(t, http.StatusForbidden, status, body, "bob's role does not cover ford-pro-enrolled")
 				status, body = a.approve(id, carol)
@@ -277,6 +310,87 @@ func TestAvisActions(t *testing.T) {
 				status, body = a.do(http.MethodGet, "/orgs/"+a.org+"/commits", carol, nil)
 				assert.Equal(t, http.StatusOK, status, body)
 				status, body = a.do(http.MethodGet, "/orgs/"+a.org+"/pending", fordCredit, nil)
+				assert.Equal(t, http.StatusForbidden, status, body)
+
+				// Without org:read a member reads only what they wrote (spec §6.2).
+				// A record out of reach is not found, as if it did not exist.
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "insurer"), dave, nil)
+				assert.Equal(t, http.StatusNotFound, status, body, "dave did not write the insurer's grant")
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "fordcredit"), bob, nil)
+				assert.Equal(t, http.StatusOK, status, body, "bob wrote the lien")
+				assert.ElementsMatch(t, []string{a.uri(delegation.CollectionDelegation, "fordcredit")}, a.listed(delegation.CollectionDelegation, bob))
+				assert.Empty(t, a.listed(delegation.CollectionDelegation, dave))
+
+				// An org:read role over fl-fleet reads the records about that tag and
+				// its cars: the insurer's grant and the tag itself, not the lien, not
+				// Ford Pro's grant, not another tag, and never the openings.
+				reader := a.org + "-reader"
+				// A role over a tag with more cars than this fixture's threshold of
+				// two waits for a second approval, here Carol's.
+				readRole := func(member string, covers delegation.Covers) {
+					t.Helper()
+					status, body := a.do(http.MethodPost, a.path(delegation.CollectionRole, ""), a.org, roleRecord(a.org, member, covers, delegation.AbilityOrgRead))
+					if status == http.StatusAccepted {
+						status, body = a.approve(body["pending"].(string), carol)
+					}
+					require.Equal(t, http.StatusCreated, status, body)
+				}
+				readRole(reader, fl)
+				assert.ElementsMatch(t, []string{insurerURI}, a.listed(delegation.CollectionDelegation, reader))
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "fordcredit"), reader, nil)
+				assert.Equal(t, http.StatusNotFound, status, body)
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionTag, "fl-fleet"), reader, nil)
+				assert.Equal(t, http.StatusOK, status, body)
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionTag, "financed-fc"), reader, nil)
+				assert.Equal(t, http.StatusNotFound, status, body)
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionVehicleControl, car1), reader, nil)
+				assert.Equal(t, http.StatusForbidden, status, body)
+				// Memberships: every one in fl-fleet, and those of other tags only
+				// for cars in fl-fleet now.
+				all := a.records(delegation.CollectionTagMembership, carol)
+				inFleet := map[string]bool{}
+				for _, m := range all {
+					rec := m["record"].(map[string]any)
+					if rec["tag"] == a.tag["fl-fleet"] && rec["leftAt"] == nil {
+						inFleet[rec["vehicle"].(string)] = true
+					}
+				}
+				want := []string{}
+				for _, m := range all {
+					rec := m["record"].(map[string]any)
+					if rec["tag"] == a.tag["fl-fleet"] || inFleet[rec["vehicle"].(string)] {
+						want = append(want, m["uri"].(string))
+					}
+				}
+				require.NotEmpty(t, want)
+				assert.ElementsMatch(t, want, a.listed(delegation.CollectionTagMembership, reader))
+
+				// Paging past records the reader may not see: one record a page, the
+				// last key as the cursor, ends with what one unpaged list shows.
+				paged, after := []string{}, ""
+				for range 20 {
+					status, body := a.do(http.MethodGet, "/orgs/"+a.org+"/"+delegation.CollectionDelegation+"?limit=1&after="+after, reader, nil)
+					require.Equal(t, http.StatusOK, status, body)
+					page := body["records"].([]any)
+					if len(page) == 0 {
+						break
+					}
+					require.Len(t, page, 1)
+					r := page[0].(map[string]any)
+					paged = append(paged, r["uri"].(string))
+					after = r["rkey"].(string)
+				}
+				assert.Equal(t, []string{insurerURI}, paged)
+				assert.Greater(t, len(a.listed(delegation.CollectionDelegation, carol)), 2, "the reader's grant is not the first key")
+
+				// An org-wide org:read role reads every record, still not the openings
+				// or the log.
+				wide := a.org + "-auditor"
+				readRole(wide, delegation.Covers{Inherit: true})
+				assert.ElementsMatch(t, a.listed(delegation.CollectionDelegation, carol), a.listed(delegation.CollectionDelegation, wide))
+				status, body = a.do(http.MethodGet, "/orgs/"+a.org+"/commits", wide, nil)
+				assert.Equal(t, http.StatusForbidden, status, body)
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionVehicleControl, car1), wide, nil)
 				assert.Equal(t, http.StatusForbidden, status, body)
 			})
 

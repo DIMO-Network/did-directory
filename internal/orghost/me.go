@@ -20,7 +20,7 @@ type HeldRole struct {
 // on this host. Every other route starts from an org, and members are not
 // listed in DID documents (spec §6.3), so without this a member has no way to
 // learn which orgs to ask. Only roles the evaluator holds live are listed, in
-// orgs that can have members, which is what checkRead admits.
+// orgs that can have members, which a reader requires too.
 func (s *Server) myRoles(c *fiber.Ctx) error {
 	me := caller(c)
 	assigned, err := s.repo.Store.Assigned(c.Context(), delegation.CollectionRole, me)

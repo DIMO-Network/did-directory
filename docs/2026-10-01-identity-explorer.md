@@ -35,7 +35,7 @@ Nor should the directory look DIDs up by `alsoKnownAs`. The field is whatever th
 The private graph is not indexed centrally. A caller signs in with their DID through dauth, gets an identity token whose audience is the org host, and asks the org host directly. What they see is exactly what that token can already read:
 
 - **As an org admin:** the fleet (`vehicleControl` openings), tags and memberships over time, every outbound delegation and role, pending approvals, the commit log.
-- **As a member with a narrower role:** what the role's read scope admits (see gap 2 below).
+- **As a member with a narrower role:** what they wrote, plus what an `org:read` role's scope admits (see gap 2 below).
 - **As a grantee:** their inbound delegations, and for each covered vehicle a coverage proof that opens its commitment. A grantee learns about the cars it covers and nothing else.
 - **As an issuer, including a person who owns one car:** everything below each grant they gave, resolved per vehicle. That answers "who can see my car". It holds at every level: if Ford Pro redelegates its grant to an integrator, Ford Pro issued the integrator's grant, so it sees that grant and everything below it. Its child grants are records in its own repository, and `/descendants` on each of them reaches the rest.
 
@@ -66,9 +66,19 @@ Add two routes, scoped to the caller:
 
 ### Gap 2: scoped reads
 
-Spec §6.2 says the repository is "readable only by org members holding `org:admin` or a scoped read role". The org host is looser than that. `checkRead` (`internal/orghost/access.go:473`) lets any role holder read delegations, tags and memberships; only `vehicleControl` and the log need `org:admin`. Its comment records the gap ("Scoping a member's reads to their role's covers is not done in v1"). So a booking service's role, which exists only to write rental grants, can list every partner agreement and every tag membership.
+Spec §6.2 says the repository is "readable only by org members holding `org:admin` or a scoped read role". The org host used to be looser: any role holder could read delegations, roles, tags, memberships and custody, and a booking service's role, which exists only to write rental grants, could list every partner agreement and every tag membership.
 
-This is a deviation from the spec, not a missing feature, and it exists today whether or not an app is built. An app that lets members browse the repository only makes it visible: the first member who opens it sees everything. Reads should take an ability: `org:read`, say, with `scope` limiting which tags and collections. Roles without it would read nothing but their own records.
+**Built**, with these rules (decided 2026-10-02):
+
+- **`org:admin` and the org itself read everything**, the control openings and the commit log included.
+- **`org:read` reads within the role's existing scope.** No new scope field: a role over a tag reads that tag, its memberships, and the delegations, roles and custody over the tag or over a car in it now; a role over one car reads what is about that car; an org-wide role reads every record. `org:read` never reaches the openings or the log.
+- **Every member reads what they wrote** (the record's current version is theirs). The booking SDK reads back its own records, so a booking role needs no `org:read`.
+- **No other ability implies reading.** `delegation:create`, `org:members` and `tag:write` grant writes only.
+- **Pending writes** are listed to their author, to anyone who could read them once committed, and to anyone holding the authority to approve them (the managing ability over the record's scope, or `tag:write` over a membership's tag).
+- **A record out of reach is 404**, as if it did not exist, since its key alone can name a car or a partner. A member with no role at all is still 403.
+- **Lists** fill each page with readable records, reading past the rest, so the last record's key stays the cursor. A scoped reader of a large repository pays for the records it skips.
+
+The code is the `reader` in `internal/orghost/access.go`.
 
 ### Gap 3: one view per vehicle, and per received grant
 
@@ -90,7 +100,7 @@ This is a deviation from the spec, not a missing feature, and it exists today wh
 ## Order of work
 
 1. **`/me/roles` and `/me/delegations`.** Built (see gap 1). Without them no app could start.
-2. **Scoped reads.** This brings the host back in line with spec §6.2, so it is due regardless. It must land before any app lets members browse a repository.
+2. **Scoped reads.** Built (see gap 2); the host now matches spec §6.2.
 3. **The per-vehicle access view, and `/descendants` for recipients.** These are the views owners and partners will care about most.
 
 A browsing UI over all of this is optional, and not part of the replacement.

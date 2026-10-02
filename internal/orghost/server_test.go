@@ -324,7 +324,7 @@ func TestRepositoryFlow(t *testing.T) {
 			_, _, roleKey, err := delegation.ParseURI(roleURI)
 			require.NoError(t, err)
 			require.NoError(t, repo.ValidateTID(roleKey))
-			h.grantRole(org, roleRecord(org, bob, fleet, "delegation:create"))
+			h.grantRole(org, roleRecord(org, bob, fleet, "delegation:create", delegation.AbilityOrgRead))
 
 			// Alice updates the tag. Same key, so an update commit.
 			status, body = h.do(http.MethodPut, "/orgs/"+org+"/network.dimo.org.tag/fleet", alice, `{"name":"Fleet","description":"Every car"}`)
