@@ -98,6 +98,8 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		-- heads is what picks the current one.
 		CREATE INDEX IF NOT EXISTS commits_membership_idx ON commits (org, (record_json->>'tag'), (record_json->>'vehicle'))
 			WHERE collection = 'network.dimo.org.tagMembership';
+		CREATE INDEX IF NOT EXISTS commits_membership_vehicle_idx ON commits (org, (record_json->>'vehicle'))
+			WHERE collection = 'network.dimo.org.tagMembership';
 		CREATE INDEX IF NOT EXISTS commits_custody_idx ON commits ((record_json->>'vehicle'), (record_json->>'holder'))
 			WHERE collection = 'network.dimo.org.custody';
 		-- Delegations and roles are ODRL policies: to is the assignee, covers is
@@ -411,12 +413,35 @@ func (s *PostgresStore) Exclusives(ctx context.Context, vehicle string, at time.
 				AND m.record_json->>'vehicle' = $1 AND `+memberAtSQL("$2")+`))`, vehicle, at)
 }
 
-func (s *PostgresStore) DelegationsOverTag(ctx context.Context, org, tag string) ([]Stored, error) {
+func (s *PostgresStore) DelegationsOver(ctx context.Context, org, target string) ([]Stored, error) {
 	if _, err := s.head(ctx, s.pool, org); err != nil {
 		return nil, err
 	}
 	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
-		AND r.record_json->'permission'->0->>'target' = $2`, org, tag)
+		AND r.record_json->'permission'->0->>'target' = $2`, org, target)
+}
+
+func (s *PostgresStore) VehicleTags(ctx context.Context, org, vehicle string) ([]string, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT r.record_json->>'tag' `+storedFrom+`
+		WHERE h.org = $1 AND h.collection = 'network.dimo.org.tagMembership' AND h.tombstone_seq IS NULL
+			AND r.record_json->>'vehicle' = $2
+		ORDER BY 1`, org, vehicle)
+	if err != nil {
+		return nil, fmt.Errorf("query vehicle tags: %w", err)
+	}
+	defer rows.Close()
+	tags := []string{}
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, fmt.Errorf("scan vehicle tag: %w", err)
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
 }
 
 func (s *PostgresStore) DelegationsWithBasis(ctx context.Context, uri string) ([]Stored, error) {

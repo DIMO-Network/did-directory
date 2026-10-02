@@ -362,7 +362,7 @@ func (s *Server) checkMembershipWrite(ctx context.Context, w *write) error {
 
 // delegationsOverTag returns the live delegations covering tag, parsed.
 func (s *Server) delegationsOverTag(ctx context.Context, org, tag string) ([]delegation.Stored, error) {
-	sts, err := s.repo.Store.DelegationsOverTag(ctx, org, tag)
+	sts, err := s.repo.Store.DelegationsOver(ctx, org, tag)
 	if err != nil {
 		return nil, err
 	}

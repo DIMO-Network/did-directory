@@ -86,6 +86,15 @@ func (h *host) control(car, controller string) {
 	require.Equal(h.t, http.StatusCreated, status, body)
 }
 
+// keys returns a map's keys.
+func keys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // records returns the records in a collection that as can list.
 func (a *avis) records(collection, as string) []map[string]any {
 	a.t.Helper()
@@ -392,6 +401,55 @@ func TestAvisActions(t *testing.T) {
 				assert.Equal(t, http.StatusForbidden, status, body)
 				status, body = a.do(http.MethodGet, a.path(delegation.CollectionVehicleControl, car1), wide, nil)
 				assert.Equal(t, http.StatusForbidden, status, body)
+			})
+
+			t.Run("who can reach a car", func(t *testing.T) {
+				a.clock = day(5)
+				access := func(car, as string) (int, map[string]any, map[string]map[string]any) {
+					t.Helper()
+					status, body := a.do(http.MethodGet, "/orgs/"+a.org+"/vehicles/"+car+"/access", as, nil)
+					byURI := map[string]map[string]any{}
+					if list, ok := body["access"].([]any); ok {
+						for _, d := range list {
+							d := d.(map[string]any)
+							byURI[d["uri"].(string)] = d
+						}
+					}
+					return status, body, byURI
+				}
+
+				// car1 is in all three tags: each partner's grant reaches it, and
+				// Ford Pro's integrator one step further down, in Ford Pro's own
+				// repository.
+				status, body, got := access(car1, a.org)
+				require.Equal(t, http.StatusOK, status, body)
+				assert.ElementsMatch(t, []any{a.tag["fl-fleet"], a.tag["financed-fc"], a.tag["ford-pro-enrolled"]}, body["tags"])
+				assert.ElementsMatch(t, []string{insurerURI, fcURI, fordProURI, integratorURI}, keys(got))
+				for _, uri := range []string{insurerURI, fcURI, fordProURI} {
+					assert.Equal(t, float64(1), got[uri]["depth"], uri)
+				}
+				assert.Equal(t, float64(2), got[integratorURI]["depth"])
+				assert.Equal(t, []any{fordProURI}, got[integratorURI]["basis"])
+				for uri, d := range got {
+					assert.Nil(t, d["refused"], uri)
+					assert.NotNil(t, d["coverage"], uri)
+				}
+
+				// car3 is only in fl-fleet.
+				status, body, got = access(car3, carol)
+				require.Equal(t, http.StatusOK, status, body)
+				assert.Equal(t, []any{a.tag["fl-fleet"]}, body["tags"])
+				assert.ElementsMatch(t, []string{insurerURI}, keys(got))
+
+				// It is the org's view, and org:admin's; a scoped reader does not get it.
+				status, body, _ = access(car1, alice)
+				assert.Equal(t, http.StatusForbidden, status, body)
+				status, body, _ = access(car1, a.org+"-reader")
+				assert.Equal(t, http.StatusForbidden, status, body)
+				status, body, _ = access(car1, fordPro)
+				assert.Equal(t, http.StatusForbidden, status, body)
+				status, body, _ = access("not-a-did", a.org)
+				assert.Equal(t, http.StatusBadRequest, status, body)
 			})
 
 			t.Run("staff are customers too", func(t *testing.T) {

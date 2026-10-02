@@ -304,67 +304,151 @@ type Descendant struct {
 // (plan §3.4): every delegation on this host that chains from the given one,
 // breadth first to the chain depth limit, each resolved over the vehicle. It
 // is for the delegation's from, the owner who consented, so they can see
-// every party with access to their car through it. A descendant that no
-// longer evaluates is still listed, with the reason, since a record that
-// names the consent is part of what the owner is entitled to see.
+// every party with access to their car through it, and for its to, so a
+// recipient that passed the grant on sees what it passed on. That shows the
+// recipient nothing it does not already reach: a descendant that evaluates
+// was issued by the recipient or below one of its grants. A descendant that
+// no longer evaluates is still listed, with the reason, since a record that
+// names the grant is part of what either party is entitled to see.
 func (s *Server) descendants(c *fiber.Ctx) error {
 	org, _, rkey := params(c)
 	vehicle := strings.Clone(c.Query("vehicle"))
 	if !isDID(vehicle) {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "vehicle must be a DID"})
 	}
-	if caller(c) != org {
-		return s.fail(c, forbidden("only %s may list the descendants of its delegations", org))
-	}
 	cur, err := s.repo.Get(c.Context(), org, delegation.CollectionDelegation, rkey)
 	if err != nil {
 		return s.fail(c, err)
 	}
+	st, err := stored(org, cur)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	if by := caller(c); by != org && by != st.Record.To {
+		return s.fail(c, forbidden("only %s or %s may list the descendants of this delegation", org, st.Record.To))
+	}
 
 	at := s.repo.now()
-	ev := s.evaluator()
+	out, err := s.walkDescendants(c.Context(), []string{cur.URI}, vehicle, at, map[string]bool{cur.URI: true})
+	if err != nil {
+		return s.fail(c, err)
+	}
+	return c.JSON(fiber.Map{"root": cur.URI, "vehicle": vehicle, "at": at, "descendants": out})
+}
+
+// walkDescendants lists every delegation on this host that chains from the
+// roots, breadth first to the chain depth limit, each resolved over vehicle
+// at time at. seen holds what is already listed, the roots included, so a
+// record reached twice is listed once.
+func (s *Server) walkDescendants(ctx context.Context, roots []string, vehicle string, at time.Time, seen map[string]bool) ([]Descendant, error) {
 	maxDepth := delegation.DefaultPolicy().MaxChainDepth
 	out := []Descendant{}
-	seen := map[string]bool{cur.URI: true}
-	frontier := []string{cur.URI}
+	frontier := roots
 	for depth := 2; depth <= maxDepth && len(frontier) > 0; depth++ {
 		var next []string
 		for _, uri := range frontier {
-			sts, err := s.repo.Store.DelegationsWithBasis(c.Context(), uri)
+			sts, err := s.repo.Store.DelegationsWithBasis(ctx, uri)
 			if err != nil {
-				return s.fail(c, err)
+				return nil, err
 			}
 			for i := range sts {
 				if seen[sts[i].URI] {
 					continue
 				}
 				seen[sts[i].URI] = true
-				descOrg, _, _, err := delegation.ParseURI(sts[i].URI)
+				d, err := s.resolveOver(ctx, &sts[i], depth, vehicle, at)
 				if err != nil {
-					return s.fail(c, err)
-				}
-				st, err := stored(descOrg, &sts[i])
-				if err != nil {
-					return s.fail(c, err)
-				}
-				d := Descendant{
-					URI: st.URI, From: st.Record.From, To: st.Record.To, Depth: depth,
-					Basis: st.Record.Basis, Covers: st.Record.Covers, Abilities: st.Record.Abilities, Purpose: st.Record.Purpose,
-				}
-				cov, err := ev.Coverage(c.Context(), st.URI, vehicle, at)
-				switch {
-				case err == nil:
-					d.Coverage = cov
-				case errors.Is(err, ErrResolve):
-					return s.fail(c, err)
-				default:
-					d.Refused = codeOf(err)
+					return nil, err
 				}
 				out = append(out, d)
-				next = append(next, st.URI)
+				next = append(next, d.URI)
 			}
 		}
 		frontier = next
 	}
-	return c.JSON(fiber.Map{"root": cur.URI, "vehicle": vehicle, "at": at, "descendants": out})
+	return out, nil
+}
+
+// resolveOver describes one delegation and what it gives over vehicle at time
+// at, or why it gives nothing.
+func (s *Server) resolveOver(ctx context.Context, sto *store.Stored, depth int, vehicle string, at time.Time) (Descendant, error) {
+	org, _, _, err := delegation.ParseURI(sto.URI)
+	if err != nil {
+		return Descendant{}, err
+	}
+	st, err := stored(org, sto)
+	if err != nil {
+		return Descendant{}, err
+	}
+	d := Descendant{
+		URI: st.URI, From: st.Record.From, To: st.Record.To, Depth: depth,
+		Basis: st.Record.Basis, Covers: st.Record.Covers, Abilities: st.Record.Abilities, Purpose: st.Record.Purpose,
+	}
+	cov, err := s.evaluator().Coverage(ctx, st.URI, vehicle, at)
+	switch {
+	case err == nil:
+		d.Coverage = cov
+	case errors.Is(err, ErrResolve):
+		return Descendant{}, err
+	default:
+		d.Refused = codeOf(err)
+	}
+	return d, nil
+}
+
+// vehicleAccess serves GET /orgs/:org/vehicles/:vehicle/access: who the org
+// has given a way to the vehicle. The roots are the org's live delegations
+// over the vehicle itself or over any tag it has a membership in, current or
+// ended, since a grant over a tag the car has left still reaches the history
+// it gathered there. Below each root is everything that chains from it, as
+// /descendants lists it, each resolved over the vehicle now. It is for the
+// org and for org:admin, who read every root already.
+//
+// Roles are not listed: a member acts for the org, under its grants, not as a
+// party of their own.
+func (s *Server) vehicleAccess(c *fiber.Ctx) error {
+	org, _, _ := params(c)
+	vehicle := strings.Clone(c.Params("vehicle"))
+	if !isDID(vehicle) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "vehicle must be a DID"})
+	}
+	r, err := s.reader(c.Context(), org, caller(c))
+	if err != nil {
+		return s.fail(c, err)
+	}
+	if err := r.requireAdmin(); err != nil {
+		return s.fail(c, err)
+	}
+	tags, err := s.repo.Store.VehicleTags(c.Context(), org, vehicle)
+	if err != nil {
+		return s.fail(c, err)
+	}
+
+	at := s.repo.now()
+	out := []Descendant{}
+	seen := map[string]bool{}
+	var roots []string
+	for _, target := range append([]string{vehicle}, tags...) {
+		sts, err := s.repo.Store.DelegationsOver(c.Context(), org, target)
+		if err != nil {
+			return s.fail(c, err)
+		}
+		for i := range sts {
+			if seen[sts[i].URI] {
+				continue
+			}
+			seen[sts[i].URI] = true
+			d, err := s.resolveOver(c.Context(), &sts[i], 1, vehicle, at)
+			if err != nil {
+				return s.fail(c, err)
+			}
+			out = append(out, d)
+			roots = append(roots, d.URI)
+		}
+	}
+	below, err := s.walkDescendants(c.Context(), roots, vehicle, at, seen)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	return c.JSON(fiber.Map{"vehicle": vehicle, "at": at, "tags": tags, "access": append(out, below...)})
 }

@@ -304,9 +304,21 @@ func TestDescendants(t *testing.T) {
 			require.Equal(t, http.StatusOK, status, body)
 			assert.Equal(t, map[string]any{toLender: CodeNotCovered, toAnalytics: CodeNotCovered, toIntegrator: CodeNotNarrowing}, refusals(body))
 
-			// Only the owner sees this; and it takes a vehicle and a real record.
+			// The recipient sees the same list: what it passed on, and what
+			// others wrote naming its grant. Nobody further down sees the root's.
 			status, body = h.do(http.MethodGet, path+"?vehicle="+car, dealer, nil)
+			require.Equal(t, http.StatusOK, status, body)
+			assert.Len(t, body["descendants"], 3)
+			status, body = h.do(http.MethodGet, path+"?vehicle="+car, lender, nil)
 			assert.Equal(t, http.StatusForbidden, status, body)
+			// The lender, recipient of the dealer's grant, sees below that one.
+			status, body = h.do(http.MethodGet, "/orgs/"+dealer+"/delegations/lender/descendants?vehicle="+car, lender, nil)
+			require.Equal(t, http.StatusOK, status, body)
+			assert.Equal(t, map[string]any{toAnalytics: nil}, refusals(body))
+			status, body = h.do(http.MethodGet, "/orgs/"+dealer+"/delegations/lender/descendants?vehicle="+car, analytics, nil)
+			assert.Equal(t, http.StatusForbidden, status, body)
+
+			// It takes a vehicle and a real record.
 			status, body = h.do(http.MethodGet, path, owner, nil)
 			assert.Equal(t, http.StatusBadRequest, status, body)
 			status, body = h.do(http.MethodGet, "/orgs/"+owner+"/delegations/nothing/descendants?vehicle="+car, owner, nil)

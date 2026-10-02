@@ -6,7 +6,7 @@ The old identity-api showed every object in DIMO and how they related: vehicles,
 
 Under the delegation design, that is no longer true. Spec design goal 7 makes it a requirement: **fleet composition is private**. Nothing public may tell an observer which cars an org controls. An index of the whole graph, open to everyone, is exactly what the design forbids. This note proposes what replaces it.
 
-## What is readable today
+## What was readable on October 1
 
 | Where | What | Who can read it |
 |---|---|---|
@@ -17,6 +17,8 @@ Under the delegation design, that is no longer true. Spec design goal 7 makes it
 | **org host**: `/orgs/:org/delegations/:rkey/descendants` | Every live delegation below one root, resolved over a vehicle (spec §9.3) | The org that issued the root |
 
 Every org host route takes a dauth identity token (`sub` = DID, `aud` = the host), checked by `JWKSAuthenticator` against `IDENTITY_AUDIENCE`.
+
+Since then (gaps 1 to 3 below): repository reads are scoped, so a member reads what they wrote and what an `org:read` role's scope admits; `/me/roles` and `/me/delegations` answer for the caller across the host; `/descendants` also answers the root's recipient; and `/orgs/:org/vehicles/:vehicle/access` lists everyone the org has given a way to one car.
 
 ## Proposal
 
@@ -87,6 +89,11 @@ The code is the `reader` in `internal/orghost/access.go`.
 - **"Who can reach this car?"** for the controller. They would have to find every root first: delegations naming the vehicle, delegations over every tag it was ever a member of, and exclusive holds. Add `GET /orgs/:org/vehicles/:vehicle/access` for the org or `org:admin`, which does that walk and returns each path with its evaluation, as `/descendants` does. `Exclusives` and `DelegationsOverTag` already provide most of the lookups.
 - **"What did we pass on from this grant?"** for a recipient that redelegated it. `/descendants` answers only the org whose repository holds the root, and the grant Ford Pro received sits in RentalCo's repository, so Ford Pro is refused. It has to list its own delegations, pick those whose basis is the grant, and call `/descendants` on each. Letting the recipient (`caller == record.to`) call `/descendants` on the grant it received returns the same set in one call. That shows it nothing new: a child that evaluates must be issued by its parent's recipient (`evaluate.go`, `child.From != parent.To`), so every working descendant is Ford Pro's own or below one of its grants. The listing also includes records that do not evaluate, with their refusal codes. Anyone can write one naming any basis, and the root's issuer already sees those.
 
+**Built:**
+
+- **`GET /orgs/:org/vehicles/:vehicle/access`**, for the org and `org:admin`. Its roots are the org's live delegations over the vehicle itself or over any tag it has a membership in, current or ended (a grant over a tag the car has left still reaches the history gathered there). Below each root it lists everything that chains from it, as `/descendants` does, each resolved over the vehicle now with coverage or a refusal code, and it says which tags it looked through. It does not list exclusive holds from other repositories: a hold over a car its issuer does not control does not evaluate, and the org's own holds are among its delegations already. Nor does it list roles: a member acts for the org, under its grants. The store gained `VehicleTags`, and `DelegationsOverTag` became `DelegationsOver`, since it already matched a vehicle target as well as a tag.
+- **`/descendants` for the recipient.** The root's `to` may now call it, as well as the org that holds the root. The listing is otherwise unchanged.
+
 ## What happens to the rest of the identity-api
 
 | Old object | Replacement |
@@ -101,6 +108,6 @@ The code is the `reader` in `internal/orghost/access.go`.
 
 1. **`/me/roles` and `/me/delegations`.** Built (see gap 1). Without them no app could start.
 2. **Scoped reads.** Built (see gap 2); the host now matches spec §6.2.
-3. **The per-vehicle access view, and `/descendants` for recipients.** These are the views owners and partners will care about most.
+3. **The per-vehicle access view, and `/descendants` for recipients.** Built (see gap 3).
 
 A browsing UI over all of this is optional, and not part of the replacement.

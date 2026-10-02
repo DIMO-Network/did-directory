@@ -174,9 +174,13 @@ type Store interface {
 	// caller's to check.
 	Exclusives(ctx context.Context, vehicle string, at time.Time) ([]Stored, error)
 
-	// DelegationsOverTag returns org's live delegation records whose target
-	// is tag: the records a membership in the tag widens.
-	DelegationsOverTag(ctx context.Context, org, tag string) ([]Stored, error)
+	// DelegationsOver returns org's live delegation records whose target is
+	// target, a tag or a vehicle. Over a tag, they are the records a membership
+	// in the tag widens.
+	DelegationsOver(ctx context.Context, org, target string) ([]Stored, error)
+	// VehicleTags returns the tags in org that vehicle has a live membership
+	// record in, current or ended, sorted.
+	VehicleTags(ctx context.Context, org, vehicle string) ([]string, error)
 	// DelegationsWithBasis returns the live delegation records, from every
 	// repository on this host, whose basis names uri: its direct descendants
 	// (spec §9.3).
