@@ -181,6 +181,10 @@ type Store interface {
 	// VehicleTags returns the tags in org that vehicle has a live membership
 	// record in, current or ended, sorted.
 	VehicleTags(ctx context.Context, org, vehicle string) ([]string, error)
+	// TagVehicles returns the vehicles with a live membership record in org's
+	// tag, current or ended, sorted: the cars a delegation over the tag may
+	// reach. Whether one does is the evaluator's call.
+	TagVehicles(ctx context.Context, org, tag string) ([]string, error)
 	// DelegationsWithBasis returns the live delegation records, from every
 	// repository on this host, whose basis names uri: its direct descendants
 	// (spec §9.3).

@@ -579,6 +579,18 @@ func TestStore_VehicleTags(t *testing.T) {
 			assert.Empty(t, got)
 			_, err = s.VehicleTags(ctx, "did:dimo:nobody", car)
 			assert.True(t, IsNotFound(err))
+
+			got, err = s.TagVehicles(ctx, org, tag("fleet"))
+			require.NoError(t, err)
+			assert.Equal(t, []string{car}, got, "two memberships, one car")
+			got, err = s.TagVehicles(ctx, org, tag("alpha"))
+			require.NoError(t, err)
+			assert.Equal(t, []string{car}, got, "an ended membership still counts")
+			got, err = s.TagVehicles(ctx, org, tag("gone"))
+			require.NoError(t, err)
+			assert.Empty(t, got, "a tombstoned membership does not")
+			_, err = s.TagVehicles(ctx, "did:dimo:nobody", tag("fleet"))
+			assert.True(t, IsNotFound(err))
 		})
 	}
 }

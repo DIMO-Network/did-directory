@@ -444,6 +444,29 @@ func (s *PostgresStore) VehicleTags(ctx context.Context, org, vehicle string) ([
 	return tags, rows.Err()
 }
 
+func (s *PostgresStore) TagVehicles(ctx context.Context, org, tag string) ([]string, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT r.record_json->>'vehicle' `+storedFrom+`
+		WHERE h.org = $1 AND h.collection = 'network.dimo.org.tagMembership' AND h.tombstone_seq IS NULL
+			AND r.record_json->>'tag' = $2
+		ORDER BY 1`, org, tag)
+	if err != nil {
+		return nil, fmt.Errorf("query tag vehicles: %w", err)
+	}
+	defer rows.Close()
+	vehicles := []string{}
+	for rows.Next() {
+		var vehicle string
+		if err := rows.Scan(&vehicle); err != nil {
+			return nil, fmt.Errorf("scan tag vehicle: %w", err)
+		}
+		vehicles = append(vehicles, vehicle)
+	}
+	return vehicles, rows.Err()
+}
+
 func (s *PostgresStore) DelegationsWithBasis(ctx context.Context, uri string) ([]Stored, error) {
 	return s.queryStored(ctx, `h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
 		AND jsonb_typeof(r.record_json->'dimo:basis') = 'array' AND r.record_json->'dimo:basis' ? $1`, uri)

@@ -18,7 +18,7 @@ Under the delegation design, that is no longer true. Spec design goal 7 makes it
 
 Every org host route takes a dauth identity token (`sub` = DID, `aud` = the host), checked by `JWKSAuthenticator` against `IDENTITY_AUDIENCE`.
 
-Since then (gaps 1 to 3 below): repository reads are scoped, so a member reads what they wrote and what an `org:read` role's scope admits; `/me/roles` and `/me/delegations` answer for the caller across the host; `/descendants` also answers the root's recipient; and `/orgs/:org/vehicles/:vehicle/access` lists everyone the org has given a way to one car.
+Since then (gaps 1 to 4 below): repository reads are scoped, so a member reads what they wrote and what an `org:read` role's scope admits; `/me/roles` and `/me/delegations` answer for the caller across the host; `/descendants` also answers the root's recipient; and `/orgs/:org/vehicles/:vehicle/access` lists everyone the org has given a way to one car. A grant's recipient can list the cars it covers (`/orgs/:org/delegations/:rkey/vehicles`).
 
 ## Proposal
 
@@ -94,6 +94,12 @@ The code is the `reader` in `internal/orghost/access.go`.
 - **`GET /orgs/:org/vehicles/:vehicle/access`**, for the org and `org:admin`. Its roots are the org's live delegations over the vehicle itself or over any tag it has a membership in, current or ended (a grant over a tag the car has left still reaches the history gathered there). Below each root it lists everything that chains from it, as `/descendants` does, each resolved over the vehicle now with coverage or a refusal code, and it says which tags it looked through. It does not list exclusive holds from other repositories: a hold over a car its issuer does not control does not evaluate, and the org's own holds are among its delegations already. Nor does it list roles: a member acts for the org, under its grants. The store gained `VehicleTags`, and `DelegationsOverTag` became `DelegationsOver`, since it already matched a vehicle target as well as a tag.
 - **`/descendants` for the recipient.** The root's `to` may now call it, as well as the org that holds the root. The listing is otherwise unchanged.
 
+### Gap 4: which cars does my grant cover?
+
+Found on October 3 by calling the API as each party in the demo. A grant over a tag names no vehicle, and every route that answers a grantee (`/proof`, `/authorize`, `/me/delegations?vehicle=`) starts from one. The insurer, FleetCo, the lender and the integrator could see their grants but not which cars to ask about. FleetCo is there to lock and unlock enrolled cars and had no way to find them.
+
+**Built:** `GET /orgs/:org/delegations/:rkey/vehicles[?after=&limit=]`, for the delegation's `to` and the org that holds it, as `/proof` is. Its candidates are the grant's vehicle, its tag's members past and present (`Store.TagVehicles`), or for `covers.inherit` its bases' candidates, across repositories on this host. Each candidate is evaluated now and only covered cars are listed, each with its coverage, so the recipient learns the cars its grant reaches and nothing else. A car sold under `afterTransfer: drop`, or that left the tag under `afterRemoval: drop`, is not there. Pages are ordered by vehicle DID and filled with covered cars. Each page evaluates every candidate up to the cursor it reaches, so a grant over a large tag pays per car.
+
 ## What happens to the rest of the identity-api
 
 | Old object | Replacement |
@@ -109,5 +115,6 @@ The code is the `reader` in `internal/orghost/access.go`.
 1. **`/me/roles` and `/me/delegations`.** Built (see gap 1). Without them no app could start.
 2. **Scoped reads.** Built (see gap 2); the host now matches spec §6.2.
 3. **The per-vehicle access view, and `/descendants` for recipients.** Built (see gap 3).
+4. **A grant's vehicles.** Built (see gap 4).
 
 A browsing UI over all of this is optional, and not part of the replacement.

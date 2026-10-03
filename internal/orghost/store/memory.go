@@ -450,6 +450,23 @@ func (s *MemoryStore) VehicleTags(_ context.Context, org, vehicle string) ([]str
 	return tags, nil
 }
 
+func (s *MemoryStore) TagVehicles(_ context.Context, org, tag string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	vehicles := []string{}
+	o.each("network.dimo.org.tagMembership", func(_ Stored, rec map[string]any) {
+		if field(rec, "tag") == tag && !slices.Contains(vehicles, field(rec, "vehicle")) {
+			vehicles = append(vehicles, field(rec, "vehicle"))
+		}
+	})
+	sort.Strings(vehicles)
+	return vehicles, nil
+}
+
 func (s *MemoryStore) DelegationsWithBasis(_ context.Context, uri string) ([]Stored, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

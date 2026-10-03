@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -334,6 +335,99 @@ func (s *Server) descendants(c *fiber.Ctx) error {
 		return s.fail(c, err)
 	}
 	return c.JSON(fiber.Map{"root": cur.URI, "vehicle": vehicle, "at": at, "descendants": out})
+}
+
+// vehicles serves GET /orgs/:org/delegations/:rkey/vehicles[?after=&limit=]:
+// the vehicles the delegation covers now, each with what it gives there. A
+// grant over a tag, or one inheriting such a grant, names no vehicle, and
+// /proof, /authorize and /me/delegations?vehicle= all start from one, so
+// without this its recipient cannot learn which cars it may ask about. It is
+// for the delegation's to and for the org that holds it, as /proof is.
+//
+// Only vehicles the delegation covers are listed: a recipient learns about
+// the cars its grant reaches and nothing else, so a car that left the tag
+// under afterRemoval drop, or was sold under afterTransfer drop, is not
+// there. Pages are ordered by vehicle DID and filled with covered vehicles,
+// reading past the rest, so the last vehicle is the cursor for the next.
+func (s *Server) vehicles(c *fiber.Ctx) error {
+	org, _, rkey := params(c)
+	cur, err := s.repo.Get(c.Context(), org, delegation.CollectionDelegation, rkey)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	st, err := stored(org, cur)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	if by := caller(c); by != org && by != st.Record.To {
+		return s.fail(c, forbidden("only %s or %s may list the vehicles of this delegation", st.Record.To, org))
+	}
+
+	candidates, err := s.candidates(c.Context(), &st.Record, 1)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	at := s.repo.now()
+	ev := s.evaluator()
+	after, limit := c.Query("after"), s.limit(c)
+	out := []*delegation.Coverage{}
+	for _, vehicle := range candidates {
+		if vehicle <= after {
+			continue
+		}
+		cov, err := ev.Coverage(c.Context(), st.URI, vehicle, at)
+		switch {
+		case err == nil:
+			out = append(out, cov)
+		case errors.Is(err, ErrResolve):
+			return s.fail(c, err)
+		}
+		if len(out) == limit {
+			break
+		}
+	}
+	return c.JSON(fiber.Map{"delegation": st.URI, "at": at, "vehicles": out})
+}
+
+// candidates is every vehicle rec could cover, sorted: its vehicle, its tag's
+// members past and present, or for covers.inherit the candidates of its
+// bases, as the evaluator follows them. A tag in a repository this host does
+// not serve has no candidates here, as it has no memberships to the
+// evaluator.
+func (s *Server) candidates(ctx context.Context, rec *delegation.Record, depth int) ([]string, error) {
+	switch {
+	case rec.Covers.Vehicle != "":
+		return []string{rec.Covers.Vehicle}, nil
+	case rec.Covers.Tag != "":
+		org, err := delegation.TagAuthority(rec.Covers.Tag)
+		if err != nil {
+			return nil, err
+		}
+		vehicles, err := s.repo.Store.TagVehicles(ctx, org, rec.Covers.Tag)
+		if store.IsNotFound(err) {
+			return nil, nil
+		}
+		return vehicles, err
+	case depth >= delegation.DefaultPolicy().MaxChainDepth:
+		return nil, nil
+	}
+	var all []string
+	for _, uri := range rec.Basis {
+		parent, err := s.resolver.Record(ctx, uri)
+		if store.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		vehicles, err := s.candidates(ctx, &parent.Record, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, vehicles...)
+	}
+	sort.Strings(all)
+	return slices.Compact(all), nil
 }
 
 // walkDescendants lists every delegation on this host that chains from the

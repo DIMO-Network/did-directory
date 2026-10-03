@@ -117,6 +117,7 @@ func New(o Options) *fiber.App {
 	orgs.Post("/:org/revoke-authored-by", s.revokeAuthoredBy)
 	orgs.Get("/:org/delegations/:rkey/proof", s.proof)
 	orgs.Get("/:org/delegations/:rkey/descendants", s.descendants)
+	orgs.Get("/:org/delegations/:rkey/vehicles", s.vehicles)
 	orgs.Get("/:org/vehicles/:vehicle/access", s.vehicleAccess)
 	orgs.Post("/:org/:collection", s.create)
 	orgs.Get("/:org/:collection", s.list)

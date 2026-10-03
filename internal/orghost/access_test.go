@@ -452,6 +452,52 @@ func TestAvisActions(t *testing.T) {
 				assert.Equal(t, http.StatusBadRequest, status, body)
 			})
 
+			t.Run("what a grant reaches", func(t *testing.T) {
+				a.clock = day(5)
+				// The vehicles a grant covers now, by DID, for its recipient and
+				// the org that holds it.
+				reaches := func(org, rkey, as, query string) (int, map[string]any, []string) {
+					t.Helper()
+					status, body := a.do(http.MethodGet, "/orgs/"+org+"/delegations/"+rkey+"/vehicles"+query, as, nil)
+					cars := []string{}
+					if list, ok := body["vehicles"].([]any); ok {
+						for _, v := range list {
+							v := v.(map[string]any)
+							cars = append(cars, v["vehicle"].(string))
+							assert.NotEmpty(t, v["historical"], "each comes with what the grant gives there")
+						}
+					}
+					return status, body, cars
+				}
+				status, body, cars := reaches(a.org, "insurer", insurer, "")
+				require.Equal(t, http.StatusOK, status, body)
+				assert.Equal(t, insurerURI, body["delegation"])
+				assert.Equal(t, []string{car1, car2, car3}, cars, "every car in fl-fleet")
+				_, _, cars = reaches(a.org, "fordcredit", fordCredit, "")
+				assert.Equal(t, []string{car1}, cars)
+				_, _, cars = reaches(a.org, "fordpro", fordPro, "")
+				assert.Equal(t, []string{car1}, cars)
+				// covers.inherit reaches what its basis does, across repositories.
+				_, _, cars = reaches(fordPro, "integrator", integrator, "")
+				assert.Equal(t, []string{car1}, cars)
+				_, _, cars = reaches(a.org, "insurer", a.org, "")
+				assert.Equal(t, []string{car1, car2, car3}, cars, "the org may ask too")
+
+				// Pages are filled with covered cars; the last is the cursor.
+				_, _, cars = reaches(a.org, "insurer", insurer, "?limit=2")
+				assert.Equal(t, []string{car1, car2}, cars)
+				_, _, cars = reaches(a.org, "insurer", insurer, "?limit=2&after="+car2)
+				assert.Equal(t, []string{car3}, cars)
+
+				// Nobody else, not even org:admin: it is the recipient's view.
+				for _, as := range []string{carol, alice, fordCredit} {
+					status, body, _ = reaches(a.org, "insurer", as, "")
+					assert.Equal(t, http.StatusForbidden, status, "%s: %v", as, body)
+				}
+				status, body, _ = reaches(a.org, "nope", insurer, "")
+				assert.Equal(t, http.StatusNotFound, status, body)
+			})
+
 			t.Run("staff are customers too", func(t *testing.T) {
 				a.clock = day(5)
 				status, body := a.do(http.MethodPut, a.path(delegation.CollectionDelegation, "alice-self"), alice, a.grant(alice, fl, "telemetry:read"))
@@ -538,6 +584,11 @@ func TestAvisActions(t *testing.T) {
 				status, body = a.authorize(day(7), integratorURI, integrator, car1, "telemetry:read")
 				require.Equal(t, http.StatusForbidden, status, body)
 				assert.Equal(t, CodeRevoked, body["code"], "the integrator's delegation dies with it")
+
+				// The revoked grant reaches no car.
+				status, body = a.do(http.MethodGet, "/orgs/"+a.org+"/delegations/fordpro/vehicles", fordPro, nil)
+				require.Equal(t, http.StatusOK, status, body)
+				assert.Empty(t, body["vehicles"])
 			})
 
 			t.Run("Alice leaves", func(t *testing.T) {
@@ -626,6 +677,16 @@ func TestAvisActions(t *testing.T) {
 				w := window(t, body, "telemetry:read")
 				assert.True(t, w.Contains(day(5)))
 				assert.False(t, w.Contains(day(12)))
+
+				// The insurer's grant keeps history, so car1 is still among its
+				// cars; the lien drops at transfer, so the lender's list is empty.
+				a.clock = day(13)
+				status, body = a.do(http.MethodGet, "/orgs/"+a.org+"/delegations/insurer/vehicles", insurer, nil)
+				require.Equal(t, http.StatusOK, status, body)
+				assert.Equal(t, car1, body["vehicles"].([]any)[0].(map[string]any)["vehicle"])
+				status, body = a.do(http.MethodGet, "/orgs/"+a.org+"/delegations/fordcredit/vehicles", fordCredit, nil)
+				require.Equal(t, http.StatusOK, status, body)
+				assert.Empty(t, body["vehicles"])
 			})
 		})
 	}
