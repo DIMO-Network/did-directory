@@ -18,7 +18,7 @@ Under the delegation design, that is no longer true. Spec design goal 7 makes it
 
 Every org host route takes a dauth identity token (`sub` = DID, `aud` = the host), checked by `JWKSAuthenticator` against `IDENTITY_AUDIENCE`.
 
-Since then (gaps 1 to 4 below): repository reads are scoped, so a member reads what they wrote and what an `org:read` role's scope admits; `/me/roles` and `/me/delegations` answer for the caller across the host; `/descendants` also answers the root's recipient; and `/orgs/:org/vehicles/:vehicle/access` lists everyone the org has given a way to one car. A grant's recipient can list the cars it covers (`/orgs/:org/delegations/:rkey/vehicles`).
+Since then (gaps 1 to 5 below): repository reads are scoped, so a member reads what they wrote and what an `org:read` role's scope admits; `/me/roles` and `/me/delegations` answer for the caller across the host; `/descendants` also answers the root's recipient; and `/orgs/:org/vehicles/:vehicle/access` lists everyone the org has given a way to one car. A grant's recipient can list the cars it covers (`/orgs/:org/delegations/:rkey/vehicles`) and read the grant itself, and the recipient-only routes answer anyone else as if the grant did not exist.
 
 ## Proposal
 
@@ -100,6 +100,12 @@ Found on October 3 by calling the API as each party in the demo. A grant over a 
 
 **Built:** `GET /orgs/:org/delegations/:rkey/vehicles[?after=&limit=]`, for the delegation's `to` and the org that holds it, as `/proof` is. Its candidates are the grant's vehicle, its tag's members past and present (`Store.TagVehicles`), or for `covers.inherit` its bases' candidates, across repositories on this host. Each candidate is evaluated now and only covered cars are listed, each with its coverage, so the recipient learns the cars its grant reaches and nothing else. A car sold under `afterTransfer: drop`, or that left the tag under `afterRemoval: drop`, is not there. Pages are ordered by vehicle DID and filled with covered cars. Each page evaluates every candidate up to the cursor it reaches, so a grant over a large tag pays per car.
 
+### Gap 5: reading a grant addressed to you
+
+`/me/delegations` listed the renter's custody grant, but `GET` on its URI answered 403, because the renter holds no role in the org. **Built:** a delegation or role may be read by its assignee, tombstone included (410). A caller who is refused a reader gets the same refusal whether or not the key exists, so nobody else learns anything. Members benefit too: Alice can read her own role without `org:read`.
+
+The same walk-through found that `/proof` and `/descendants` refused outsiders with "only X or Y may ...", which confirms a guessed key and names both parties. They, and `/vehicles`, now answer 404 to anyone but the recipient and the org, as decision 29 already did for out-of-reach records.
+
 ## What happens to the rest of the identity-api
 
 | Old object | Replacement |
@@ -115,6 +121,6 @@ Found on October 3 by calling the API as each party in the demo. A grant over a 
 1. **`/me/roles` and `/me/delegations`.** Built (see gap 1). Without them no app could start.
 2. **Scoped reads.** Built (see gap 2); the host now matches spec §6.2.
 3. **The per-vehicle access view, and `/descendants` for recipients.** Built (see gap 3).
-4. **A grant's vehicles.** Built (see gap 4).
+4. **A grant's vehicles, and reading a grant addressed to you.** Built (see gaps 4 and 5).
 
 A browsing UI over all of this is optional, and not part of the replacement.

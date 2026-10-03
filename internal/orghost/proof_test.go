@@ -201,9 +201,9 @@ func TestCoverageProofAccess(t *testing.T) {
 	status, _, body := h.proof(custodyURI, car, org)
 	assert.Equal(t, http.StatusOK, status, body)
 	status, _, body = h.proof(custodyURI, car, valet)
-	assert.Equal(t, http.StatusForbidden, status, body)
+	assert.Equal(t, http.StatusNotFound, status, body, "as if there were no such grant")
 	status, _, body = h.proof(custodyURI, car, backend)
-	assert.Equal(t, http.StatusForbidden, status, body, "authoring a grant is not holding it")
+	assert.Equal(t, http.StatusNotFound, status, body, "authoring a grant is not holding it")
 	status, _ = h.get(path+"?vehicle="+car, "")
 	assert.Equal(t, http.StatusUnauthorized, status)
 	status, _ = h.get(path, renter)
@@ -310,13 +310,13 @@ func TestDescendants(t *testing.T) {
 			require.Equal(t, http.StatusOK, status, body)
 			assert.Len(t, body["descendants"], 3)
 			status, body = h.do(http.MethodGet, path+"?vehicle="+car, lender, nil)
-			assert.Equal(t, http.StatusForbidden, status, body)
+			assert.Equal(t, http.StatusNotFound, status, body)
 			// The lender, recipient of the dealer's grant, sees below that one.
 			status, body = h.do(http.MethodGet, "/orgs/"+dealer+"/delegations/lender/descendants?vehicle="+car, lender, nil)
 			require.Equal(t, http.StatusOK, status, body)
 			assert.Equal(t, map[string]any{toAnalytics: nil}, refusals(body))
 			status, body = h.do(http.MethodGet, "/orgs/"+dealer+"/delegations/lender/descendants?vehicle="+car, analytics, nil)
-			assert.Equal(t, http.StatusForbidden, status, body)
+			assert.Equal(t, http.StatusNotFound, status, body)
 
 			// It takes a vehicle and a real record.
 			status, body = h.do(http.MethodGet, path, owner, nil)

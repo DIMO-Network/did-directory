@@ -264,7 +264,9 @@ func (s *Server) proof(c *fiber.Ctx) error {
 		return s.fail(c, err)
 	}
 	if by := caller(c); by != org && by != st.Record.To {
-		return s.fail(c, forbidden("only %s or %s may fetch a proof of this delegation", st.Record.To, org))
+		// Not found, as for a key never written: a refusal would confirm the
+		// grant and name its parties to anyone who guessed the key.
+		return s.fail(c, store.ErrNotFound)
 	}
 
 	rec := s.recorder(s.repo.now())
@@ -326,7 +328,9 @@ func (s *Server) descendants(c *fiber.Ctx) error {
 		return s.fail(c, err)
 	}
 	if by := caller(c); by != org && by != st.Record.To {
-		return s.fail(c, forbidden("only %s or %s may list the descendants of this delegation", org, st.Record.To))
+		// Not found, as for a key never written: a refusal would confirm the
+		// grant and name its parties to anyone who guessed the key.
+		return s.fail(c, store.ErrNotFound)
 	}
 
 	at := s.repo.now()
@@ -360,7 +364,9 @@ func (s *Server) vehicles(c *fiber.Ctx) error {
 		return s.fail(c, err)
 	}
 	if by := caller(c); by != org && by != st.Record.To {
-		return s.fail(c, forbidden("only %s or %s may list the vehicles of this delegation", st.Record.To, org))
+		// Not found, as for a key never written: a refusal would confirm the
+		// grant and name its parties to anyone who guessed the key.
+		return s.fail(c, store.ErrNotFound)
 	}
 
 	candidates, err := s.candidates(c.Context(), &st.Record, 1)

@@ -489,12 +489,44 @@ func TestAvisActions(t *testing.T) {
 				_, _, cars = reaches(a.org, "insurer", insurer, "?limit=2&after="+car2)
 				assert.Equal(t, []string{car3}, cars)
 
-				// Nobody else, not even org:admin: it is the recipient's view.
+				// Nobody else, not even org:admin: it is the recipient's view. They
+				// are told what a key never written tells them, so a guessed key
+				// confirms no grant and names no partner.
+				status, missing, _ := reaches(a.org, "nope", insurer, "")
+				assert.Equal(t, http.StatusNotFound, status, missing)
 				for _, as := range []string{carol, alice, fordCredit} {
 					status, body, _ = reaches(a.org, "insurer", as, "")
-					assert.Equal(t, http.StatusForbidden, status, "%s: %v", as, body)
+					assert.Equal(t, http.StatusNotFound, status, "%s: %v", as, body)
+					assert.Equal(t, missing, body)
 				}
-				status, body, _ = reaches(a.org, "nope", insurer, "")
+			})
+
+			t.Run("recipients read their own records", func(t *testing.T) {
+				a.clock = day(5)
+				// The insurer holds no role in the org, but the grant is addressed
+				// to it.
+				status, body := a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "insurer"), insurer, nil)
+				require.Equal(t, http.StatusOK, status, body)
+				assert.Equal(t, insurerURI, body["uri"])
+				// Anything else is refused the same way, whether or not it exists.
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "fordcredit"), insurer, nil)
+				assert.Equal(t, http.StatusForbidden, status, body)
+				refused := body["error"]
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "nope"), insurer, nil)
+				assert.Equal(t, http.StatusForbidden, status, body)
+				assert.Equal(t, refused, body["error"], "no existence oracle")
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionTag, "fl-fleet"), insurer, nil)
+				assert.Equal(t, http.StatusForbidden, status, body, "only delegations and roles are addressed")
+
+				// A member reads the role addressed to them without org:read; a
+				// member who could not read it otherwise still gets 404.
+				roles, err := a.repo.Store.Roles(t.Context(), a.org, alice)
+				require.NoError(t, err)
+				require.Len(t, roles, 1)
+				rkey := roles[0].RKey
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionRole, rkey), alice, nil)
+				assert.Equal(t, http.StatusOK, status, body)
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionRole, rkey), dave, nil)
 				assert.Equal(t, http.StatusNotFound, status, body)
 			})
 
@@ -585,7 +617,11 @@ func TestAvisActions(t *testing.T) {
 				require.Equal(t, http.StatusForbidden, status, body)
 				assert.Equal(t, CodeRevoked, body["code"], "the integrator's delegation dies with it")
 
-				// The revoked grant reaches no car.
+				// The recipient still reads what it was given, as a tombstone, and
+				// it reaches no car.
+				status, body = a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "fordpro"), fordPro, nil)
+				assert.Equal(t, http.StatusGone, status, body)
+				assert.NotNil(t, body["tombstone"])
 				status, body = a.do(http.MethodGet, "/orgs/"+a.org+"/delegations/fordpro/vehicles", fordPro, nil)
 				require.Equal(t, http.StatusOK, status, body)
 				assert.Empty(t, body["vehicles"])

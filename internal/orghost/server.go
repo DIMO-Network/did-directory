@@ -14,6 +14,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -301,19 +302,41 @@ func (s *Server) tombstone(c *fiber.Ctx) error {
 
 func (s *Server) get(c *fiber.Ctx) error {
 	org, collection, rkey := params(c)
-	r, err := s.readerFor(c, org, collection)
-	if err != nil {
-		return s.fail(c, err)
+	// A delegation or role may also be read by its assignee, who need not be
+	// a member: /me lists it to them already. A caller refused a reader is
+	// refused the same way whether or not the key exists, so the exception
+	// tells nobody else anything.
+	addressed := collection == delegation.CollectionDelegation || collection == delegation.CollectionRole
+	r, refused := s.readerFor(c, org, collection)
+	if refused != nil && (!addressed || !errors.Is(refused, ErrForbidden)) {
+		return s.fail(c, refused)
 	}
 	st, err := s.repo.Get(c.Context(), org, collection, rkey)
 	if err != nil {
+		if refused != nil {
+			return s.fail(c, refused)
+		}
 		return s.fail(c, err)
+	}
+	ok := false
+	if r != nil {
+		if ok, err = r.canReadStored(c.Context(), st); err != nil {
+			return s.fail(c, err)
+		}
+	}
+	if !ok && addressed {
+		rec, err := odrl.Decode(st.Record)
+		if err != nil {
+			return s.fail(c, err)
+		}
+		ok = rec.To == caller(c)
 	}
 	// A record outside the caller's reach is not found, as one never written
 	// is: its key alone can name a vehicle or a partner.
-	if ok, err := r.canReadStored(c.Context(), st); err != nil {
-		return s.fail(c, err)
-	} else if !ok {
+	if !ok {
+		if refused != nil {
+			return s.fail(c, refused)
+		}
 		return s.fail(c, store.ErrNotFound)
 	}
 	if !st.Live() {
