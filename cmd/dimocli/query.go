@@ -20,7 +20,7 @@ func runQuery(args []string) {
 	dauth := fs.String("dauth", defaultDauth(), "dauth base URL, as dauth publishes it (its PUBLIC_BASE_URL)")
 	dq := fs.String("dq", defaultDQ(), "dq base URL, as dq checks DPoP proofs against (its PUBLIC_BASE_URL)")
 	didFlag := fs.String("did", "", "caller DID (its key must be in the keystore)")
-	grant := fs.String("grant", "", "at:// URI of the delegation to exercise")
+	grant := fs.String("grant", "", "at:// URI of the delegation to exercise; omit to act as the vehicle's controller")
 	vehicle := fs.String("vehicle", "", "vehicle DID")
 	abilities := fs.String("abilities", "", "abilities to request (comma-separated)")
 	client := fs.String("client", "", "app DID to attest as client_assertion (its key must be in the keystore)")
@@ -28,8 +28,8 @@ func runQuery(args []string) {
 	variables := fs.String("variables", "", "extra GraphQL variables as a JSON object")
 	_ = fs.Parse(args)
 
-	if *didFlag == "" || *grant == "" || *vehicle == "" || *abilities == "" || *query == "" {
-		fmt.Fprintln(os.Stderr, "Error: --did, --grant, --vehicle, --abilities and --query are required")
+	if *didFlag == "" || *vehicle == "" || *abilities == "" || *query == "" {
+		fmt.Fprintln(os.Stderr, "Error: --did, --vehicle, --abilities and --query are required")
 		os.Exit(1)
 	}
 	vars := map[string]any{}

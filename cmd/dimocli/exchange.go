@@ -29,7 +29,7 @@ func runExchange(args []string) {
 	fs := flag.NewFlagSet("exchange", flag.ExitOnError)
 	dauth := fs.String("dauth", defaultDauth(), "dauth base URL, as dauth publishes it (its PUBLIC_BASE_URL)")
 	didFlag := fs.String("did", "", "caller DID (its key must be in the keystore)")
-	grant := fs.String("grant", "", "at:// URI of the delegation to exercise")
+	grant := fs.String("grant", "", "at:// URI of the delegation to exercise; omit to act as the vehicle's controller")
 	vehicle := fs.String("vehicle", "", "vehicle DID")
 	abilities := fs.String("abilities", "", "abilities to request (comma-separated)")
 	audience := fs.String("audience", "", "audience to request (comma-separated; dauth's default otherwise)")
@@ -37,8 +37,8 @@ func runExchange(args []string) {
 	claims := fs.Bool("claims", false, "print the token's decoded claims instead of the token")
 	_ = fs.Parse(args)
 
-	if *didFlag == "" || *grant == "" || *vehicle == "" || *abilities == "" {
-		fmt.Fprintln(os.Stderr, "Error: --did, --grant, --vehicle and --abilities are required")
+	if *didFlag == "" || *vehicle == "" || *abilities == "" {
+		fmt.Fprintln(os.Stderr, "Error: --did, --vehicle and --abilities are required")
 		os.Exit(1)
 	}
 	req := exchangeRequest{Caller: *didFlag, Grant: *grant, Vehicle: *vehicle, Abilities: strings.Split(*abilities, ","), Client: *client}
@@ -106,7 +106,10 @@ func mintAccessToken(dauth string, req exchangeRequest) (*accessToken, error) {
 		return nil, fmt.Errorf("sign in as %s: %w", req.Caller, err)
 	}
 
-	body := map[string]any{"grant": req.Grant, "vehicle": req.Vehicle, "abilities": req.Abilities}
+	body := map[string]any{"vehicle": req.Vehicle, "abilities": req.Abilities}
+	if req.Grant != "" {
+		body["grant"] = req.Grant
+	}
 	if len(req.Audience) > 0 {
 		body["audience"] = req.Audience
 	}
