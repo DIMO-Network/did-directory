@@ -104,7 +104,7 @@ Found on October 3 by calling the API as each party in the demo. A grant over a 
 
 `/me/delegations` listed the renter's custody grant, but `GET` on its URI answered 403, because the renter holds no role in the org. **Built:** a delegation or role may be read by its assignee, tombstone included (410). A caller who is refused a reader gets the same refusal whether or not the key exists, so nobody else learns anything. Members benefit too: Alice can read her own role without `org:read`.
 
-The same walk-through found that `/proof` and `/descendants` refused outsiders with "only X or Y may ...", which confirms a guessed key and names both parties. They, and `/vehicles`, now answer 404 to anyone but the recipient and the org, as decision 29 already did for out-of-reach records.
+The same walk-through found that `/proof` and `/descendants` refused outsiders with "only X or Y may ...", which confirms a guessed key and names both parties. They, and `/vehicles`, now answer 404 to anyone but the recipient, the org and its `org:admin` (who reads every record already), as decision 29 already did for out-of-reach records.
 
 ## What happens to the rest of the identity-api
 

@@ -489,12 +489,15 @@ func TestAvisActions(t *testing.T) {
 				_, _, cars = reaches(a.org, "insurer", insurer, "?limit=2&after="+car2)
 				assert.Equal(t, []string{car3}, cars)
 
-				// Nobody else, not even org:admin: it is the recipient's view. They
-				// are told what a key never written tells them, so a guessed key
-				// confirms no grant and names no partner.
+				// The org's admin reads every record already, so may ask too.
+				_, _, cars = reaches(a.org, "insurer", carol, "")
+				assert.Equal(t, []string{car1, car2, car3}, cars, "org:admin")
+				// Nobody else: a scoped member, another partner. They are told
+				// what a key never written tells them, so a guessed key confirms
+				// no grant and names no partner.
 				status, missing, _ := reaches(a.org, "nope", insurer, "")
 				assert.Equal(t, http.StatusNotFound, status, missing)
-				for _, as := range []string{carol, alice, fordCredit} {
+				for _, as := range []string{alice, fordCredit} {
 					status, body, _ = reaches(a.org, "insurer", as, "")
 					assert.Equal(t, http.StatusNotFound, status, "%s: %v", as, body)
 					assert.Equal(t, missing, body)
