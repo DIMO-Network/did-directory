@@ -42,6 +42,8 @@ func main() {
 		runPubkey(args)
 	case "signin":
 		runSignin(args)
+	case "dpop":
+		runDPoP(args)
 	case "exchange":
 		runExchange(args)
 	case "query":
@@ -72,7 +74,9 @@ Commands:
   transfer     Transfer a controlled DID to a new controller (starts a new era)
   revoke-since Record a compromise window and rotate the custody key
   pubkey       Print the did:key public key for a local DID (--org for its #dimo_org key)
-  signin       Sign in to dauth as a local DID and print the identity token
+  signin       Sign in to dauth as a local DID and print the identity token: --scope
+               says what it may do, and it is bound to the DID's #signing key
+  dpop         Print the DPoP proof one request presenting a signin token must carry
   exchange     Sign in, prove the DID's key with DPoP and mint an access token from dauth
                for one delegation over one vehicle
   query        Mint an access token as exchange does, then send a GraphQL query to dq

@@ -29,7 +29,9 @@ func (h *host) send(method, path, token string, body any) (int, map[string]any, 
 	}
 	req := httptest.NewRequest(method, path, bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	if err := h.issuer.present(req, token); err != nil {
+		return 0, nil, err
+	}
 	resp, err := h.app.Test(req, -1)
 	if err != nil {
 		return 0, nil, err

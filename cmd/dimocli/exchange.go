@@ -101,7 +101,7 @@ func mintAccessToken(dauth string, req exchangeRequest) (*accessToken, error) {
 
 	// The identity token is addressed to the exchange, which refuses one
 	// addressed anywhere else.
-	identity, _, err := signIn(base, req.Caller, priv, "signing", []string{exchangeURL})
+	identity, _, err := signIn(base, req.Caller, priv, "signing", []string{exchangeURL}, "read")
 	if err != nil {
 		return nil, fmt.Errorf("sign in as %s: %w", req.Caller, err)
 	}
@@ -125,12 +125,14 @@ func mintAccessToken(dauth string, req exchangeRequest) (*accessToken, error) {
 		body["client_assertion"] = assertion
 	}
 
-	proof, err := dpopProof(priv, "POST", exchangeURL, "", time.Now())
+	// One key throughout: the identity token is bound to it, this proof
+	// presents the token, and the access token comes back bound to it too.
+	proof, err := dpopProof(priv, "POST", exchangeURL, identity, time.Now())
 	if err != nil {
 		return nil, fmt.Errorf("DPoP proof: %w", err)
 	}
 	out := &accessToken{key: priv}
-	headers := map[string]string{"Authorization": "Bearer " + identity, "DPoP": proof}
+	headers := map[string]string{"Authorization": "DPoP " + identity, "DPoP": proof}
 	if err := sendJSON("POST", exchangeURL, headers, body, out); err != nil {
 		return nil, fmt.Errorf("POST /exchange: %w", err)
 	}
