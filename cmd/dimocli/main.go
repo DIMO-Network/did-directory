@@ -52,6 +52,8 @@ func main() {
 		runBooking(args)
 	case "verify-proof":
 		runVerifyProof(args)
+	case "event":
+		runEvent(args)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
 		printUsage()
@@ -83,6 +85,8 @@ Commands:
                with it and a DPoP proof for the request
   booking      Sync an agreement JSON to the operator's org host as the booking service
   verify-proof Verify a coverage proof offline against the directory's keys and era log
+  event        Print a CloudEvent signed by a source (and by a did:key machine with
+               --machine-key), ready to send to din
 
 Environment:
   DIRECTORY_URL  Directory server URL (default: http://localhost:8080)
