@@ -1,4 +1,4 @@
-.PHONY: build run test lint fmt docker clean odrl-builder odrl-builder-serve
+.PHONY: build run test lint fmt docker clean odrl-builder odrl-builder-serve vectors
 
 BINARY := did-directory
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -19,6 +19,9 @@ test:
 # database once with `createdb org_host_test`.
 test-postgres:
 	ORG_HOST_TEST_DATABASE_URL="postgres://localhost:5432/org_host_test?sslmode=disable" go test -race -count=1 ./internal/orghost/...
+
+vectors:
+	go run ./cmd/didvectors -out testdata/vectors/did-ops.json
 
 lint:
 	golangci-lint run ./...
