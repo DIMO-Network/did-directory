@@ -24,7 +24,7 @@ func (h *host) get(path, as string) (int, []byte) {
 	h.t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	if as != "" {
-		req.Header.Set("Authorization", "Bearer "+h.issuer.identity(h.t, as))
+		require.NoError(h.t, h.issuer.present(req, h.issuer.identity(h.t, as)))
 	}
 	resp, err := h.app.Test(req, -1)
 	require.NoError(h.t, err)

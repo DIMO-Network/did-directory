@@ -16,7 +16,7 @@ Under the delegation design, that is no longer true. Spec design goal 7 makes it
 | **org host**: `/orgs/:org/delegations/:rkey/proof` | A coverage proof for one delegation over one vehicle, with the commitment opening for that vehicle only | The delegation's recipient, or the org |
 | **org host**: `/orgs/:org/delegations/:rkey/descendants` | Every live delegation below one root, resolved over a vehicle (spec §9.3) | The org that issued the root |
 
-Every org host route takes a dauth identity token (`sub` = DID, `aud` = the host), checked by `JWKSAuthenticator` against `IDENTITY_AUDIENCE`.
+Every org host route takes a dauth identity token (`sub` = DID, `aud` = the host), checked by `JWKSAuthenticator` against `IDENTITY_AUDIENCE`. Since 2026-10-09 the token carries a scope and is bound to a DPoP key (spec decision 31): an explorer signs in with `read` alone, which every route here needs and none of the writes accepts, and presents each request with a proof from its key.
 
 Since then (gaps 1 to 5 below): repository reads are scoped, so a member reads what they wrote and what an `org:read` role's scope admits; `/me/roles` and `/me/delegations` answer for the caller across the host; `/descendants` also answers the root's recipient; and `/orgs/:org/vehicles/:vehicle/access` lists everyone the org has given a way to one car. A grant's recipient can list the cars it covers (`/orgs/:org/delegations/:rkey/vehicles`) and read the grant itself, and the recipient-only routes answer anyone else as if the grant did not exist.
 
@@ -104,7 +104,7 @@ Found on October 3 by calling the API as each party in the demo. A grant over a 
 
 `/me/delegations` listed the renter's custody grant, but `GET` on its URI answered 403, because the renter holds no role in the org. **Built:** a delegation or role may be read by its assignee, tombstone included (410). A caller who is refused a reader gets the same refusal whether or not the key exists, so nobody else learns anything. Members benefit too: Alice can read her own role without `org:read`.
 
-The same walk-through found that `/proof` and `/descendants` refused outsiders with "only X or Y may ...", which confirms a guessed key and names both parties. They, and `/vehicles`, now answer 404 to anyone but the recipient and the org, as decision 29 already did for out-of-reach records.
+The same walk-through found that `/proof` and `/descendants` refused outsiders with "only X or Y may ...", which confirms a guessed key and names both parties. They, and `/vehicles`, now answer 404 to anyone but the recipient, the org and its `org:admin` (who reads every record already), as decision 29 already did for out-of-reach records.
 
 ## What happens to the rest of the identity-api
 

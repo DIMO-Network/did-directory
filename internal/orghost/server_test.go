@@ -28,6 +28,7 @@ import (
 	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 	"github.com/gofiber/fiber/v2"
@@ -37,17 +38,21 @@ import (
 )
 
 // issuer stands in for dauth: an RS256 key published as a JWKS, minting
-// identity tokens whose sub is a DID.
+// identity tokens whose sub is a DID. Every token it mints is bound to holder,
+// the one DPoP key the tests' callers share.
 type issuer struct {
-	key *rsa.PrivateKey
-	kid string
+	key    *rsa.PrivateKey
+	kid    string
+	holder *dpop.Key
 }
 
 func newIssuer(t *testing.T) *issuer {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	return &issuer{key: key, kid: "k1"}
+	holder, err := dpop.GenerateKey()
+	require.NoError(t, err)
+	return &issuer{key: key, kid: "k1", holder: holder}
 }
 
 func (i *issuer) jwks() []byte {
@@ -77,10 +82,36 @@ func (i *issuer) tokenWithHeader(t *testing.T, header, claims map[string]any) st
 	return signingInput + "." + b64(sig)
 }
 
-// identity mints a fresh token for did, valid for an hour.
+// allScopes is what the tests' callers sign in with unless a test is about
+// scope.
+const allScopes = "read write approve"
+
+// identity mints a fresh token for did with every scope, valid for an hour.
 func (i *issuer) identity(t *testing.T, did string) string {
+	return i.scoped(t, did, allScopes)
+}
+
+// scoped mints a fresh token for did carrying scope, valid for an hour.
+func (i *issuer) scoped(t *testing.T, did, scope string) string {
+	return i.token(t, i.claims(did, scope))
+}
+
+func (i *issuer) claims(did, scope string) map[string]any {
 	now := time.Now().Unix()
-	return i.token(t, map[string]any{"iss": "https://auth.test", "aud": hostAudience, "sub": did, "iat": now, "nbf": now, "exp": now + 3600})
+	return map[string]any{"iss": "https://auth.test", "aud": hostAudience, "sub": did, "iat": now, "nbf": now, "exp": now + 3600,
+		"scope": scope, "cnf": map[string]string{"jkt": i.holder.Thumbprint()}}
+}
+
+// present sets req's credentials: token under the DPoP scheme with a fresh
+// proof from the holder key.
+func (i *issuer) present(req *http.Request, token string) error {
+	proof, err := i.holder.Proof(req.Method, hostAudience+req.URL.Path, token, time.Now())
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "DPoP "+token)
+	req.Header.Set("DPoP", proof)
+	return nil
 }
 
 type host struct {
@@ -214,7 +245,7 @@ func (h *host) do(method, path, as string, body any) (int, map[string]any) {
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Content-Type", "application/json")
 	if as != "" {
-		req.Header.Set("Authorization", "Bearer "+h.issuer.identity(h.t, as))
+		require.NoError(h.t, h.issuer.present(req, h.issuer.identity(h.t, as)))
 	}
 	resp, err := h.app.Test(req, -1)
 	require.NoError(h.t, err)
@@ -611,56 +642,154 @@ func TestJWKSAuthenticator(t *testing.T) {
 	require.NoError(t, err)
 	ctx := t.Context()
 	now := time.Now().Unix()
-	good := map[string]any{"iss": "https://auth.test", "aud": hostAudience, "sub": "did:dimo:alice", "exp": now + 60}
+	good := iss.claims("did:dimo:alice", "write read")
+	const path = "/orgs/did:dimo:org/network.dimo.org.tag"
 
-	did, err := auth.Authenticate(ctx, "Bearer "+iss.token(t, good))
+	// cred presents token for a POST to path with a fresh proof from key.
+	cred := func(token string, key *dpop.Key) Credentials {
+		proof, err := key.Proof(http.MethodPost, hostAudience+path, token, time.Now())
+		require.NoError(t, err)
+		return Credentials{Authorization: "DPoP " + token, Proof: proof, Method: http.MethodPost, Path: path}
+	}
+
+	id, err := auth.Authenticate(ctx, cred(iss.token(t, good), iss.holder))
 	require.NoError(t, err)
-	assert.Equal(t, "did:dimo:alice", did)
-
-	// aud may be an array naming this host among others.
-	_, err = auth.Authenticate(ctx, "Bearer "+iss.token(t, map[string]any{
-		"iss": "https://auth.test", "aud": []string{"dq", hostAudience}, "sub": "did:dimo:alice", "exp": now + 60}))
-	require.NoError(t, err)
-
-	_, err = NewJWKSAuthenticator(iss.jwks(), "https://auth.test", "")
-	require.Error(t, err, "an authenticator without an audience accepts every relying party's tokens")
+	assert.Equal(t, Identity{DID: "did:dimo:alice", Scopes: []string{"read", "write"}}, id)
 
 	with := func(k string, v any) map[string]any {
 		out := map[string]any{}
 		for kk, vv := range good {
 			out[kk] = vv
 		}
-		out[k] = v
+		if v == nil {
+			delete(out, k)
+		} else {
+			out[k] = v
+		}
 		return out
 	}
+
+	// aud may be an array naming this host among others.
+	_, err = auth.Authenticate(ctx, cred(iss.token(t, with("aud", []string{"dq", hostAudience})), iss.holder))
+	require.NoError(t, err)
+
+	_, err = NewJWKSAuthenticator(iss.jwks(), "https://auth.test", "")
+	require.Error(t, err, "an authenticator without an audience accepts every relying party's tokens")
+
 	other := newIssuer(t)
-	for name, header := range map[string]string{
-		"no header":      "",
-		"not bearer":     "Basic abc",
-		"garbage":        "Bearer a.b",
-		"expired":        "Bearer " + iss.token(t, with("exp", now-120)),
-		"no exp":         "Bearer " + iss.token(t, with("exp", 0)),
-		"not yet valid":  "Bearer " + iss.token(t, with("nbf", now+600)),
-		"wrong issuer":   "Bearer " + iss.token(t, with("iss", "https://evil.test")),
-		"no audience":    "Bearer " + iss.token(t, with("aud", nil)),
-		"other audience": "Bearer " + iss.token(t, with("aud", "dimo")),
-		"audience list":  "Bearer " + iss.token(t, with("aud", []string{"dimo", "dq"})),
-		"sub not a DID":  "Bearer " + iss.token(t, with("sub", "0xabc")),
-		"other key":      "Bearer " + other.token(t, good),
-		"unknown kid":    "Bearer " + iss.tokenWithHeader(t, map[string]any{"alg": "RS256", "kid": "k2"}, good),
-		"alg none":       "Bearer " + iss.tokenWithHeader(t, map[string]any{"alg": "none", "kid": iss.kid}, good),
-		"alg HS256":      "Bearer " + iss.tokenWithHeader(t, map[string]any{"alg": "HS256", "kid": iss.kid}, good),
-		"tampered claim": "Bearer " + tamperClaims(t, iss.token(t, good), with("sub", "did:dimo:mallory")),
+	stranger, err := dpop.GenerateKey()
+	require.NoError(t, err)
+	token := iss.token(t, good)
+	replayed := cred(token, iss.holder)
+	_, err = auth.Authenticate(ctx, replayed)
+	require.NoError(t, err)
+	tokenCase := func(claims map[string]any) Credentials { return cred(iss.token(t, claims), iss.holder) }
+	for name, c := range map[string]Credentials{
+		"no header":      {Method: http.MethodPost, Path: path},
+		"not DPoP":       {Authorization: "Basic abc", Method: http.MethodPost, Path: path},
+		"bearer":         func() Credentials { c := cred(token, iss.holder); c.Authorization = "Bearer " + token; return c }(),
+		"garbage":        {Authorization: "DPoP a.b", Method: http.MethodPost, Path: path},
+		"expired":        tokenCase(with("exp", now-120)),
+		"no exp":         tokenCase(with("exp", 0)),
+		"not yet valid":  tokenCase(with("nbf", now+600)),
+		"wrong issuer":   tokenCase(with("iss", "https://evil.test")),
+		"no audience":    tokenCase(with("aud", nil)),
+		"other audience": tokenCase(with("aud", "dimo")),
+		"audience list":  tokenCase(with("aud", []string{"dimo", "dq"})),
+		"sub not a DID":  tokenCase(with("sub", "0xabc")),
+		"no scope":       tokenCase(with("scope", nil)),
+		"unknown scope":  tokenCase(with("scope", "read admin")),
+		"unbound":        tokenCase(with("cnf", nil)),
+		"other key":      cred(other.token(t, good), iss.holder),
+		"unknown kid":    cred(iss.tokenWithHeader(t, map[string]any{"alg": "RS256", "kid": "k2"}, good), iss.holder),
+		"alg none":       cred(iss.tokenWithHeader(t, map[string]any{"alg": "none", "kid": iss.kid}, good), iss.holder),
+		"alg HS256":      cred(iss.tokenWithHeader(t, map[string]any{"alg": "HS256", "kid": iss.kid}, good), iss.holder),
+		"tampered claim": cred(tamperClaims(t, token, with("sub", "did:dimo:mallory")), iss.holder),
+		// The token is fine; the proof is what fails.
+		"no proof":        func() Credentials { c := cred(token, iss.holder); c.Proof = ""; return c }(),
+		"copied token":    cred(token, stranger),
+		"replayed proof":  replayed,
+		"proof for a GET": func() Credentials { c := cred(token, iss.holder); c.Method = http.MethodGet; return c }(),
+		"proof for elsewhere": func() Credentials {
+			c := cred(token, iss.holder)
+			c.Path = "/orgs/did:dimo:org/pending/1/approve"
+			return c
+		}(),
+		"proof for another token": func() Credentials {
+			c := cred(iss.token(t, with("jti", "other")), iss.holder)
+			c.Authorization = "DPoP " + token
+			return c
+		}(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := auth.Authenticate(ctx, header)
+			_, err := auth.Authenticate(ctx, c)
 			assert.ErrorIs(t, err, ErrUnauthenticated)
 		})
 	}
 
 	// Leeway: a token a few seconds past exp still passes.
-	_, err = auth.Authenticate(ctx, "Bearer "+iss.token(t, with("exp", now-5)))
+	_, err = auth.Authenticate(ctx, tokenCase(with("exp", now-5)))
 	assert.NoError(t, err)
+}
+
+// TestScopes: each route takes only tokens carrying its scope, and refuses
+// the rest with 403 insufficient_scope before looking at anything else.
+func TestScopes(t *testing.T) {
+	h := newHost(t, store.NewMemoryStore())
+	org := newOrgDID()
+	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
+	require.Equal(t, http.StatusCreated, status, body)
+
+	send := func(method, path, scope string, body any) (int, map[string]any) {
+		t.Helper()
+		var reader io.Reader
+		if body != nil {
+			data, err := json.Marshal(body)
+			require.NoError(t, err)
+			reader = bytes.NewReader(data)
+		}
+		req := httptest.NewRequest(method, path, reader)
+		req.Header.Set("Content-Type", "application/json")
+		require.NoError(t, h.issuer.present(req, h.issuer.scoped(t, org, scope)))
+		resp, err := h.app.Test(req, -1)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	tags := "/orgs/" + org + "/network.dimo.org.tag"
+	tag := map[string]string{"name": "fleet"}
+
+	// A read token reads, and that is all.
+	status, _ = send(http.MethodGet, tags, "read", nil)
+	assert.Equal(t, http.StatusOK, status)
+	status, _ = send(http.MethodGet, "/me/delegations", "read", nil)
+	assert.Equal(t, http.StatusOK, status)
+	status, body = send(http.MethodPut, tags+"/fleet", "read", tag)
+	assert.Equal(t, http.StatusForbidden, status)
+	assert.Equal(t, "insufficient_scope", body["code"])
+	assert.Equal(t, "write", body["scope"])
+
+	// A write token writes but does not read, approve or register.
+	status, body = send(http.MethodPut, tags+"/fleet", "write", tag)
+	assert.Equal(t, http.StatusCreated, status, body)
+	status, _ = send(http.MethodGet, tags, "write", nil)
+	assert.Equal(t, http.StatusForbidden, status)
+	for _, path := range []string{"/orgs/" + org + "/pending/1/approve", "/orgs/" + org + "/revoke-authored-by", "/orgs/" + org} {
+		status, body = send(http.MethodPost, path, "read write", map[string]any{})
+		assert.Equal(t, http.StatusForbidden, status, path)
+		assert.Equal(t, "approve", body["scope"], path)
+	}
+	status, body = send(http.MethodDelete, tags+"/fleet", "write", nil)
+	assert.Equal(t, http.StatusOK, status, body)
+
+	// An approve token gets past the scope check on the routes behind it, and
+	// writes nothing else.
+	status, body = send(http.MethodPost, "/orgs/"+org+"/pending/nope/approve", "approve", map[string]any{})
+	assert.NotEqual(t, "insufficient_scope", body["code"], status)
+	status, _ = send(http.MethodPut, tags+"/fleet", "approve", tag)
+	assert.Equal(t, http.StatusForbidden, status)
 }
 
 func tamperClaims(t *testing.T, token string, claims map[string]any) string {

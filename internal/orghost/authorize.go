@@ -1,6 +1,7 @@
 package orghost
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -13,7 +14,8 @@ import (
 )
 
 // AuthorizeRequest is the body of POST /authorize (plan §3.3): the delegation
-// the caller is exercising, who they are, over which vehicle, for what.
+// the caller is exercising, who they are, over which vehicle, for what. With
+// no URI the caller is asking as the vehicle's controller.
 type AuthorizeRequest struct {
 	URI       string   `json:"uri"`
 	Caller    string   `json:"caller"`
@@ -88,7 +90,13 @@ func (s *Server) authorize(c *fiber.Ctx) error {
 
 	at := s.repo.now()
 	ev := &delegation.Evaluator{Resolver: s.resolver}
-	cov, err := ev.Authorize(c.Context(), req.URI, req.Caller, req.ClientID, req.Vehicle, req.Abilities, at)
+	var cov *delegation.Coverage
+	var err error
+	if req.URI == "" {
+		cov, err = s.authorizeController(c.Context(), ev, req, at)
+	} else {
+		cov, err = ev.Authorize(c.Context(), req.URI, req.Caller, req.ClientID, req.Vehicle, req.Abilities, at)
+	}
 	if err != nil {
 		return s.refuse(c, req.URI, err)
 	}
@@ -102,9 +110,35 @@ func (s *Server) authorize(c *fiber.Ctx) error {
 	return c.JSON(AuthorizeResponse{Coverage: cov, At: at})
 }
 
+// authorizeController answers a request that names no delegation: the caller
+// asks to use the vehicle as its controller, or as a member of an org that
+// controls it (spec §7, the implicit root). The orgs it may act for are those
+// that gave it a role on this host; the evaluator checks each role.
+func (s *Server) authorizeController(ctx context.Context, ev *delegation.Evaluator, req AuthorizeRequest, at time.Time) (*delegation.Coverage, error) {
+	roles, err := s.repo.Store.Assigned(ctx, delegation.CollectionRole, req.Caller)
+	if err != nil {
+		return nil, resolveErr(err)
+	}
+	var orgs []string
+	for i := range roles {
+		org, _, _, err := delegation.ParseURI(roles[i].URI)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(orgs, org) {
+			orgs = append(orgs, org)
+		}
+	}
+	return ev.AuthorizeController(ctx, req.Caller, orgs, req.Vehicle, req.Abilities, at)
+}
+
 func (r *AuthorizeRequest) validate() error {
-	if _, _, _, err := delegation.ParseURI(r.URI); err != nil {
-		return fmt.Errorf("uri: %w", err)
+	// No uri asks for the vehicle as its controller; a client allowlist is a
+	// delegation's, so there is none to check.
+	if r.URI != "" {
+		if _, _, _, err := delegation.ParseURI(r.URI); err != nil {
+			return fmt.Errorf("uri: %w", err)
+		}
 	}
 	if !isDID(r.Caller) {
 		return errors.New("caller must be a DID")

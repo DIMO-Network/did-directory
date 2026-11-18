@@ -30,6 +30,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/DIMO-Network/did-directory/pkg/odrl"
 )
 
@@ -50,6 +51,9 @@ type Client struct {
 	// It is called before every request, because tokens expire and a booking
 	// service runs for longer than one lasts. StaticToken wraps a fixed one.
 	Token func(ctx context.Context) (string, error)
+	// Key is the DPoP key the token is bound to (its cnf.jkt); it signs a
+	// proof for every request, without which the host refuses the token.
+	Key *dpop.Key
 	// HTTP is the client to send with; nil means http.DefaultClient.
 	HTTP *http.Client
 }
@@ -275,7 +279,15 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (int, []
 	if err != nil {
 		return 0, nil, fmt.Errorf("identity token: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if c.Key == nil {
+		return 0, nil, errors.New("booking: Client.Key is required: the host takes only DPoP-bound tokens")
+	}
+	proof, err := c.Key.Proof(method, req.URL.String(), token, time.Now())
+	if err != nil {
+		return 0, nil, fmt.Errorf("DPoP proof: %w", err)
+	}
+	req.Header.Set("Authorization", dpop.TokenType+" "+token)
+	req.Header.Set(dpop.HeaderName, proof)
 
 	httpClient := c.HTTP
 	if httpClient == nil {

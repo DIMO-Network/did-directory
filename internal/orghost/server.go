@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
+	"github.com/DIMO-Network/did-directory/pkg/identity"
 	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 	"github.com/gofiber/fiber/v2"
@@ -98,46 +101,76 @@ func New(o Options) *fiber.App {
 		return c.JSON(fiber.Map{"status": "ok"})
 	})
 
-	app.Post("/authorize", s.authenticate, s.authorize)
+	// Every route names the scope its token must carry (pkg/identity): reads
+	// read, writes write, and the acts behind a second look approve.
+	read, write, approve := s.needs(identity.ScopeRead), s.needs(identity.ScopeWrite), s.needs(identity.ScopeApprove)
+
+	app.Post("/authorize", s.authenticate, read, s.authorize)
 	parties := app.Group("/parties", s.authenticate)
-	parties.Get("/:did", s.getParty)
-	parties.Put("/:did", s.setParty)
+	parties.Get("/:did", read, s.getParty)
+	parties.Put("/:did", write, s.setParty)
 
 	me := app.Group("/me", s.authenticate)
-	me.Get("/roles", s.myRoles)
-	me.Get("/delegations", s.myDelegations)
+	me.Get("/roles", read, s.myRoles)
+	me.Get("/delegations", read, s.myDelegations)
 
 	orgs := app.Group("/orgs", s.authenticate)
-	orgs.Post("/:org", s.register)
-	orgs.Get("/:org", s.getOrg)
+	orgs.Post("/:org", approve, s.register)
+	orgs.Get("/:org", read, s.getOrg)
 	// Before /:org/:collection, which would otherwise capture them.
-	orgs.Get("/:org/commits", s.commits)
-	orgs.Get("/:org/pending", s.listPending)
-	orgs.Post("/:org/pending/:id/approve", s.approve)
-	orgs.Delete("/:org/pending/:id", s.withdraw)
-	orgs.Post("/:org/revoke-authored-by", s.revokeAuthoredBy)
-	orgs.Get("/:org/delegations/:rkey/proof", s.proof)
-	orgs.Get("/:org/delegations/:rkey/descendants", s.descendants)
-	orgs.Get("/:org/delegations/:rkey/vehicles", s.vehicles)
-	orgs.Get("/:org/vehicles/:vehicle/access", s.vehicleAccess)
-	orgs.Post("/:org/:collection", s.create)
-	orgs.Get("/:org/:collection", s.list)
-	orgs.Put("/:org/:collection/:rkey", s.put)
-	orgs.Get("/:org/:collection/:rkey", s.get)
-	orgs.Delete("/:org/:collection/:rkey", s.tombstone)
+	orgs.Get("/:org/commits", read, s.commits)
+	orgs.Get("/:org/pending", read, s.listPending)
+	orgs.Post("/:org/pending/:id/approve", approve, s.approve)
+	orgs.Delete("/:org/pending/:id", write, s.withdraw)
+	orgs.Post("/:org/revoke-authored-by", approve, s.revokeAuthoredBy)
+	orgs.Get("/:org/delegations/:rkey/proof", read, s.proof)
+	orgs.Get("/:org/delegations/:rkey/descendants", read, s.descendants)
+	orgs.Get("/:org/delegations/:rkey/vehicles", read, s.vehicles)
+	orgs.Get("/:org/vehicles/:vehicle/access", read, s.vehicleAccess)
+	orgs.Post("/:org/:collection", write, s.create)
+	orgs.Get("/:org/:collection", read, s.list)
+	orgs.Put("/:org/:collection/:rkey", write, s.put)
+	orgs.Get("/:org/:collection/:rkey", read, s.get)
+	orgs.Delete("/:org/:collection/:rkey", write, s.tombstone)
 	return app
 }
 
 const callerKey = "caller"
 
-// authenticate resolves the caller's DID into c.Locals(callerKey).
+const scopesKey = "scopes"
+
+// authenticate resolves the caller's DID into c.Locals(callerKey) and its
+// token's scopes into c.Locals(scopesKey).
 func (s *Server) authenticate(c *fiber.Ctx) error {
-	did, err := s.auth.Authenticate(c.Context(), c.Get(fiber.HeaderAuthorization))
+	id, err := s.auth.Authenticate(c.Context(), Credentials{
+		Authorization: c.Get(fiber.HeaderAuthorization),
+		Proof:         c.Get(dpop.HeaderName),
+		Method:        c.Method(),
+		Path:          strings.Clone(c.Path()),
+	})
 	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
+		c.Set(fiber.HeaderWWWAuthenticate, `DPoP error="invalid_token"`)
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error(), "code": "invalid_token"})
 	}
-	c.Locals(callerKey, strings.Clone(did))
+	c.Locals(callerKey, strings.Clone(id.DID))
+	c.Locals(scopesKey, id.Scopes)
 	return c.Next()
+}
+
+// needs refuses a token that does not carry scope, with 403
+// insufficient_scope, before the route looks at anything.
+func (s *Server) needs(scope string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		scopes, _ := c.Locals(scopesKey).([]string)
+		if !slices.Contains(scopes, scope) {
+			c.Set(fiber.HeaderWWWAuthenticate, fmt.Sprintf(`DPoP error="insufficient_scope", scope=%q`, scope))
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": fmt.Sprintf("this needs a token with scope %q; sign in again asking for it", scope),
+				"code":  "insufficient_scope", "scope": scope,
+			})
+		}
+		return c.Next()
+	}
 }
 
 func caller(c *fiber.Ctx) string {

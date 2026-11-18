@@ -18,13 +18,16 @@ import (
 // runSignin drives dauth's DID sign-in for a DID whose key is in the local
 // keystore: it asks for a challenge, signs it with the DID's #signing key (the
 // same r||s signature the directory checks on operations) and prints the
-// identity token, which is what the org host and dauth's /exchange take.
+// identity token, which is what the org host and dauth's /exchange take. The
+// token is bound to that same key as its DPoP key, so every request that
+// presents it carries a proof from the keystore (see `dimocli dpop`).
 func runSignin(args []string) {
 	fs := flag.NewFlagSet("signin", flag.ExitOnError)
 	dauth := fs.String("dauth", defaultDauth(), "dauth base URL")
 	didFlag := fs.String("did", "", "DID to sign in as (its key must be in the keystore)")
 	key := fs.String("key", "signing", "verification method fragment to sign with")
 	audience := fs.String("audience", "", "audience to request for the token (comma-separated)")
+	scope := fs.String("scope", "read", `what the token may do, space-separated: "read", "write", "approve"`)
 	fs.Parse(args)
 
 	if *didFlag == "" {
@@ -40,7 +43,7 @@ func runSignin(args []string) {
 	if *audience != "" {
 		aud = strings.Split(*audience, ",")
 	}
-	token, expiresIn, err := signIn(*dauth, *didFlag, priv, *key, aud)
+	token, expiresIn, err := signIn(*dauth, *didFlag, priv, *key, aud, *scope)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -53,10 +56,16 @@ func runSignin(args []string) {
 
 // signIn runs dauth's challenge and token round trip for did with priv, the
 // private half of the verification method key names, and returns the identity
-// token and its lifetime in seconds.
-func signIn(dauth, did string, priv *ecdsa.PrivateKey, key string, audience []string) (string, int, error) {
+// token and its lifetime in seconds. The token carries scope and is bound to
+// priv as its DPoP key: the challenge names the key's thumbprint, and /token
+// takes a proof from it.
+func signIn(dauth, did string, priv *ecdsa.PrivateKey, key string, audience []string, scope string) (string, int, error) {
 	base := strings.TrimRight(dauth, "/")
-	challengeReq := map[string]any{"did": did}
+	jwk, err := publicJWK(&priv.PublicKey)
+	if err != nil {
+		return "", 0, err
+	}
+	challengeReq := map[string]any{"did": did, "scope": scope, "jkt": jwkThumbprint(jwk)}
 	if len(audience) > 0 {
 		challengeReq["audience"] = audience
 	}
@@ -77,7 +86,13 @@ func signIn(dauth, did string, priv *ecdsa.PrivateKey, key string, audience []st
 		Token     string `json:"token"`
 		ExpiresIn int    `json:"expires_in"`
 	}
-	if err := postJSON(base+"/signin/token", map[string]any{"nonce": challenge.Nonce, "signature": sig, "key": key}, &token); err != nil {
+	tokenURL := base + "/signin/token"
+	proof, err := dpopProof(priv, http.MethodPost, tokenURL, "", time.Now())
+	if err != nil {
+		return "", 0, fmt.Errorf("DPoP proof: %w", err)
+	}
+	body := map[string]any{"nonce": challenge.Nonce, "signature": sig, "key": key}
+	if err := sendJSON(http.MethodPost, tokenURL, map[string]string{"DPoP": proof}, body, &token); err != nil {
 		return "", 0, fmt.Errorf("token: %w", err)
 	}
 	return token.Token, token.ExpiresIn, nil

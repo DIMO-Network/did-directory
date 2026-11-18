@@ -13,6 +13,7 @@ import (
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/agreement/booking"
 	"github.com/DIMO-Network/did-directory/pkg/client"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
 )
 
 // runBooking is a booking service in one command: it reads an agreement,
@@ -74,13 +75,19 @@ func runBooking(args []string) {
 		os.Exit(1)
 	}
 	// The token is addressed to the host, which refuses one addressed elsewhere.
-	token, _, err := signIn(*dauth, *didFlag, priv, "signing", []string{strings.TrimRight(*host, "/")})
+	// It reads what is live and writes what changed, so it asks for both.
+	token, _, err := signIn(*dauth, *didFlag, priv, "signing", []string{strings.TrimRight(*host, "/")}, "read write")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: sign in as %s: %v\n", *didFlag, err)
 		os.Exit(1)
 	}
 
-	c := &booking.Client{Host: strings.TrimRight(*host, "/"), Token: booking.StaticToken(token)}
+	key, err := dpop.NewKey(priv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	c := &booking.Client{Host: strings.TrimRight(*host, "/"), Token: booking.StaticToken(token), Key: key}
 	res, err := c.Sync(ctx, &a, agreement.RentalCatalog(), now)
 	if err != nil {
 		var refusal *booking.Error

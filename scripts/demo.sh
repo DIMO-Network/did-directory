@@ -214,15 +214,20 @@ create() {
     echo "$did"
 }
 
-# signin DID — an identity token addressed to the org host, which refuses a
-# token addressed anywhere else.
-signin() { "$DIMOCLI" signin --dauth "$DAUTH_URL" --did "$1" --audience "$ORG_HOST_URL"; }
+# signin DID [SCOPE] — an identity token addressed to the org host, which
+# refuses a token addressed anywhere else. SCOPE is what it may do (default
+# "read write"; approving takes "approve"). The token is bound to the DID's
+# #signing key, so it is only good with a DPoP proof from that key.
+signin() { "$DIMOCLI" signin --dauth "$DAUTH_URL" --did "$1" --audience "$ORG_HOST_URL" --scope "${2:-read write}"; }
 
 # host METHOD PATH TOKEN [JSON] — calls the org host; sets STATUS and BODY.
+# Every call carries a fresh DPoP proof from the key the token is bound to.
 host() {
     local method=$1 path=$2 token=$3 data=${4:-}
+    local proof
+    proof=$("$DIMOCLI" dpop --token "$token" --method "$method" --url "$ORG_HOST_URL$path")
     local args=(-s -o "$DEMO_DIR/body" -w '%{http_code}' -X "$method"
-        -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
+        -H "Authorization: DPoP $token" -H "DPoP: $proof" -H 'Content-Type: application/json')
     [ -n "$data" ] && args+=(--data-binary "$data")
     STATUS=$(curl "${args[@]}" "$ORG_HOST_URL$path")
     BODY=$(cat "$DEMO_DIR/body")
@@ -291,8 +296,10 @@ expect() { # status description
     fi
 }
 
-approve() { # org pending-id approver-token description
-    host POST "/orgs/$1/pending/$2/approve" "$3"
+approve() { # org pending-id approver-DID description
+    # Approving takes a token for that alone, signed for just now: dauth
+    # issues approve tokens for minutes, not the quarter hour others last.
+    host POST "/orgs/$1/pending/$2/approve" "$(signin "$3" approve)"
     expect 201 "$4"
 }
 
@@ -450,10 +457,12 @@ wait_for "$DIRECTORY_URL/health" "directory"
 step "Starting dauth on :$DAUTH_PORT (throwaway RSA keys, in-memory challenge store)..."
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$DEMO_DIR/signin.pem" 2>/dev/null
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$DEMO_DIR/exchange.pem" 2>/dev/null
+# The demo reuses tokens signed in at the start to the end, which outlasts the
+# 15-minute default lifetime.
 DATABASE_URL="" ENVIRONMENT=local LOG_LEVEL=info \
     HTTP_ADDRESS="127.0.0.1:$DAUTH_PORT" OPS_ADDRESS="127.0.0.1:18089" \
     PUBLIC_BASE_URL="$DAUTH_URL" DIRECTORY_URL="$DIRECTORY_URL" \
-    SIGNIN_ISSUER="$DAUTH_URL/signin" JWT_AUDIENCE=dimo \
+    SIGNIN_ISSUER="$DAUTH_URL/signin" JWT_AUDIENCE=dimo TOKEN_TTL=1h \
     SIGNIN_SIGNING_KEY_1="$(cat "$DEMO_DIR/signin.pem")" \
     EXCHANGE_ISSUER="$DAUTH_URL/exchange" EXCHANGE_AUDIENCE=dq \
     EXCHANGE_SIGNING_KEY_1="$(cat "$DEMO_DIR/exchange.pem")" \
@@ -493,7 +502,7 @@ info "The CLI generated the #dimo_org key; the host takes the private half and"
 info "seals it at rest. From here on only the host signs commits."
 RENTAL_CO_TOKEN=$(signin "$RENTAL_CO")
 RENTAL_CO_ORG_KEY=$(jq -r .privateKeyBase64 "$KEYS/${RENTAL_CO#did:dimo:}.org.json")
-host POST "/orgs/$RENTAL_CO" "$RENTAL_CO_TOKEN" "$(jq -cn --arg k "$RENTAL_CO_ORG_KEY" '{privateKey: $k}')"
+host POST "/orgs/$RENTAL_CO" "$(signin "$RENTAL_CO" approve)" "$(jq -cn --arg k "$RENTAL_CO_ORG_KEY" '{privateKey: $k}')"
 expect 201 "repository registered"
 HOST_KEY=$(echo "$BODY" | jq -r .key)
 if [ "$HOST_KEY" = "$("$DIMOCLI" pubkey --org "$RENTAL_CO")" ]; then
@@ -572,11 +581,15 @@ REC=$(role "$RENTAL_CO" "$BACKEND" '{"inherit":true}' "command:charge,command:lo
         '{"policy":"rental-booking","allowExclusive":true}')
 host POST "/orgs/$RENTAL_CO/network.dimo.org.role" "$RENTAL_CO_TOKEN" "$REC"
 expect 202 "booking role parked: $(echo "$BODY" | jq -r '.reasons | join(", ")')"
-CAROL_TOKEN=$(signin "$CAROL")
-approve "$RENTAL_CO" "$(echo "$BODY" | jq -r .pending)" "$CAROL_TOKEN" "Carol approves; the commit carries approvedBy"
+approve "$RENTAL_CO" "$(echo "$BODY" | jq -r .pending)" "$CAROL" "Carol approves; the commit carries approvedBy"
 
 echo ""
 step "Alice puts the cars in fl-fleet; the org enrolls two with FleetCo and finances two..."
+info "A token says what it is for, and Alice's key signed that at sign-in. A"
+info "dashboard that only reads holds a read token, which cannot write."
+REC=$(membership "$FL_FLEET" "$CAR1")
+host POST "/orgs/$RENTAL_CO/network.dimo.org.tagMembership" "$(signin "$ALICE" read)" "$REC"
+expect 403 "a read token is refused the write: $(echo "$BODY" | jq -r .code)"
 ALICE_TOKEN=$(signin "$ALICE")
 for car in "${CARS[@]}"; do
     REC=$(membership "$FL_FLEET" "$car")
@@ -633,10 +646,9 @@ REC=$(grant "$RENTAL_CO" "$FINANCIAL_CO" "{\"tag\":\"$FINANCED\"}" "location:pre
 host PUT "/orgs/$RENTAL_CO/network.dimo.delegation/financialco" "$RENTAL_CO_TOKEN" "$REC"
 expect 202 "lien parked: $(echo "$BODY" | jq -r '.reasons | join(", ")')"
 PENDING=$(echo "$BODY" | jq -r .pending)
-FINANCIAL_CO_TOKEN=$(signin "$FINANCIAL_CO")
-host POST "/orgs/$RENTAL_CO/pending/$PENDING/approve" "$FINANCIAL_CO_TOKEN"
+host POST "/orgs/$RENTAL_CO/pending/$PENDING/approve" "$(signin "$FINANCIAL_CO" approve)"
 expect 403 "the lender may not approve it: $(echo "$BODY" | jq -r .error)"
-approve "$RENTAL_CO" "$PENDING" "$CAROL_TOKEN" "Carol approves the lien"
+approve "$RENTAL_CO" "$PENDING" "$CAROL" "Carol approves the lien"
 FINANCIAL_CO_URI="at://$RENTAL_CO/network.dimo.delegation/financialco"
 
 echo ""
@@ -649,13 +661,13 @@ REC=$(grant "$RENTAL_CO" "$FLEET_CO" "{\"tag\":\"$FLEETCO_ENROLLED\"}" "telemetr
         '{"dimo:redelegate":{"mode":"attenuated","maxDepth":1},"dimo:afterTransfer":"drop"}')
 host PUT "/orgs/$RENTAL_CO/network.dimo.delegation/fleetco" "$RENTAL_CO_TOKEN" "$REC"
 expect 202 "FleetCo grant parked: $(echo "$BODY" | jq -r '.reasons | join(", ")')"
-approve "$RENTAL_CO" "$(echo "$BODY" | jq -r .pending)" "$CAROL_TOKEN" "Carol approves"
+approve "$RENTAL_CO" "$(echo "$BODY" | jq -r .pending)" "$CAROL" "Carol approves"
 FLEET_CO_URI="at://$RENTAL_CO/network.dimo.delegation/fleetco"
 
 echo ""
 step "FleetCo registers its own repository and redelegates telemetry to its integrator..."
 FLEET_CO_TOKEN=$(signin "$FLEET_CO")
-host POST "/orgs/$FLEET_CO" "$FLEET_CO_TOKEN" "$(jq -cn --arg k "$(jq -r .privateKeyBase64 "$KEYS/${FLEET_CO#did:dimo:}.org.json")" '{privateKey: $k}')"
+host POST "/orgs/$FLEET_CO" "$(signin "$FLEET_CO" approve)" "$(jq -cn --arg k "$(jq -r .privateKeyBase64 "$KEYS/${FLEET_CO#did:dimo:}.org.json")" '{privateKey: $k}')"
 expect 201 "FleetCo's repository registered"
 host PUT "/parties/$FLEET_CO" "$DIMO_TOKEN" '{"kind":"org","operator":true}'
 expect 200 "DIMO attests FleetCo"
@@ -801,7 +813,7 @@ info "repository's key, so the buyer publishes it as #dimo_org."
 BUYER_TOKEN=$(signin "$BUYER")
 host PUT "/parties/$BUYER" "$DIMO_TOKEN" '{"kind":"person"}'
 expect 200 "DIMO attests the buyer as a person"
-host POST "/orgs/$BUYER" "$BUYER_TOKEN"
+host POST "/orgs/$BUYER" "$(signin "$BUYER" approve)"
 expect 201 "repository registered with a host-generated key"
 "$DIMOCLI" update -server "$DIRECTORY_URL" --did "$BUYER" --org-key "$(echo "$BODY" | jq -r .key)" --org-host "$ORG_HOST_URL" | show
 host PUT "/orgs/$BUYER/network.dimo.org.vehicleControl/$CAR1" "$BUYER_TOKEN" "$(cat "$KEYS/${CAR1#did:dimo:}.control.json")"

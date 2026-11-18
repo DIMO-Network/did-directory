@@ -46,8 +46,9 @@ func newBookingService(h *host, org, as string) *bookingService {
 	b.a.Target.Vehicle, b.a.Target.AssignedAt = "", nil
 	b.a.CreatedBy = as
 	b.client = &booking.Client{
-		Host:  "http://org-host.test/",
+		Host:  hostAudience + "/",
 		Token: func(context.Context) (string, error) { return h.issuer.identity(h.t, as), nil },
+		Key:   h.issuer.holder,
 		HTTP:  &http.Client{Transport: fiberTransport{h.app}},
 	}
 	return b

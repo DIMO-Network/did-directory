@@ -263,10 +263,8 @@ func (s *Server) proof(c *fiber.Ctx) error {
 	if err != nil {
 		return s.fail(c, err)
 	}
-	if by := caller(c); by != org && by != st.Record.To {
-		// Not found, as for a key never written: a refusal would confirm the
-		// grant and name its parties to anyone who guessed the key.
-		return s.fail(c, store.ErrNotFound)
+	if err := s.partyTo(c.Context(), org, caller(c), &st.Record); err != nil {
+		return s.fail(c, err)
 	}
 
 	rec := s.recorder(s.repo.now())
@@ -281,6 +279,27 @@ func (s *Server) proof(c *fiber.Ctx) error {
 	}
 	s.log.Info().Str("uri", st.URI).Str("vehicle", vehicle).Str("by", caller(c)).Int("commits", len(p.Commits)).Msg("coverage proof served")
 	return c.JSON(p)
+}
+
+// partyTo admits a caller to the routes about one delegation: its recipient,
+// the org whose repository holds it, and that org's org:admin, who reads
+// every record there already. Anyone else is told the delegation is not
+// found, as for a key never written: a refusal would confirm the grant and
+// name its parties to anyone who guessed the key.
+func (s *Server) partyTo(ctx context.Context, org, caller string, rec *delegation.Record) error {
+	if caller == org || caller == rec.To {
+		return nil
+	}
+	r, err := s.reader(ctx, org, caller)
+	switch {
+	case errors.Is(err, ErrForbidden):
+		return store.ErrNotFound
+	case err != nil:
+		return err
+	case !r.all:
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // Descendant is one entry of the consent transparency view (spec §9.3): a
@@ -327,10 +346,8 @@ func (s *Server) descendants(c *fiber.Ctx) error {
 	if err != nil {
 		return s.fail(c, err)
 	}
-	if by := caller(c); by != org && by != st.Record.To {
-		// Not found, as for a key never written: a refusal would confirm the
-		// grant and name its parties to anyone who guessed the key.
-		return s.fail(c, store.ErrNotFound)
+	if err := s.partyTo(c.Context(), org, caller(c), &st.Record); err != nil {
+		return s.fail(c, err)
 	}
 
 	at := s.repo.now()
@@ -363,10 +380,8 @@ func (s *Server) vehicles(c *fiber.Ctx) error {
 	if err != nil {
 		return s.fail(c, err)
 	}
-	if by := caller(c); by != org && by != st.Record.To {
-		// Not found, as for a key never written: a refusal would confirm the
-		// grant and name its parties to anyone who guessed the key.
-		return s.fail(c, store.ErrNotFound)
+	if err := s.partyTo(c.Context(), org, caller(c), &st.Record); err != nil {
+		return s.fail(c, err)
 	}
 
 	candidates, err := s.candidates(c.Context(), &st.Record, 1)
