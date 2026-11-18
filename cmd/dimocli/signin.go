@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"encoding/json"
 	"flag"
@@ -12,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
+	"github.com/DIMO-Network/did-directory/pkg/signin"
 )
 
 // runSignin drives dauth's DID sign-in for a DID whose key is in the local
@@ -56,46 +57,12 @@ func runSignin(args []string) {
 
 // signIn runs dauth's challenge and token round trip for did with priv, the
 // private half of the verification method key names, and returns the identity
-// token and its lifetime in seconds. The token carries scope and is bound to
-// priv as its DPoP key: the challenge names the key's thumbprint, and /token
-// takes a proof from it.
+// token and its lifetime in seconds (see pkg/signin).
 func signIn(dauth, did string, priv *ecdsa.PrivateKey, key string, audience []string, scope string) (string, int, error) {
-	base := strings.TrimRight(dauth, "/")
-	jwk, err := publicJWK(&priv.PublicKey)
-	if err != nil {
-		return "", 0, err
-	}
-	challengeReq := map[string]any{"did": did, "scope": scope, "jkt": jwkThumbprint(jwk)}
-	if len(audience) > 0 {
-		challengeReq["audience"] = audience
-	}
-	var challenge struct {
-		Challenge string `json:"challenge"`
-		Nonce     string `json:"nonce"`
-	}
-	if err := postJSON(base+"/signin/challenge", challengeReq, &challenge); err != nil {
-		return "", 0, fmt.Errorf("challenge: %w", err)
-	}
-
-	sig, err := dimocrypto.SignOperation(priv, []byte(challenge.Challenge))
-	if err != nil {
-		return "", 0, fmt.Errorf("sign challenge: %w", err)
-	}
-
-	var token struct {
-		Token     string `json:"token"`
-		ExpiresIn int    `json:"expires_in"`
-	}
-	tokenURL := base + "/signin/token"
-	proof, err := dpopProof(priv, http.MethodPost, tokenURL, "", time.Now())
-	if err != nil {
-		return "", 0, fmt.Errorf("DPoP proof: %w", err)
-	}
-	body := map[string]any{"nonce": challenge.Nonce, "signature": sig, "key": key}
-	if err := sendJSON(http.MethodPost, tokenURL, map[string]string{"DPoP": proof}, body, &token); err != nil {
-		return "", 0, fmt.Errorf("token: %w", err)
-	}
-	return token.Token, token.ExpiresIn, nil
+	t, err := signin.SignIn(context.Background(), signin.Request{
+		Dauth: dauth, DID: did, Key: priv, KeyFragment: key, Audience: audience, Scope: scope,
+	})
+	return t.Token, t.ExpiresIn, err
 }
 
 func defaultDauth() string {
