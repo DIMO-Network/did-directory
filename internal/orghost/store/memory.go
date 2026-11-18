@@ -87,30 +87,40 @@ func (o *memOrg) head() Head {
 	return Head{Seq: last.Seq, CID: last.CID, Rev: last.Rev}
 }
 
-func (s *MemoryStore) AppendAfter(_ context.Context, expectedHead Head, c repo.Committed) error {
+func (s *MemoryStore) AppendAfter(_ context.Context, expectedHead Head, commits ...repo.Committed) error {
+	if len(commits) == 0 {
+		return nil
+	}
 	// Handlers pass Fiber params, which alias a reused request buffer; the store
 	// must own its copies.
-	c = cloneCommitted(c)
+	for i := range commits {
+		commits[i] = cloneCommitted(commits[i])
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	o, ok := s.orgs[c.DID]
+	o, ok := s.orgs[commits[0].DID]
 	if !ok {
 		return ErrNotFound
 	}
 	if o.head() != expectedHead {
 		return ErrHeadChanged
 	}
-	idx := len(o.commits)
-	o.commits = append(o.commits, c)
-	key := c.Collection + "/" + c.RKey
-	switch c.Op {
-	case repo.OpTombstone:
-		h := o.heads[key]
-		h.tombstone = idx
-		o.heads[key] = h
-	default:
-		o.heads[key] = memHead{record: idx, tombstone: -1}
+	if err := chained(expectedHead, commits); err != nil {
+		return err
+	}
+	for _, c := range commits {
+		idx := len(o.commits)
+		o.commits = append(o.commits, c)
+		key := c.Collection + "/" + c.RKey
+		switch c.Op {
+		case repo.OpTombstone:
+			h := o.heads[key]
+			h.tombstone = idx
+			o.heads[key] = h
+		default:
+			o.heads[key] = memHead{record: idx, tombstone: -1}
+		}
 	}
 	return nil
 }
@@ -194,6 +204,22 @@ func (s *MemoryStore) Commits(_ context.Context, org string, afterSeq int64, lim
 		out = append(out, cloneCommitted(c))
 		if limit > 0 && len(out) >= limit {
 			break
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) KeyCommits(_ context.Context, org, collection, rkey string) ([]repo.Committed, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	out := []repo.Committed{}
+	for _, c := range o.commits {
+		if c.Collection == collection && c.RKey == rkey {
+			out = append(out, cloneCommitted(c))
 		}
 	}
 	return out, nil
@@ -283,17 +309,19 @@ func (s *MemoryStore) TagSize(_ context.Context, org, tag string, at time.Time) 
 	return len(vehicles), nil
 }
 
-func (s *MemoryStore) Custody(_ context.Context, vehicle, holder string) ([]Stored, error) {
+func (s *MemoryStore) Custody(_ context.Context, org, vehicle, holder string) ([]Stored, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := []Stored{}
-	for _, o := range s.orgs {
-		o.each("network.dimo.org.custody", func(st Stored, rec map[string]any) {
-			if field(rec, "vehicle") == vehicle && field(rec, "holder") == holder {
-				out = append(out, st)
-			}
-		})
+	o, ok := s.orgs[org]
+	if !ok {
+		return out, nil
 	}
+	o.each("network.dimo.org.custody", func(st Stored, rec map[string]any) {
+		if field(rec, "vehicle") == vehicle && field(rec, "holder") == holder {
+			out = append(out, st)
+		}
+	})
 	return out, nil
 }
 

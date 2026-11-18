@@ -83,11 +83,21 @@ func (r *Repository) Prepare(org, collection, rkey string, body []byte, committe
 	return record, nil
 }
 
+// Check is a write's authority check, run under the org's write lock against
+// the record's current state (nil when nothing was ever committed under the
+// key), after the head the commit will follow was read. A check that passes is
+// therefore about the repository the commit lands in: if another writer moves
+// the head before the append, the append fails, and the write reads and checks
+// again. Without this a check and its commit could straddle another write, so
+// two memberships could each see a tag under its approval threshold, or a
+// role tombstoned in between could still authorize a write.
+type Check func(ctx context.Context, cur *store.Stored) error
+
 // Put creates or updates the record at collection/rkey in org's repository,
 // as a write by committedBy ("" for the org itself), approved by approvedBy.
-// record is Prepare's output.
-func (r *Repository) Put(ctx context.Context, org, collection, rkey string, record json.RawMessage, committedBy string, approvedBy []string) (*Result, error) {
-	return r.append(ctx, org, collection, rkey, func(cur *store.Stored) (string, json.RawMessage, error) {
+// record is Prepare's output; check, when not nil, must pass first.
+func (r *Repository) Put(ctx context.Context, org, collection, rkey string, record json.RawMessage, committedBy string, approvedBy []string, check Check) (*Result, error) {
+	return r.append(ctx, org, collection, rkey, check, func(cur *store.Stored) (string, json.RawMessage, error) {
 		if cur != nil && cur.Live() {
 			return repo.OpUpdate, record, nil
 		}
@@ -95,25 +105,97 @@ func (r *Repository) Put(ctx context.Context, org, collection, rkey string, reco
 	}, committedBy, approvedBy)
 }
 
-// Delete tombstones the record at collection/rkey as a write by committedBy.
-func (r *Repository) Delete(ctx context.Context, org, collection, rkey, committedBy string, approvedBy []string) (*Result, error) {
+// Delete tombstones the record at collection/rkey as a write by committedBy,
+// once check, when not nil, passes.
+func (r *Repository) Delete(ctx context.Context, org, collection, rkey, committedBy string, approvedBy []string, check Check) (*Result, error) {
 	if err := delegation.ValidateRKey(rkey); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
-	return r.append(ctx, org, collection, rkey, func(cur *store.Stored) (string, json.RawMessage, error) {
-		if cur == nil {
-			return "", nil, store.ErrNotFound
-		}
-		if !cur.Live() {
-			return "", nil, ErrNotLive
-		}
-		return repo.OpTombstone, nil, nil
-	}, committedBy, approvedBy)
+	return r.append(ctx, org, collection, rkey, check, tombstoneOp, committedBy, approvedBy)
 }
 
-// append builds a commit against the current head and record state, signs it
-// and appends it; if the head moves underneath it, it decides again.
-func (r *Repository) append(ctx context.Context, org, collection, rkey string,
+func tombstoneOp(cur *store.Stored) (string, json.RawMessage, error) {
+	if cur == nil {
+		return "", nil, store.ErrNotFound
+	}
+	if !cur.Live() {
+		return "", nil, ErrNotLive
+	}
+	return repo.OpTombstone, nil, nil
+}
+
+// Key names one record in a repository.
+type Key struct{ Collection, RKey string }
+
+// DeleteAll tombstones every key that is still live, as one append: every
+// tombstone commits or none does. check sees the current state of each key,
+// in order, under the org's write lock; keys already tombstoned are skipped,
+// since the outcome is the one asked for.
+func (r *Repository) DeleteAll(ctx context.Context, org string, keys []Key, committedBy string, check func(ctx context.Context, curs []*store.Stored) error) ([]*Result, error) {
+	for _, k := range keys {
+		if err := delegation.ValidateRKey(k.RKey); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+	}
+	mu := r.lock(org)
+	mu.Lock()
+	defer mu.Unlock()
+	for range appendAttempts {
+		head, err := r.Store.Head(ctx, org)
+		if err != nil {
+			return nil, err
+		}
+		var live []Key
+		var curs []*store.Stored
+		for _, k := range keys {
+			cur, err := r.Store.Current(ctx, org, k.Collection, k.RKey)
+			if err != nil {
+				return nil, err
+			}
+			if cur.Live() {
+				live = append(live, k)
+				curs = append(curs, cur)
+			}
+		}
+		if check != nil {
+			if err := check(ctx, curs); err != nil {
+				return nil, err
+			}
+		}
+		prev := head
+		commits := make([]repo.Committed, 0, len(live))
+		for _, k := range live {
+			c, err := r.commit(ctx, org, prev, repo.OpTombstone, k.Collection, k.RKey, nil, committedBy, nil)
+			if err != nil {
+				return nil, err
+			}
+			commits = append(commits, *c)
+			prev = store.Head{Seq: c.Seq, CID: c.CID, Rev: c.Rev}
+		}
+		if len(commits) == 0 {
+			return []*Result{}, nil
+		}
+		err = r.Store.AppendAfter(ctx, head, commits...)
+		if store.IsHeadChanged(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out := make([]*Result, len(commits))
+		for i := range commits {
+			c := &commits[i]
+			out[i] = &Result{URI: c.URI(), CID: c.CID, Rev: c.Rev, Seq: c.Seq, Op: c.Op}
+		}
+		return out, nil
+	}
+	return nil, ErrContended
+}
+
+// append builds a commit against the current head and record state, checks
+// it, signs it and appends it; if the head moves underneath it, it reads,
+// checks and decides again.
+func (r *Repository) append(ctx context.Context, org, collection, rkey string, check Check,
 	decide func(cur *store.Stored) (string, json.RawMessage, error), committedBy string, approvedBy []string) (*Result, error) {
 	mu := r.lock(org)
 	mu.Lock()
@@ -124,33 +206,26 @@ func (r *Repository) append(ctx context.Context, org, collection, rkey string,
 			return nil, err
 		}
 		cur, err := r.Store.Current(ctx, org, collection, rkey)
-		if err != nil && !store.IsNotFound(err) {
+		if store.IsNotFound(err) {
+			cur, err = nil, nil
+		}
+		if err != nil {
 			return nil, err
+		}
+		if check != nil {
+			if err := check(ctx, cur); err != nil {
+				return nil, err
+			}
 		}
 		op, record, err := decide(cur)
 		if err != nil {
 			return nil, err
 		}
-		c := repo.Committed{Commit: repo.Commit{
-			DID:         org,
-			Seq:         head.Seq + 1,
-			Prev:        head.CID,
-			Rev:         repo.NewTID(),
-			Op:          op,
-			Collection:  collection,
-			RKey:        rkey,
-			Record:      record,
-			CommittedBy: committedBy,
-			ApprovedBy:  approvedBy,
-			CommittedAt: r.now(),
-		}}
-		if err := repo.Sign(ctx, r.Signer, &c.Commit); err != nil {
-			return nil, fmt.Errorf("sign commit: %w", err)
-		}
-		if c.CID, err = c.Commit.CID(); err != nil {
+		c, err := r.commit(ctx, org, head, op, collection, rkey, record, committedBy, approvedBy)
+		if err != nil {
 			return nil, err
 		}
-		err = r.Store.AppendAfter(ctx, head, c)
+		err = r.Store.AppendAfter(ctx, head, *c)
 		if store.IsHeadChanged(err) {
 			continue
 		}
@@ -160,6 +235,32 @@ func (r *Repository) append(ctx context.Context, org, collection, rkey string,
 		return &Result{URI: c.URI(), CID: c.CID, Rev: c.Rev, Seq: c.Seq, Op: c.Op}, nil
 	}
 	return nil, ErrContended
+}
+
+// commit builds and signs the commit that follows head.
+func (r *Repository) commit(ctx context.Context, org string, head store.Head, op, collection, rkey string, record json.RawMessage, committedBy string, approvedBy []string) (*repo.Committed, error) {
+	c := repo.Committed{Commit: repo.Commit{
+		DID:         org,
+		Seq:         head.Seq + 1,
+		Prev:        head.CID,
+		Rev:         repo.NewTID(),
+		Op:          op,
+		Collection:  collection,
+		RKey:        rkey,
+		Record:      record,
+		CommittedBy: committedBy,
+		ApprovedBy:  approvedBy,
+		CommittedAt: r.now(),
+	}}
+	if err := repo.Sign(ctx, r.Signer, &c.Commit); err != nil {
+		return nil, fmt.Errorf("sign commit: %w", err)
+	}
+	cid, err := c.Commit.CID()
+	if err != nil {
+		return nil, err
+	}
+	c.CID = cid
+	return &c, nil
 }
 
 // now returns the host clock at the precision a commit carries: UTC, whole

@@ -29,7 +29,8 @@ type recorder struct {
 	*Resolver
 	at time.Time
 
-	records  map[string]store.Stored // by URI, current state
+	records  map[string]store.Stored   // by URI, current state
+	commits  map[string]repo.Committed // by org/seq: the versions read
 	parties  map[string]proof.Party
 	tagSizes map[string]int
 	control  *control.State
@@ -38,13 +39,21 @@ type recorder struct {
 func (s *Server) recorder(at time.Time) *recorder {
 	return &recorder{
 		Resolver: s.resolver, at: at,
-		records: map[string]store.Stored{}, parties: map[string]proof.Party{}, tagSizes: map[string]int{},
+		records: map[string]store.Stored{}, commits: map[string]repo.Committed{}, parties: map[string]proof.Party{}, tagSizes: map[string]int{},
 	}
 }
 
 func (r *recorder) keep(sts ...store.Stored) {
 	for i := range sts {
 		r.records[sts[i].URI] = sts[i]
+	}
+}
+
+// keepCommits records the history an evaluation read through a record's
+// versions.
+func (r *recorder) keepCommits(cs ...repo.Committed) {
+	for _, c := range cs {
+		r.commits[fmt.Sprintf("%s/%d", c.DID, c.Seq)] = c
 	}
 }
 
@@ -72,15 +81,15 @@ func (r *recorder) Memberships(ctx context.Context, tag, vehicle string) ([]dele
 	if err != nil {
 		return nil, err
 	}
-	sts, err := r.Store.Memberships(ctx, org, tag, vehicle)
+	out, used, err := membershipVersions(ctx, r.Store, org, tag, vehicle)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
 	}
-	r.keep(sts...)
-	return membershipsOf(sts)
+	r.keepCommits(used...)
+	return out, nil
 }
 
 func (r *recorder) TagSize(ctx context.Context, tag string, at time.Time) (int, error) {
@@ -91,8 +100,8 @@ func (r *recorder) TagSize(ctx context.Context, tag string, at time.Time) (int, 
 	return n, err
 }
 
-func (r *recorder) Custody(ctx context.Context, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
-	sts, err := r.Store.Custody(ctx, vehicle, holder)
+func (r *recorder) Custody(ctx context.Context, org, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
+	sts, err := r.Store.Custody(ctx, org, vehicle, holder)
 	if err != nil {
 		return nil, resolveErr(err)
 	}
@@ -101,15 +110,15 @@ func (r *recorder) Custody(ctx context.Context, vehicle, holder string) ([]deleg
 }
 
 func (r *recorder) Roles(ctx context.Context, org, member string) ([]delegation.Stored, error) {
-	sts, err := r.Store.Roles(ctx, org, member)
+	out, used, err := roleVersions(ctx, r.Store, org, member)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
 	}
-	r.keep(sts...)
-	return storedAll(org, sts)
+	r.keepCommits(used...)
+	return out, nil
 }
 
 func (r *recorder) ControlState(ctx context.Context, vehicle string) (*control.State, error) {
@@ -121,15 +130,15 @@ func (r *recorder) ControlState(ctx context.Context, vehicle string) (*control.S
 }
 
 func (r *recorder) Opening(ctx context.Context, vehicle string, era uint64, controller string) (*control.Opening, error) {
-	st, err := r.Store.Current(ctx, controller, delegation.CollectionVehicleControl, vehicle)
+	o, used, err := openingVersion(ctx, r.Store, vehicle, era, controller)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
 	}
-	r.keep(*st)
-	return openingOf(st, era)
+	r.keepCommits(used...)
+	return o, nil
 }
 
 func (r *recorder) Party(ctx context.Context, did string) (delegation.Party, error) {
@@ -198,6 +207,20 @@ func (r *recorder) proof(ctx context.Context, signer repo.Signer, uri, vehicle s
 			}
 			p.Commits = append(p.Commits, *c)
 		}
+	}
+	for key, c := range r.commits {
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if _, ok := p.Keys[c.DID]; !ok {
+			k, err := signer.PublicKey(ctx, c.DID)
+			if err != nil {
+				return nil, resolveErr(err)
+			}
+			p.Keys[c.DID] = k
+		}
+		p.Commits = append(p.Commits, c)
 	}
 	sort.Slice(p.Commits, func(i, j int) bool {
 		if p.Commits[i].DID != p.Commits[j].DID {

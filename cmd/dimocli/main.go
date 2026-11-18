@@ -40,6 +40,16 @@ func main() {
 		runRevokeSince(args)
 	case "pubkey":
 		runPubkey(args)
+	case "signin":
+		runSignin(args)
+	case "exchange":
+		runExchange(args)
+	case "query":
+		runQuery(args)
+	case "booking":
+		runBooking(args)
+	case "verify-proof":
+		runVerifyProof(args)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", cmd)
 		printUsage()
@@ -62,8 +72,17 @@ Commands:
   transfer     Transfer a controlled DID to a new controller (starts a new era)
   revoke-since Record a compromise window and rotate the custody key
   pubkey       Print the did:key public key for a local DID (--org for its #dimo_org key)
+  signin       Sign in to dauth as a local DID and print the identity token
+  exchange     Sign in, prove the DID's key with DPoP and mint an access token from dauth
+               for one delegation over one vehicle
+  query        Mint an access token as exchange does, then send a GraphQL query to dq
+               with it and a DPoP proof for the request
+  booking      Sync an agreement JSON to the operator's org host as the booking service
+  verify-proof Verify a coverage proof offline against the directory's keys and era log
 
 Environment:
   DIRECTORY_URL  Directory server URL (default: http://localhost:8080)
+  DAUTH_URL      dauth base URL for signin (default: http://localhost:8080)
+  DQ_URL         dq base URL for query (default: http://localhost:3000)
 `)
 }

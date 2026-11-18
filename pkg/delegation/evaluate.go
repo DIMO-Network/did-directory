@@ -25,7 +25,25 @@ var (
 	ErrSelfDealing      = errors.New("the author of a grant cannot be its recipient without a second approval")
 	ErrExclusiveHold    = errors.New("another party holds these abilities exclusively")
 	ErrExceedsRole      = errors.New("the grant exceeds the constraints of the role that authored it")
+	// ErrInvalidRecord is a record that does not hold up on its own terms: it
+	// is malformed, is not a delegation, or was authored by somebody who could
+	// not have written it.
+	ErrInvalidRecord = errors.New("invalid record")
 )
+
+// refusals are the errors that mean an evaluation said no, as opposed to the
+// resolver failing to answer.
+var refusals = []error{
+	ErrNotCovered, ErrRevoked, ErrNotValid, ErrNotNarrowing, ErrUnauthorized,
+	ErrClientNotAllowed, ErrChainTooDeep, ErrLienNotAllowed, ErrSelfDealing,
+	ErrExclusiveHold, ErrExceedsRole, ErrInvalidRecord,
+}
+
+// isRefusal reports whether err is an evaluation's answer rather than a
+// failure to reach one.
+func isRefusal(err error) bool {
+	return slices.ContainsFunc(refusals, func(r error) bool { return errors.Is(err, r) })
+}
 
 // ExclusiveHoldError is ErrExclusiveHold together with the abilities that are
 // suspended, so an issuer can tell the caller which ones somebody else holds
@@ -103,6 +121,11 @@ type Stored struct {
 	// ApprovedBy lists principals who approved this write, beyond its author.
 	// Required for self-issued grants and for anything the policy gates.
 	ApprovedBy []string
+	// Superseded is when a later version of the same record replaced this one.
+	// Resolver.Roles returns every version of a role, so that a grant's author
+	// is judged by the role as it stood when the grant was committed; a nil
+	// Superseded is the current version.
+	Superseded *time.Time
 }
 
 // Tombstone marks a revoked record. By is the principal whose repository write
@@ -112,8 +135,13 @@ type Tombstone struct {
 	By string
 }
 
-// Membership is one interval of a vehicle in a tag.
+// Membership is one interval of a vehicle in a tag, as one version of its
+// record states it.
 type Membership struct {
+	// URI is the membership record. A resolver may return several versions of
+	// one record; the latest whose author could have written it is the one
+	// that counts.
+	URI         string
 	Tag         string
 	Vehicle     string
 	JoinedAt    time.Time
@@ -141,22 +169,30 @@ type CustodyPeriod struct {
 type Resolver interface {
 	// Record returns a delegation or role record by URI.
 	Record(ctx context.Context, uri string) (*Stored, error)
-	// Memberships returns every membership interval of vehicle in tag.
+	// Memberships returns every membership interval of vehicle in tag: each
+	// version of each live membership record since it was last created.
 	Memberships(ctx context.Context, tag, vehicle string) ([]Membership, error)
 	// TagSize returns how many vehicles the tag holds at time at.
 	TagSize(ctx context.Context, tag string, at time.Time) (int, error)
-	// Custody returns every period in which holder had the vehicle, oldest first.
-	Custody(ctx context.Context, vehicle, holder string) ([]CustodyPeriod, error)
-	// Roles returns role records issued by org to member, including tombstoned ones.
+	// Custody returns every period in which holder had the vehicle, as recorded
+	// in org's repository, oldest first. Only the issuer of a grant can narrow it
+	// by custody, so custody recorded anywhere else is not asked for.
+	Custody(ctx context.Context, org, vehicle, holder string) ([]CustodyPeriod, error)
+	// Roles returns role records issued by org to member, including tombstoned
+	// ones, one Stored per version with Superseded set on all but the current.
 	Roles(ctx context.Context, org, member string) ([]Stored, error)
 	// ControlState returns the vehicle's control eras from the DID directory.
 	ControlState(ctx context.Context, vehicle string) (*control.State, error)
-	// Opening returns controller's opening for the vehicle's era, or nil if the
-	// controller holds none.
+	// Opening returns controller's opening for the vehicle's era, from any
+	// version of its record, or nil if the controller holds none. An opening is
+	// checked against the era's commitment, so an old version proves its era
+	// as well as it ever did.
 	Opening(ctx context.Context, vehicle string, era uint64, controller string) (*control.Opening, error)
 	// Party returns the policy attributes of a DID.
 	Party(ctx context.Context, did string) (Party, error)
-	// Exclusives returns exclusive holds active over the vehicle at time at.
+	// Exclusives returns the exclusive holds claimed over the vehicle at time at.
+	// They are claims: the evaluator checks each one's own chain before it
+	// suspends anybody.
 	Exclusives(ctx context.Context, vehicle string, at time.Time) ([]ExclusiveHold, error)
 }
 
@@ -206,7 +242,7 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 		return nil, err
 	}
 	if s.Record.Type != TypeDelegation {
-		return nil, fmt.Errorf("%s is not a delegation", uri)
+		return nil, fmt.Errorf("%w: %s is not a delegation", ErrInvalidRecord, uri)
 	}
 	if s.Record.To != caller {
 		ok, err := e.useRole(ctx, s.Record.To, caller, vehicle, abilities, at)
@@ -218,7 +254,7 @@ func (e *Evaluator) Authorize(ctx context.Context, uri, caller, clientID, vehicl
 		}
 	}
 
-	cov, err := e.evaluate(ctx, s, vehicle, clientID, at, 1, map[string]bool{})
+	cov, err := e.evaluateTop(ctx, s, vehicle, clientID, at)
 	if err != nil {
 		// A suspended grant answers "somebody else is driving" only to a caller
 		// asking for something this grant actually carries. Asking for an ability
@@ -266,7 +302,32 @@ func (e *Evaluator) Coverage(ctx context.Context, uri, vehicle string, at time.T
 	if err != nil {
 		return nil, err
 	}
-	return e.evaluate(ctx, s, vehicle, anyClient, at, 1, map[string]bool{})
+	return e.evaluateTop(ctx, s, vehicle, anyClient, at)
+}
+
+// evaluateTop evaluates the record being authorized and then applies the
+// exclusive holds over the vehicle. Exclusivity applies to that record only, not
+// to links inside its own chain: a custody hold must not suspend the grant it
+// derives from.
+func (e *Evaluator) evaluateTop(ctx context.Context, s *Stored, vehicle, clientID string, at time.Time) (*Coverage, error) {
+	cov, err := e.evaluate(ctx, s, vehicle, clientID, at, 1, map[string]bool{})
+	if err != nil {
+		return nil, err
+	}
+	if len(cov.Live) == 0 {
+		return cov, nil
+	}
+	if err := e.applyExclusives(ctx, s, vehicle, at, cov); err != nil {
+		return nil, err
+	}
+	if cov.Empty() {
+		// Suspended is not the same answer as never granted: §12.2 wants the
+		// operator to see that somebody is driving their car, and the issuer to
+		// log it. Saying "not covered" here would hide a custody hold behind the
+		// same error as a missing grant.
+		return nil, &ExclusiveHoldError{Suspended: cov.Suspended}
+	}
+	return cov, nil
 }
 
 func (e *Evaluator) maxDepth() int {
@@ -282,16 +343,16 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		return nil, ErrChainTooDeep
 	}
 	if seen[s.URI] {
-		return nil, fmt.Errorf("delegation cycle at %s", s.URI)
+		return nil, fmt.Errorf("%w: delegation cycle at %s", ErrInvalidRecord, s.URI)
 	}
 	seen[s.URI] = true
 	defer delete(seen, s.URI)
 
 	if rec.Type != TypeDelegation {
-		return nil, fmt.Errorf("%s is not a delegation", s.URI)
+		return nil, fmt.Errorf("%w: %s is not a delegation", ErrInvalidRecord, s.URI)
 	}
 	if err := rec.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid delegation %s: %w", s.URI, err)
+		return nil, fmt.Errorf("%w: %s: %w", ErrInvalidRecord, s.URI, err)
 	}
 	revoked, err := e.revokedAt(ctx, rec, s.Tombstone, at, walk{depth: depth})
 	if err != nil {
@@ -324,7 +385,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 	// approval — staff are customers too.
 	if author != rec.From {
 		if !from.CanHaveMembers() {
-			return nil, fmt.Errorf("%s authored by %s, but %s cannot have members", s.URI, author, rec.From)
+			return nil, fmt.Errorf("%w: %s authored by %s, but %s cannot have members", ErrInvalidRecord, s.URI, author, rec.From)
 		}
 		need := AuthoringNeed(rec)
 		ok, err := e.hasRole(ctx, rec.From, author, rec.Covers, need, s.CommittedAt, e.shapeCheck(ctx, s, at), walk{depth: depth})
@@ -332,7 +393,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 			return nil, fmt.Errorf("%s: %w", s.URI, err)
 		}
 		if !ok {
-			return nil, fmt.Errorf("%s: author %s lacked authority when committed", s.URI, author)
+			return nil, fmt.Errorf("%w: %s: author %s lacked authority when committed", ErrInvalidRecord, s.URI, author)
 		}
 		if author == rec.To {
 			ok, err := e.approvedByAnother(ctx, s, author, walk{depth: depth})
@@ -365,7 +426,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 	cov := &Coverage{Vehicle: vehicle, Historical: map[string]Set{}, Chain: []string{s.URI}}
 	base := member.Intersect(rec.DataWindow.Set())
 	if rec.NarrowToCustody {
-		held, err := e.custody(ctx, vehicle, rec.To)
+		held, err := e.custody(ctx, rec.From, vehicle, rec.To)
 		if err != nil {
 			return nil, err
 		}
@@ -383,23 +444,7 @@ func (e *Evaluator) evaluate(ctx context.Context, s *Stored, vehicle, clientID s
 		}
 	}
 	cov.Chain = append(cov.Chain, chain...)
-
-	// Exclusivity applies to the record being authorized, not to links inside its
-	// own chain: a custody hold must not suspend the grant it derives from.
-	if depth == 1 && len(cov.Live) > 0 {
-		if err := e.applyExclusives(ctx, s, vehicle, at, cov); err != nil {
-			return nil, err
-		}
-	}
-
 	if cov.Empty() {
-		// Suspended is not the same answer as never granted: §12.2 wants the
-		// operator to see that somebody is driving their car, and the issuer to
-		// log it. Saying "not covered" here would hide a custody hold behind the
-		// same error as a missing grant.
-		if len(cov.Suspended) > 0 {
-			return nil, &ExclusiveHoldError{Suspended: cov.Suspended}
-		}
 		return nil, ErrNotCovered
 	}
 	return cov, nil
@@ -418,12 +463,12 @@ func committedBy(s *Stored) (string, error) {
 	rec := &s.Record
 	if s.CommittedBy == "" {
 		if rec.CreatedBy != "" && rec.CreatedBy != rec.From {
-			return "", fmt.Errorf("%s: createdBy claims %s but the repository witnessed no author", s.URI, rec.CreatedBy)
+			return "", fmt.Errorf("%w: %s: createdBy claims %s but the repository witnessed no author", ErrInvalidRecord, s.URI, rec.CreatedBy)
 		}
 		return rec.From, nil
 	}
 	if rec.CreatedBy != "" && rec.CreatedBy != s.CommittedBy {
-		return "", fmt.Errorf("%s: createdBy says %s but the repository witnessed %s", s.URI, rec.CreatedBy, s.CommittedBy)
+		return "", fmt.Errorf("%w: %s: createdBy says %s but the repository witnessed %s", ErrInvalidRecord, s.URI, rec.CreatedBy, s.CommittedBy)
 	}
 	return s.CommittedBy, nil
 }
@@ -445,7 +490,11 @@ func (e *Evaluator) applyExclusives(ctx context.Context, s *Stored, vehicle stri
 		if h.Holder == rec.To || slices.Contains(cov.Chain, h.URI) {
 			continue
 		}
-		for _, a := range h.Abilities {
+		held, err := e.heldExclusively(ctx, h, vehicle, at)
+		if err != nil {
+			return err
+		}
+		for _, a := range held {
 			// Where this record claims the same ability exclusively, only a strictly
 			// newer hold supersedes it. Suspending both sides of an overlap would
 			// lock two parties out of a car one of them is driving, which is the
@@ -478,6 +527,35 @@ func (e *Evaluator) applyExclusives(ctx context.Context, s *Stored, vehicle stri
 	return nil
 }
 
+// heldExclusively returns the abilities hold actually suspends: those its record
+// claims exclusively and can itself exercise over the vehicle at time at. A
+// claim is only a claim; anybody can write one into their own repository, so a
+// hold whose chain does not reach a controller suspends nothing. Holds are not
+// applied to the hold's own evaluation, which is what keeps this from
+// recursing, and a hold that evaluates to a refusal is ignored while a resolver
+// failure is returned: when the host cannot tell, the car's driver stays
+// protected.
+func (e *Evaluator) heldExclusively(ctx context.Context, h ExclusiveHold, vehicle string, at time.Time) ([]string, error) {
+	hs, err := e.Resolver.Record(ctx, h.URI)
+	if err != nil {
+		return nil, err
+	}
+	hc, err := e.evaluate(ctx, hs, vehicle, anyClient, at, 1, map[string]bool{})
+	if isRefusal(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var held []string
+	for _, a := range h.Abilities {
+		if slices.Contains(hs.Record.Exclusive, a) && slices.Contains(hc.Live, a) {
+			held = append(held, a)
+		}
+	}
+	return held, nil
+}
+
 // holdStart is when this record's own exclusive claim took effect, on the same
 // footing a resolver reports ExclusiveHold.Since: the validity start, or the
 // commit when the validity is open at the front.
@@ -492,8 +570,8 @@ func holdStart(s *Stored) time.Time {
 // has no end, because the car is still out and the window follows the holder
 // forward; closing it at return is what narrows the grant. A holder who never
 // picked the car up has no periods, so the record covers no data at all.
-func (e *Evaluator) custody(ctx context.Context, vehicle, holder string) (Set, error) {
-	periods, err := e.Resolver.Custody(ctx, vehicle, holder)
+func (e *Evaluator) custody(ctx context.Context, org, vehicle, holder string) (Set, error) {
+	periods, err := e.Resolver.Custody(ctx, org, vehicle, holder)
 	if err != nil {
 		return nil, err
 	}
@@ -609,20 +687,46 @@ func (e *Evaluator) membership(ctx context.Context, rec *Record, vehicle string,
 		return nil, false, err
 	}
 
+	// Each record's interval is its latest version whose author could have
+	// written it: tag edits widen every delegation over the tag, so they count
+	// only when the author could have granted these abilities at commit time
+	// (§9.2). An edit that does not count leaves the version before it standing,
+	// rather than dropping the vehicle from the tag.
+	byRecord := map[string][]Membership{}
+	var order []string
+	for i, m := range memberships {
+		key := m.URI
+		if key == "" {
+			key = fmt.Sprintf("#%d", i)
+		}
+		if _, ok := byRecord[key]; !ok {
+			order = append(order, key)
+		}
+		byRecord[key] = append(byRecord[key], m)
+	}
+	need := MembershipNeed(rec)
 	var set Set
 	live := false
-	need := MembershipNeed(rec)
-	for _, m := range memberships {
-		// Tag edits widen every delegation over the tag, so they count only when the
-		// author could have granted these abilities at commit time.
-		if m.CreatedBy != "" && m.CreatedBy != org {
-			ok, err := e.hasRole(ctx, org, m.CreatedBy, Covers{Tag: rec.Covers.Tag}, need, m.CommittedAt, nil, walk{depth: depth})
-			if err != nil {
-				return nil, false, err
+	for _, key := range order {
+		versions := byRecord[key]
+		slices.SortStableFunc(versions, func(a, b Membership) int { return b.CommittedAt.Compare(a.CommittedAt) })
+		var m *Membership
+		for i := range versions {
+			v := &versions[i]
+			if v.CreatedBy != "" && v.CreatedBy != org {
+				ok, err := e.hasRole(ctx, org, v.CreatedBy, Covers{Tag: rec.Covers.Tag}, need, v.CommittedAt, nil, walk{depth: depth})
+				if err != nil {
+					return nil, false, err
+				}
+				if !ok {
+					continue
+				}
 			}
-			if !ok {
-				continue
-			}
+			m = v
+			break
+		}
+		if m == nil {
+			continue
 		}
 		left := m.LeftAt != nil && !m.LeftAt.After(at)
 		if left && rec.afterRemoval() == Drop {
@@ -648,8 +752,8 @@ func (e *Evaluator) root(ctx context.Context, s *Stored, vehicle string, at time
 		return nil, nil, err
 	}
 
-	var eras Set
-	liveEra := false
+	// The eras rec.From controlled, each proven by its opening.
+	var controlled []*control.Era
 	for i := range state.Eras {
 		era := &state.Eras[i]
 		opening, err := e.Resolver.Opening(ctx, vehicle, era.Number, rec.From)
@@ -662,9 +766,22 @@ func (e *Evaluator) root(ctx context.Context, s *Stored, vehicle string, at time
 		if control.Verify(era.Commitment, *opening) != nil {
 			continue
 		}
+		controlled = append(controlled, era)
+	}
+	// A root committed inside a compromise window of this controller's is void
+	// for good (§8), whichever era it would read: the directory carries a window
+	// forward into later eras, but an earlier era does not learn of a later one,
+	// so a root forged during a later compromise would otherwise still read the
+	// earlier eras' history.
+	for _, era := range controlled {
 		if era.Revoked(s.CommittedAt) {
-			continue
+			return nil, nil, fmt.Errorf("%w: %s was committed inside a revocation window", ErrNotCovered, s.URI)
 		}
+	}
+
+	var eras Set
+	liveEra := false
+	for _, era := range controlled {
 		ended := era.End != nil && !era.End.After(at)
 		if ended && rec.afterTransfer() == Drop {
 			continue
@@ -747,7 +864,7 @@ func (e *Evaluator) parents(ctx context.Context, s *Stored, vehicle, clientID st
 // narrows checks the static rules a child must satisfy against a parent.
 func narrows(child, parent *Record) error {
 	if parent.Type != TypeDelegation {
-		return errors.New("basis must be a delegation")
+		return fmt.Errorf("%w: basis must be a delegation", ErrInvalidRecord)
 	}
 	if child.From != parent.To {
 		return fmt.Errorf("%w: from %s is not the recipient %s", ErrNotNarrowing, child.From, parent.To)
@@ -797,6 +914,12 @@ func narrows(child, parent *Record) error {
 		if !parent.Redelegate.Exclusive && !slices.Contains(parent.Exclusive, a) {
 			return fmt.Errorf("%w: basis does not permit an exclusive claim over %s", ErrNotNarrowing, a)
 		}
+	}
+	// Permission to claim exclusivity passes down only from a basis that has it.
+	// Without this a partner could switch it on for its own children, and a
+	// grandchild's hold would suspend the controller's commands.
+	if child.Redelegate.Exclusive && !parent.Redelegate.Exclusive {
+		return fmt.Errorf("%w: basis does not permit exclusive redelegation", ErrNotNarrowing)
 	}
 	// Recovery is exclusivity's override: it acts through somebody else's hold,
 	// so it cannot be cheaper to claim than the hold itself. A basis that never
@@ -989,7 +1112,7 @@ func (e *Evaluator) roleActive(ctx context.Context, r *Stored, org, member strin
 	if slices.Contains(w.seen, r.URI) {
 		return false, nil
 	}
-	if at.Before(r.CommittedAt) || !rec.Validity.Set().Contains(at) {
+	if at.Before(r.CommittedAt) || (r.Superseded != nil && !at.Before(*r.Superseded)) || !rec.Validity.Set().Contains(at) {
 		return false, nil
 	}
 	revoked, err := e.revokedAt(ctx, rec, r.Tombstone, at, w.into(r.URI))
@@ -1044,7 +1167,7 @@ func (e *Evaluator) roleScopeCovers(ctx context.Context, role, target Covers, at
 		if err != nil {
 			return false, err
 		}
-		for _, m := range memberships {
+		for _, m := range latestVersions(memberships) {
 			if !at.Before(m.JoinedAt) && (m.LeftAt == nil || at.Before(*m.LeftAt)) {
 				return true, nil
 			}
@@ -1053,6 +1176,29 @@ func (e *Evaluator) roleScopeCovers(ctx context.Context, role, target Covers, at
 	default:
 		return role.Vehicle != "" && role.Vehicle == target.Vehicle, nil
 	}
+}
+
+// latestVersions keeps the current version of each membership record: what
+// the tag says now, before anybody's authority is asked about.
+func latestVersions(ms []Membership) []Membership {
+	latest := map[string]int{}
+	var out []Membership
+	for i, m := range ms {
+		if m.URI == "" {
+			out = append(out, m)
+			continue
+		}
+		j, ok := latest[m.URI]
+		if !ok {
+			latest[m.URI] = len(out)
+			out = append(out, m)
+			continue
+		}
+		if m.CommittedAt.After(out[j].CommittedAt) {
+			out[j] = ms[i]
+		}
+	}
+	return out
 }
 
 // revokedAt reports whether an authorized tombstone is in effect at time at.

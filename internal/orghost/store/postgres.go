@@ -186,7 +186,11 @@ func (s *PostgresStore) head(ctx context.Context, q querier, org string) (Head, 
 	return h, nil
 }
 
-func (s *PostgresStore) AppendAfter(ctx context.Context, expectedHead Head, c repo.Committed) error {
+func (s *PostgresStore) AppendAfter(ctx context.Context, expectedHead Head, commits ...repo.Committed) error {
+	if len(commits) == 0 {
+		return nil
+	}
+	org := commits[0].DID
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -196,48 +200,53 @@ func (s *PostgresStore) AppendAfter(ctx context.Context, expectedHead Head, c re
 	// Serialize writers for this org. The conflict is between two rows that do
 	// not exist yet, so no row lock can catch it; the primary key on (org, seq)
 	// would, but only after both writers had signed rival commits.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, c.DID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, org); err != nil {
 		return fmt.Errorf("lock org: %w", err)
 	}
-	head, err := s.head(ctx, tx, c.DID)
+	head, err := s.head(ctx, tx, org)
 	if err != nil {
 		return err
 	}
 	if head != expectedHead {
 		return ErrHeadChanged
 	}
-
-	var record *string
-	if len(c.Record) > 0 {
-		r := string(c.Record)
-		record = &r
-	}
-	approved := c.ApprovedBy
-	if approved == nil {
-		approved = []string{}
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO commits (org, seq, cid, prev, rev, op, collection, rkey, record, committed_by, approved_by, committed_at, sig)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-		c.DID, c.Seq, c.CID, c.Prev, c.Rev, c.Op, c.Collection, c.RKey, record, c.CommittedBy, approved, c.CommittedAt, c.Sig,
-	); err != nil {
-		return fmt.Errorf("insert commit: %w", err)
+	if err := chained(expectedHead, commits); err != nil {
+		return err
 	}
 
-	var upsert string
-	switch c.Op {
-	case repo.OpTombstone:
-		upsert = `UPDATE heads SET tombstone_seq = $4 WHERE org = $1 AND collection = $2 AND rkey = $3`
-	default:
-		upsert = `INSERT INTO heads (org, collection, rkey, record_seq, tombstone_seq) VALUES ($1, $2, $3, $4, NULL)
-			ON CONFLICT (org, collection, rkey) DO UPDATE SET record_seq = EXCLUDED.record_seq, tombstone_seq = NULL`
-	}
-	tag, err := tx.Exec(ctx, upsert, c.DID, c.Collection, c.RKey, c.Seq)
-	if err != nil {
-		return fmt.Errorf("update head: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("update head: %s of %s/%s touched %d rows", c.Op, c.Collection, c.RKey, tag.RowsAffected())
+	for _, c := range commits {
+		var record *string
+		if len(c.Record) > 0 {
+			r := string(c.Record)
+			record = &r
+		}
+		approved := c.ApprovedBy
+		if approved == nil {
+			approved = []string{}
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO commits (org, seq, cid, prev, rev, op, collection, rkey, record, committed_by, approved_by, committed_at, sig)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+			c.DID, c.Seq, c.CID, c.Prev, c.Rev, c.Op, c.Collection, c.RKey, record, c.CommittedBy, approved, c.CommittedAt, c.Sig,
+		); err != nil {
+			return fmt.Errorf("insert commit: %w", err)
+		}
+
+		var upsert string
+		switch c.Op {
+		case repo.OpTombstone:
+			upsert = `UPDATE heads SET tombstone_seq = $4 WHERE org = $1 AND collection = $2 AND rkey = $3`
+		default:
+			upsert = `INSERT INTO heads (org, collection, rkey, record_seq, tombstone_seq) VALUES ($1, $2, $3, $4, NULL)
+				ON CONFLICT (org, collection, rkey) DO UPDATE SET record_seq = EXCLUDED.record_seq, tombstone_seq = NULL`
+		}
+		tag, err := tx.Exec(ctx, upsert, c.DID, c.Collection, c.RKey, c.Seq)
+		if err != nil {
+			return fmt.Errorf("update head: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("update head: %s of %s/%s touched %d rows", c.Op, c.Collection, c.RKey, tag.RowsAffected())
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -373,9 +382,9 @@ func (s *PostgresStore) TagSize(ctx context.Context, org, tag string, at time.Ti
 	return n, nil
 }
 
-func (s *PostgresStore) Custody(ctx context.Context, vehicle, holder string) ([]Stored, error) {
-	return s.queryStored(ctx, `h.collection = 'network.dimo.org.custody' AND h.tombstone_seq IS NULL
-		AND r.record_json->>'vehicle' = $1 AND r.record_json->>'holder' = $2`, vehicle, holder)
+func (s *PostgresStore) Custody(ctx context.Context, org, vehicle, holder string) ([]Stored, error) {
+	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.org.custody' AND h.tombstone_seq IS NULL
+		AND r.record_json->>'vehicle' = $2 AND r.record_json->>'holder' = $3`, org, vehicle, holder)
 }
 
 func (s *PostgresStore) Roles(ctx context.Context, org, member string) ([]Stored, error) {
@@ -530,9 +539,20 @@ func (s *PostgresStore) Commits(ctx context.Context, org string, afterSeq int64,
 	if limit <= 0 {
 		limit = 1 << 30
 	}
+	return s.queryCommits(ctx, `org = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3`, org, afterSeq, limit)
+}
+
+func (s *PostgresStore) KeyCommits(ctx context.Context, org, collection, rkey string) ([]repo.Committed, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	return s.queryCommits(ctx, `org = $1 AND collection = $2 AND rkey = $3 ORDER BY seq ASC`, org, collection, rkey)
+}
+
+func (s *PostgresStore) queryCommits(ctx context.Context, where string, args ...any) ([]repo.Committed, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT org, seq, cid, prev, rev, op, collection, rkey, record, committed_by, approved_by, committed_at, sig
-		FROM commits WHERE org = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3`, org, afterSeq, limit)
+		FROM commits WHERE `+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query commits: %w", err)
 	}

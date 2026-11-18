@@ -1,4 +1,4 @@
-package crypto
+package didkey
 
 import (
 	"crypto/ecdsa"
@@ -16,12 +16,12 @@ func TestEncodeDecode_P256(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 
-	didKey, err := EncodeDIDKey(&key.PublicKey)
+	didKey, err := Encode(&key.PublicKey)
 	require.NoError(t, err)
 
 	assert.Contains(t, didKey, "did:key:z")
 
-	decoded, err := DecodeDIDKey(didKey)
+	decoded, err := Decode(didKey)
 	require.NoError(t, err)
 
 	assert.Equal(t, multicodec.P256Pub, decoded.Codec())
@@ -38,7 +38,7 @@ func TestEncodeDecode_Secp256k1(t *testing.T) {
 
 	assert.Contains(t, didKey, "did:key:z")
 
-	decoded, err := DecodeDIDKey(didKey)
+	decoded, err := Decode(didKey)
 	require.NoError(t, err)
 
 	assert.Equal(t, multicodec.Secp256k1Pub, decoded.Codec())
@@ -53,7 +53,7 @@ func TestFromECDSA_RejectsOtherCurves(t *testing.T) {
 	_, err = FromECDSA(&key.PublicKey)
 	assert.Error(t, err)
 
-	_, err = EncodeDIDKey(&key.PublicKey)
+	_, err = Encode(&key.PublicKey)
 	assert.Error(t, err)
 }
 
@@ -94,7 +94,7 @@ func TestDecodeDIDKey_Invalid(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := DecodeDIDKey(tt.input)
+			_, err := Decode(tt.input)
 			assert.Error(t, err)
 		})
 	}
@@ -134,12 +134,37 @@ func TestRoundTrip_MultipleKeys(t *testing.T) {
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		require.NoError(t, err)
 
-		didKey, err := EncodeDIDKey(&key.PublicKey)
+		didKey, err := Encode(&key.PublicKey)
 		require.NoError(t, err)
 
-		decoded, err := DecodeDIDKey(didKey)
+		decoded, err := Decode(didKey)
 		require.NoError(t, err)
 
 		assert.True(t, decoded.p256.Equal(&key.PublicKey))
 	}
+}
+
+func TestDecodeSignature_InvalidBase64(t *testing.T) {
+	_, err := decodeSignature("not-valid-base64!!!", 32)
+	assert.Error(t, err)
+}
+
+func TestDecodeSignature_WrongLength(t *testing.T) {
+	// Valid base64url, but not 64 bytes.
+	_, err := decodeSignature("AAAA", 32)
+	assert.Error(t, err)
+}
+
+func TestDecodeMultibase(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	pub, err := FromECDSA(&key.PublicKey)
+	require.NoError(t, err)
+
+	decoded, err := DecodeMultibase(pub.Multibase())
+	require.NoError(t, err)
+	assert.Equal(t, pub.DIDKey(), decoded.DIDKey())
+
+	_, err = DecodeMultibase("not multibase")
+	assert.Error(t, err)
 }

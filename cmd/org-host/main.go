@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/orghost"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
@@ -64,12 +65,15 @@ func main() {
 		log.Warn().Msg("Using in-memory store (no DATABASE_URL configured): org keys do not outlive this process")
 	}
 
+	if cfg.IdentityIssuer == "" || cfg.IdentityAudience == "" {
+		log.Fatal().Msg("IDENTITY_ISSUER and IDENTITY_AUDIENCE are required: a token for another service must not write here")
+	}
 	var auth orghost.Authenticator
 	switch {
 	case cfg.IdentityJWKSURL != "":
-		auth, err = orghost.NewJWKSAuthenticatorFromURL(ctx, cfg.IdentityJWKSURL, cfg.IdentityIssuer)
+		auth, err = orghost.NewJWKSAuthenticatorFromURL(ctx, cfg.IdentityJWKSURL, cfg.IdentityIssuer, cfg.IdentityAudience)
 	case cfg.IdentityJWKS != "":
-		auth, err = orghost.NewJWKSAuthenticator([]byte(cfg.IdentityJWKS), cfg.IdentityIssuer)
+		auth, err = orghost.NewJWKSAuthenticator([]byte(cfg.IdentityJWKS), cfg.IdentityIssuer, cfg.IdentityAudience)
 	default:
 		log.Fatal().Msg("IDENTITY_JWKS_URL or IDENTITY_JWKS is required: writes are attributed to the identity token's sub")
 	}
@@ -79,6 +83,12 @@ func main() {
 
 	if cfg.DirectoryURL == "" {
 		log.Fatal().Msg("DIRECTORY_URL is required: /authorize reads control state from the directory")
+	}
+	var controlTTL time.Duration
+	if cfg.ControlCacheTTL != "" {
+		if controlTTL, err = time.ParseDuration(cfg.ControlCacheTTL); err != nil || controlTTL <= 0 {
+			log.Fatal().Str("value", cfg.ControlCacheTTL).Msg("CONTROL_CACHE_TTL must be a positive duration")
+		}
 	}
 	if len(cfg.IssuerDIDs) == 0 {
 		log.Warn().Msg("No ISSUER_DIDS configured: nothing may call /authorize")
@@ -92,14 +102,15 @@ func main() {
 
 	repo := &orghost.Repository{Store: st, Signer: orghost.NewLocalSigner(st, sealer)}
 	app := orghost.New(orghost.Options{
-		Repo:     repo,
-		Auth:     auth,
-		Control:  client.New(cfg.DirectoryURL),
-		Issuers:  cfg.IssuerDIDs,
-		Admins:   cfg.AdminDIDs,
-		Policies: policies,
-		PageSize: cfg.PageSize,
-		Log:      log,
+		Repo:            repo,
+		Auth:            auth,
+		Control:         client.New(cfg.DirectoryURL),
+		Issuers:         cfg.IssuerDIDs,
+		Admins:          cfg.AdminDIDs,
+		Policies:        policies,
+		PageSize:        cfg.PageSize,
+		ControlCacheTTL: controlTTL,
+		Log:             log,
 	})
 
 	go func() {

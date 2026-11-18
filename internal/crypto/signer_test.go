@@ -105,17 +105,6 @@ func TestVerifyWithDIDKey_P256(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestDecodeSignature_InvalidBase64(t *testing.T) {
-	_, err := decodeSignatureBytes("not-valid-base64!!!", 32)
-	assert.Error(t, err)
-}
-
-func TestDecodeSignature_WrongLength(t *testing.T) {
-	// Valid base64url, but not 64 bytes.
-	_, err := decodeSignatureBytes("AAAA", 32)
-	assert.Error(t, err)
-}
-
 func TestVerify_Secp256k1_ComponentOverflow(t *testing.T) {
 	privKey, err := secp256k1.GeneratePrivateKey()
 	require.NoError(t, err)

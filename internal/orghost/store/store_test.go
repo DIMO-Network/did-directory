@@ -295,16 +295,20 @@ func TestStore_ResolverQueries(t *testing.T) {
 				assert.Equal(t, want, n, "day %d", d)
 			}
 
-			// Custody is found by vehicle and holder across repositories.
+			// Custody is found by vehicle and holder within one repository.
 			appendRecord(t, s, org, repo.OpCreate, custody, "c1", `{"vehicle":"`+car+`","holder":"`+renter+`","from":"`+day(10)+`","until":"`+day(12)+`"}`, alice)
 			appendRecord(t, s, other, repo.OpCreate, custody, "c2", `{"vehicle":"`+car+`","holder":"`+renter+`","from":"`+day(20)+`"}`, "")
 			appendRecord(t, s, org, repo.OpCreate, custody, "c3", `{"vehicle":"`+van+`","holder":"`+renter+`","from":"`+day(10)+`"}`, "")
 			appendRecord(t, s, org, repo.OpCreate, custody, "c4", `{"vehicle":"`+car+`","holder":"`+renter+`","from":"`+day(1)+`","until":"`+day(2)+`"}`, "")
 			appendRecord(t, s, org, repo.OpTombstone, custody, "c4", "", "")
-			cs, err := s.Custody(ctx, car, renter)
+			cs, err := s.Custody(ctx, org, car, renter)
 			require.NoError(t, err)
-			require.Len(t, cs, 2)
-			assert.ElementsMatch(t, []string{"c1", "c2"}, []string{cs[0].RKey, cs[1].RKey})
+			require.Len(t, cs, 1)
+			assert.Equal(t, "c1", cs[0].RKey)
+			cs, err = s.Custody(ctx, other, car, renter)
+			require.NoError(t, err)
+			require.Len(t, cs, 1)
+			assert.Equal(t, "c2", cs[0].RKey)
 
 			// Roles come back tombstoned or not; the evaluator reads the tombstone.
 			role := func(to string) string {

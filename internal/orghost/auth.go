@@ -35,12 +35,15 @@ type Authenticator interface {
 const tokenLeeway = time.Minute
 
 // JWKSAuthenticator verifies RS256 identity tokens against a JSON Web Key Set,
-// the way dauth publishes its signing keys. It enforces the signature, exp and
-// nbf, and an issuer when one is configured; audience is left to the issuer's
-// own conventions until dauth mints these tokens (plan §6 step 7).
+// the way dauth publishes its signing keys. It enforces the signature, exp,
+// nbf, the issuer and the audience. The audience is what keeps a token a
+// member signed in with for some other service from writing records here as
+// them: dauth issues one kind of identity token to every relying party, and
+// aud is the only thing in it that says which.
 type JWKSAuthenticator struct {
-	issuer string
-	fetch  func(ctx context.Context) ([]byte, error)
+	issuer   string
+	audience string
+	fetch    func(ctx context.Context) ([]byte, error)
 
 	mu        sync.RWMutex
 	keys      map[string]*rsa.PublicKey
@@ -51,18 +54,22 @@ type JWKSAuthenticator struct {
 const jwksRefreshInterval = time.Minute
 
 // NewJWKSAuthenticator builds an authenticator over a static key set. issuer
-// is the required iss claim, or "" to accept any.
-func NewJWKSAuthenticator(jwksJSON []byte, issuer string) (*JWKSAuthenticator, error) {
+// is the iss claim a token must carry and audience a value its aud must
+// contain; both are required.
+func NewJWKSAuthenticator(jwksJSON []byte, issuer, audience string) (*JWKSAuthenticator, error) {
+	if issuer == "" || audience == "" {
+		return nil, errors.New("an identity token issuer and audience are both required")
+	}
 	keys, err := parseJWKS(jwksJSON)
 	if err != nil {
 		return nil, err
 	}
-	return &JWKSAuthenticator{issuer: issuer, keys: keys, fetchedAt: time.Now()}, nil
+	return &JWKSAuthenticator{issuer: issuer, audience: audience, keys: keys, fetchedAt: time.Now()}, nil
 }
 
 // NewJWKSAuthenticatorFromURL fetches the key set from url now and again
 // whenever a token names a key id it does not hold, at most once a minute.
-func NewJWKSAuthenticatorFromURL(ctx context.Context, url, issuer string) (*JWKSAuthenticator, error) {
+func NewJWKSAuthenticatorFromURL(ctx context.Context, url, issuer, audience string) (*JWKSAuthenticator, error) {
 	fetch := func(ctx context.Context) ([]byte, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -82,7 +89,7 @@ func NewJWKSAuthenticatorFromURL(ctx context.Context, url, issuer string) (*JWKS
 	if err != nil {
 		return nil, err
 	}
-	a, err := NewJWKSAuthenticator(body, issuer)
+	a, err := NewJWKSAuthenticator(body, issuer, audience)
 	if err != nil {
 		return nil, err
 	}
@@ -190,10 +197,11 @@ func (a *JWKSAuthenticator) Authenticate(ctx context.Context, authorization stri
 		return "", fmt.Errorf("%w: malformed claims", ErrUnauthenticated)
 	}
 	var claims struct {
-		Iss string `json:"iss"`
-		Sub string `json:"sub"`
-		Exp int64  `json:"exp"`
-		Nbf int64  `json:"nbf"`
+		Iss string          `json:"iss"`
+		Sub string          `json:"sub"`
+		Aud json.RawMessage `json:"aud"`
+		Exp int64           `json:"exp"`
+		Nbf int64           `json:"nbf"`
 	}
 	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
 		return "", fmt.Errorf("%w: malformed claims", ErrUnauthenticated)
@@ -205,11 +213,32 @@ func (a *JWKSAuthenticator) Authenticate(ctx context.Context, authorization stri
 	if claims.Nbf != 0 && now.Before(time.Unix(claims.Nbf, 0).Add(-tokenLeeway)) {
 		return "", fmt.Errorf("%w: token not yet valid", ErrUnauthenticated)
 	}
-	if a.issuer != "" && claims.Iss != a.issuer {
+	if claims.Iss != a.issuer {
 		return "", fmt.Errorf("%w: wrong issuer", ErrUnauthenticated)
+	}
+	if !audienceContains(claims.Aud, a.audience) {
+		return "", fmt.Errorf("%w: token is not for this host (aud)", ErrUnauthenticated)
 	}
 	if !strings.HasPrefix(claims.Sub, "did:") || len(claims.Sub) == len("did:") {
 		return "", fmt.Errorf("%w: sub must be a DID", ErrUnauthenticated)
 	}
 	return claims.Sub, nil
+}
+
+// audienceContains reports whether a JWT aud claim, a string or an array of
+// strings, names want.
+func audienceContains(raw json.RawMessage, want string) bool {
+	var one string
+	if json.Unmarshal(raw, &one) == nil {
+		return one == want
+	}
+	var many []string
+	if json.Unmarshal(raw, &many) == nil {
+		for _, a := range many {
+			if a == want {
+				return true
+			}
+		}
+	}
+	return false
 }

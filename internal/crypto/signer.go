@@ -31,18 +31,3 @@ func SignOperation(key *ecdsa.PrivateKey, data []byte) (string, error) {
 
 	return base64.RawURLEncoding.EncodeToString(sig), nil
 }
-
-// decodeSignatureBytes decodes a base64url-encoded r||s signature, checking
-// that it holds exactly two byteSize components.
-func decodeSignatureBytes(sig string, byteSize int) ([]byte, error) {
-	sigBytes, err := base64.RawURLEncoding.DecodeString(sig)
-	if err != nil {
-		return nil, fmt.Errorf("base64url decode: %w", err)
-	}
-
-	if len(sigBytes) != 2*byteSize {
-		return nil, fmt.Errorf("invalid signature length: got %d, want %d", len(sigBytes), 2*byteSize)
-	}
-
-	return sigBytes, nil
-}

@@ -21,8 +21,12 @@ type Settings struct {
 	// keys; IdentityJWKS is the same key set given inline, for development.
 	IdentityJWKSURL string `yaml:"IDENTITY_JWKS_URL"`
 	IdentityJWKS    string `yaml:"IDENTITY_JWKS"`
-	// IdentityIssuer is the iss claim identity tokens must carry, or "" for any.
-	IdentityIssuer string `yaml:"IDENTITY_ISSUER"`
+	// IdentityIssuer is the iss claim identity tokens must carry, and
+	// IdentityAudience a value their aud must contain: this host's own public
+	// URL, which is what a member asks dauth for when signing in to write here.
+	// Both are required.
+	IdentityIssuer   string `yaml:"IDENTITY_ISSUER"`
+	IdentityAudience string `yaml:"IDENTITY_AUDIENCE"`
 	// DirectoryURL is the DID directory, for control state (plan §3.3).
 	DirectoryURL string `yaml:"DIRECTORY_URL"`
 	// IssuerDIDs are the DIDs that may call POST /authorize: dauth's.
@@ -31,6 +35,11 @@ type Settings struct {
 	AdminDIDs []string `yaml:"ADMIN_DIDS"`
 	// PageSize bounds list and log responses.
 	PageSize int `yaml:"PAGE_SIZE"`
+	// ControlCacheTTL is how long a vehicle's control state read from the
+	// directory is served before it is fetched again (a Go duration such as
+	// 30s); empty means DefaultControlCacheTTL. A demo against a directory on
+	// the same machine sets it low so a transfer shows at once.
+	ControlCacheTTL string `yaml:"CONTROL_CACHE_TTL"`
 }
 
 // LoadSettings reads path, then applies environment overrides.
@@ -52,7 +61,9 @@ func LoadSettings(path string) (*Settings, error) {
 	env("IDENTITY_JWKS_URL", &s.IdentityJWKSURL)
 	env("IDENTITY_JWKS", &s.IdentityJWKS)
 	env("IDENTITY_ISSUER", &s.IdentityIssuer)
+	env("IDENTITY_AUDIENCE", &s.IdentityAudience)
 	env("DIRECTORY_URL", &s.DirectoryURL)
+	env("CONTROL_CACHE_TTL", &s.ControlCacheTTL)
 	// Comma-separated in the environment.
 	if v := os.Getenv("ISSUER_DIDS"); v != "" {
 		s.IssuerDIDs = splitList(v)

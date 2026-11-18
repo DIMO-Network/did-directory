@@ -408,7 +408,7 @@ func TestControlStateCache(t *testing.T) {
 	assert.Empty(t, st.Eras, "served from cache")
 	assert.Equal(t, 1, h.directory.calls)
 
-	h.clock = day(1).Add(controlCacheTTL)
+	h.clock = day(1).Add(DefaultControlCacheTTL)
 	st, err = r.ControlState(ctx, car)
 	require.NoError(t, err)
 	assert.Len(t, st.Eras, 1)

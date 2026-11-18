@@ -26,10 +26,10 @@ type ControlSource interface {
 	Control(ctx context.Context, did string) (*control.State, error)
 }
 
-// controlCacheTTL bounds how stale a cached control state may be. A transfer
-// or revocation in the directory takes effect on the host within this long,
-// which is well inside the token lifetimes spec §11.1 sets.
-const controlCacheTTL = 30 * time.Second
+// DefaultControlCacheTTL bounds how stale a cached control state may be. A
+// transfer or revocation in the directory takes effect on the host within this
+// long, which is well inside the token lifetimes spec §11.1 sets.
+const DefaultControlCacheTTL = 30 * time.Second
 
 // Resolver implements delegation.Resolver over this host's store and the DID
 // directory (plan §3.3). Records are read from any repository on the host, so
@@ -40,6 +40,9 @@ type Resolver struct {
 	Control ControlSource
 	// Now is the clock the cache ages by; nil means time.Now.
 	Now func() time.Time
+	// ControlCacheTTL is how long a fetched control state is served before the
+	// directory is asked again; zero means DefaultControlCacheTTL.
+	ControlCacheTTL time.Duration
 
 	mu    sync.Mutex
 	cache map[string]cachedControl
@@ -55,6 +58,13 @@ func (r *Resolver) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
+}
+
+func (r *Resolver) controlTTL() time.Duration {
+	if r.ControlCacheTTL > 0 {
+		return r.ControlCacheTTL
+	}
+	return DefaultControlCacheTTL
 }
 
 func resolveErr(err error) error {
@@ -104,35 +114,19 @@ func (r *Resolver) Record(ctx context.Context, uri string) (*delegation.Stored, 
 	return stored(org, st)
 }
 
-// Memberships implements delegation.Resolver. CreatedBy is the commit's
-// witnessed author, never anything in the record (plan §7).
+// Memberships implements delegation.Resolver: every version of each live
+// membership record, CreatedBy the commit's witnessed author (plan §7).
 func (r *Resolver) Memberships(ctx context.Context, tag, vehicle string) ([]delegation.Membership, error) {
 	org, err := delegation.TagAuthority(tag)
 	if err != nil {
 		return nil, err
 	}
-	sts, err := r.Store.Memberships(ctx, org, tag, vehicle)
+	out, _, err := membershipVersions(ctx, r.Store, org, tag, vehicle)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
-	}
-	return membershipsOf(sts)
-}
-
-// membershipsOf converts membership records to what the evaluator reads.
-func membershipsOf(sts []store.Stored) ([]delegation.Membership, error) {
-	out := make([]delegation.Membership, 0, len(sts))
-	for i := range sts {
-		var m delegation.MembershipRecord
-		if err := json.Unmarshal(sts[i].Record, &m); err != nil {
-			return nil, fmt.Errorf("%s: %w", sts[i].URI, err)
-		}
-		out = append(out, delegation.Membership{
-			Tag: m.Tag, Vehicle: m.Vehicle, JoinedAt: m.JoinedAt, LeftAt: m.LeftAt,
-			CreatedBy: sts[i].CommittedBy, CommittedAt: sts[i].CommittedAt,
-		})
 	}
 	return out, nil
 }
@@ -153,10 +147,10 @@ func (r *Resolver) TagSize(ctx context.Context, tag string, at time.Time) (int, 
 	return n, nil
 }
 
-// Custody implements delegation.Resolver. Periods are read from every
-// repository on the host, oldest first.
-func (r *Resolver) Custody(ctx context.Context, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
-	sts, err := r.Store.Custody(ctx, vehicle, holder)
+// Custody implements delegation.Resolver. Periods are read from org's
+// repository, oldest first.
+func (r *Resolver) Custody(ctx context.Context, org, vehicle, holder string) ([]delegation.CustodyPeriod, error) {
+	sts, err := r.Store.Custody(ctx, org, vehicle, holder)
 	if err != nil {
 		return nil, resolveErr(err)
 	}
@@ -177,38 +171,26 @@ func custodyOf(sts []store.Stored) ([]delegation.CustodyPeriod, error) {
 	return out, nil
 }
 
-// Roles implements delegation.Resolver.
+// Roles implements delegation.Resolver: every version of every role org
+// issued to member.
 func (r *Resolver) Roles(ctx context.Context, org, member string) ([]delegation.Stored, error) {
-	sts, err := r.Store.Roles(ctx, org, member)
+	out, _, err := roleVersions(ctx, r.Store, org, member)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
 	}
-	return storedAll(org, sts)
-}
-
-// storedAll converts every record in sts, all from org's repository.
-func storedAll(org string, sts []store.Stored) ([]delegation.Stored, error) {
-	out := make([]delegation.Stored, 0, len(sts))
-	for i := range sts {
-		s, err := stored(org, &sts[i])
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *s)
-	}
 	return out, nil
 }
 
 // ControlState implements delegation.Resolver over the directory, cached for
-// controlCacheTTL. A DID the directory does not hold has no eras, which the
+// ControlCacheTTL. A DID the directory does not hold has no eras, which the
 // evaluator turns into "not the controller of record".
 func (r *Resolver) ControlState(ctx context.Context, vehicle string) (*control.State, error) {
 	now := r.now()
 	r.mu.Lock()
-	if c, ok := r.cache[vehicle]; ok && now.Sub(c.fetched) < controlCacheTTL {
+	if c, ok := r.cache[vehicle]; ok && now.Sub(c.fetched) < r.controlTTL() {
 		r.mu.Unlock()
 		return c.state, nil
 	}
@@ -230,33 +212,17 @@ func (r *Resolver) ControlState(ctx context.Context, vehicle string) (*control.S
 	return state, nil
 }
 
-// Opening implements delegation.Resolver: the controller's vehicleControl
-// record for the vehicle, if it names this era.
+// Opening implements delegation.Resolver from any version of the
+// controller's vehicleControl record for the vehicle.
 func (r *Resolver) Opening(ctx context.Context, vehicle string, era uint64, controller string) (*control.Opening, error) {
-	st, err := r.Store.Current(ctx, controller, delegation.CollectionVehicleControl, vehicle)
+	o, _, err := openingVersion(ctx, r.Store, vehicle, era, controller)
 	if store.IsNotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, resolveErr(err)
 	}
-	return openingOf(st, era)
-}
-
-// openingOf reads a vehicleControl record as an opening for era, or nil if
-// the record is tombstoned or names another era.
-func openingOf(st *store.Stored, era uint64) (*control.Opening, error) {
-	if !st.Live() {
-		return nil, nil
-	}
-	var o control.Opening
-	if err := json.Unmarshal(st.Record, &o); err != nil {
-		return nil, fmt.Errorf("%s: %w", st.URI, err)
-	}
-	if o.Era != era {
-		return nil, nil
-	}
-	return &o, nil
+	return o, nil
 }
 
 // Party implements delegation.Resolver from the party table (plan §1 decision

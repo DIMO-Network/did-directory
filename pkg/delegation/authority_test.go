@@ -128,6 +128,55 @@ func TestNarrows_RecoveryNeedsTheSamePermissionAsExclusivity(t *testing.T) {
 	assert.True(t, cov.RecoveryUsed)
 }
 
+// Permission to claim exclusivity is the controller's to hand out. A partner
+// holding a plain redelegable grant cannot switch it on for its own children,
+// or its grandchild's hold would suspend the controller's commands (§12.2).
+func TestNarrows_ExclusiveRedelegationNeedsTheBasis(t *testing.T) {
+	r := newResolver()
+	r.control(t, car, avis)
+
+	// Avis's own crew holds the commands directly.
+	crew := delegation(avis, alice, Covers{Vehicle: car}, "command:lock")
+	cru := uri(avis, "crew")
+	r.put(cru, crew, day(1))
+
+	// Ford Pro may redelegate twice, but was never permitted exclusivity.
+	fp := delegation(avis, fordPro, Covers{Vehicle: car}, "command:lock")
+	fp.Redelegate = Redelegate{Mode: RedelegateAttenuated, MaxDepth: 2}
+	fpu := uri(avis, "fordpro")
+	r.put(fpu, fp, day(1))
+
+	// Ford Pro turns exclusivity on for the integrator ...
+	in := delegation(fordPro, integrator, Covers{Inherit: true}, "command:lock")
+	in.Basis = []string{fpu}
+	in.Redelegate = Redelegate{Mode: RedelegateAttenuated, MaxDepth: 1, Exclusive: true}
+	inu := uri(fordPro, "integrator")
+	r.put(inu, in, day(1))
+
+	// ... and the integrator claims the commands exclusively.
+	hold := delegation(integrator, marketing, Covers{Inherit: true}, "command:lock")
+	hold.Basis = []string{inu}
+	hold.Exclusive = []string{"command:lock"}
+	hu := uri(integrator, "hold")
+	r.put(hu, hold, day(2))
+
+	e := &Evaluator{Resolver: r}
+	_, err := e.Coverage(ctx, inu, car, day(3))
+	assert.ErrorIs(t, err, ErrNotNarrowing)
+	_, err = e.Coverage(ctx, hu, car, day(3))
+	assert.ErrorIs(t, err, ErrNotNarrowing)
+	cov, err := e.Authorize(ctx, cru, alice, "", car, []string{"command:lock"}, day(3))
+	require.NoError(t, err, "a hold whose chain does not narrow suspends nobody")
+	assert.Equal(t, []string{"command:lock"}, cov.Live)
+
+	// Once Avis permits it, the chain holds and the hold is in force.
+	r.records[fpu].Record.Redelegate.Exclusive = true
+	_, err = e.Coverage(ctx, hu, car, day(3))
+	require.NoError(t, err)
+	_, err = e.Authorize(ctx, cru, alice, "", car, []string{"command:lock"}, day(3))
+	assert.ErrorIs(t, err, ErrExclusiveHold)
+}
+
 // An allowlist bounds who, not how many, so it cannot silently turn an
 // attenuated basis's two remaining hops into an unbounded chain.
 func TestNarrows_AllowlistChildSpendsTheAttenuatedBudget(t *testing.T) {

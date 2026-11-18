@@ -504,3 +504,52 @@ func TestBookingRolePolicy(t *testing.T) {
 		delegation.CustodyPeriod{Vehicle: car, Holder: renter, From: day(10)})
 	assert.Equal(t, http.StatusCreated, status, body)
 }
+
+// TestOverwriteTakesWhatRevokingTakes: a PUT onto a live record's key replaces
+// it, which takes the old record away as a tombstone would. Checking only the
+// new body let an issuer release a lien only its lender may release, and let a
+// member replace a grant outside their scope with one inside it.
+func TestOverwriteTakesWhatRevokingTakes(t *testing.T) {
+	for name, st := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			a := newAvis(t, st)
+			fl := delegation.Covers{Tag: a.tag["fl-fleet"]}
+			financed := delegation.Covers{Tag: a.tag["financed-fc"]}
+
+			lien := a.grant(fordCredit, financed, "location:precise", "health:read")
+			lien.RevocableBy = delegation.RevocableByTo
+			status, body := a.do(http.MethodPut, a.path(delegation.CollectionDelegation, "fordcredit"), bob, lien)
+			require.Equal(t, http.StatusAccepted, status, body)
+			status, body = a.approve(body["pending"].(string), carol)
+			require.Equal(t, http.StatusCreated, status, body)
+
+			// Neither the author nor the org may revoke it, so neither may rewrite it.
+			released := lien
+			released.RevocableBy = delegation.RevocableByFrom
+			for _, as := range []string{bob, a.org} {
+				status, body = a.do(http.MethodPut, a.path(delegation.CollectionDelegation, "fordcredit"), as, released)
+				assert.Equal(t, http.StatusForbidden, status, body)
+				assert.Contains(t, body["error"], "overwriting")
+			}
+			status, body = a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "fordcredit"), carol, nil)
+			require.Equal(t, http.StatusOK, status, body)
+			assert.Equal(t, "to", body["record"].(map[string]any)["revocableBy"])
+
+			// Alice's insurer grant over fl-fleet is outside Bob's role, so he cannot
+			// replace it with one inside it.
+			status, body = a.do(http.MethodPut, a.path(delegation.CollectionDelegation, "insurer"), alice,
+				a.grant(insurer, fl, "telemetry:read", "events:read"))
+			require.Equal(t, http.StatusCreated, status, body)
+			status, body = a.do(http.MethodPut, a.path(delegation.CollectionDelegation, "insurer"), bob,
+				a.grant(insurer, financed, "location:precise"))
+			assert.Equal(t, http.StatusForbidden, status, body)
+			assert.Contains(t, body["error"], "overwriting")
+
+			// Alice may still update her own grant under its stable key, which is
+			// how a booking service upserts.
+			status, body = a.do(http.MethodPut, a.path(delegation.CollectionDelegation, "insurer"), alice,
+				a.grant(insurer, fl, "telemetry:read"))
+			assert.Equal(t, http.StatusOK, status, body)
+		})
+	}
+}

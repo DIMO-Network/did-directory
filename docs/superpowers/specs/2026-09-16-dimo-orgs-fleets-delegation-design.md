@@ -168,7 +168,7 @@ A child delegation *C* with basis *P* is valid at time *t* only if **all** of th
 |---|---|---|
 | `network.dimo.delegation` | TID | §5 |
 | `network.dimo.org.tag` | tag slug | `{name, description}` |
-| `network.dimo.org.tagMembership` | TID | `{tag, vehicle, joinedAt, leftAt?, createdBy}`, one record per membership interval |
+| `network.dimo.org.tagMembership` | TID | `{tag, vehicle, joinedAt, leftAt?}`, one record per membership interval; its author is the commit's witnessed `committedBy`, never a field in the record |
 | `network.dimo.org.role` | TID | a delegation from the org to a member (§6.3), stored separately so it can be listed |
 | `network.dimo.org.vehicleControl` | vehicle DID | `{vehicle, salt, era, since}`, the private opening of the control commitment (§10) |
 
@@ -239,12 +239,12 @@ A root is implicit for the controller: the controller holds every ability over i
 
 **Nobody grants themselves.** Staff are customers too. A member may not author a grant where they are the recipient unless a second principal, who held the same authority at commit time, approved the write. Enforced at evaluation, and surfaced at commit time as an approval reason.
 
-**Blast radius controls.** The issuer rejects, and the org host refuses to commit, any delegation that:
+**Blast radius controls.** The org host refuses to commit any delegation that:
 - covers more than N vehicles (default 500), or
-- includes a live ability, or
+- includes an actuating ability (`command:*`, §5.1), or
 - sets `revocableBy: "to"`
 
-unless the commit carries a Turnkey policy approval (2-of-n org admins). Root rotation keys never sign routine writes.
+unless the commit carries a second approval (`approvedBy`, decision 24), under the policy the authoring role names. Root rotation keys never sign routine writes. In v1 this is checked when the record is committed, not again when it is evaluated (decision 27): the evaluator does not know which policy a role committed under, and a booking role's policy deliberately lets custody commands through without a second admin (§12.5).
 
 The vehicle count is checked at commit time and again whenever membership of a covering tag would push the count past N. A membership write that crosses the threshold needs the same approval, so a tag can't grow a small delegation into a fleet-wide one unnoticed.
 
@@ -295,7 +295,7 @@ coverage(D, V) = (∪ membership intervals of V in D.covers.tag, ending at leftA
 
 Adding a car to a tag widens every delegation that covers the tag, so tag writes get checked like grants:
 
-- **Enforced at check time, so it can't be bypassed.** A membership interval counts toward delegation *D* only if the record's `createdBy` held `tag:write` on that tag **and** held authority ⊇ `D.abilities` over that vehicle when the record was committed. A low-privilege tag editor can't enlarge an agreement that an admin signed.
+- **Enforced at check time, so it can't be bypassed.** A membership interval counts toward delegation *D* only if the author the repository witnessed (`committedBy`) held `tag:write` on that tag **and** held authority ⊇ `D.abilities` over that vehicle when the record was committed. A low-privilege tag editor can't enlarge an agreement that an admin signed.
 - **Also checked at write time, as UX.** The org host rejects membership writes that would be ignored and names the delegations that are blocking it.
 
 ### 9.3 Consented vehicles (dealer case)
@@ -363,7 +363,7 @@ The digest is `sha256("dimo-control-commitment-v1" ‖ len32(controllerDID) ‖ 
 }
 ```
 
-When grants would cover more than 50 vehicles, the token carries `coverageRef: {delegation: at-uri, rev}` instead of listing them. dq resolves it against its local copy of the coverage index.
+When grants would cover more than 50 vehicles, the token carries `coverageRef: {delegation: at-uri, rev}` instead of listing them. dq resolves it against its local copy of the coverage index. **Deferred (2026-09-21):** v1 has no coverage index and no `coverageRef`; a request names one delegation and one vehicle (`{grant, vehicle, abilities}`, per decision 13), and the token lists one grant per window set for that vehicle. The as-built exchange is in the org host plan §5.
 
 **Lifetime:** at most 2 hours for historical abilities, 15 minutes for live abilities. Tokens are always DPoP-bound.
 
@@ -381,7 +381,7 @@ When grants would cover more than 50 vehicles, the token carries `coverageRef: {
 
 | Where | Change |
 |---|---|
-| `dq/internal/auth/claim.go` | `DQClaim` gains `Grants []Grant` and `CoverageRef`, in addition to `tokenclaims.Token` (single `Asset` accepted during the transition) |
+| `dq/internal/auth/claim.go` | `DQClaim` is `tokenclaims.Token` with `Grants []Grant` (no `Asset`: no transition, §15; no `CoverageRef` in v1, §11.1) |
 | `dq/internal/auth/directives.go` `NewVehicleTokenCheck` | Allow when `subject` ∈ grants, or `subject` is covered through `CoverageRef` in the local index. Otherwise deny, fail closed. |
 | Resolvers and fetch RPCs | Clamp the requested time range to the subject's `windows`. Multi-interval results are returned as merged segments and never interpolated across gaps. |
 | New | Fleet query taking a coverage reference (one token, many subjects, paged), so partners don't make one request per car |
@@ -422,7 +422,7 @@ During custody the renter holds `command:*` **exclusively**. The operator cannot
 
 Two overlapping holds do not deadlock: the **newer one is in force**, so a stale hold from a device that never synced its return is superseded rather than locking the next renter out, while the operator stays blocked by both. A suspended grant answers `ErrExclusiveHold` naming the abilities, never "not covered" — the operator learns that somebody is driving their car, which is a different fact from never having been granted it. A caller asking for an ability the grant never carried still gets "not covered".
 
-Exclusivity is permitted by the basis (`redelegate.exclusive`) and claimed by the time-bounded child, so a host permits it once at listing and only loses control for the booking window. It applies to the record being authorized, never to links inside its own chain.
+Exclusivity is permitted by the basis (`redelegate.exclusive`) and claimed by the time-bounded child, so a host permits it once at listing and only loses control for the booking window. It applies to the record being authorized, never to links inside its own chain. A child may set `redelegate.exclusive` only where its basis did, and a role must `allowExclusive` to issue it, so the permission never appears below where the controller granted it. A hold suspends others only once its own chain evaluates: a claim is not a hold.
 
 ### 12.3 Activation order
 
@@ -523,7 +523,7 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Irrevocable liens | **Fleet only.** `revocableBy: "to"` is allowed only when the issuer is an org, and needs policy approval. Consumer loans use `revocableBy: either`, and the org host notifies the lender on revocation. Enforced in `delegation.CheckCommit` and again at evaluation. |
+| 1 | Irrevocable liens | **Fleet only.** `revocableBy: "to"` is allowed only when the issuer is an attested operator (`Party.Operator`, §7), and needs policy approval. Consumer loans use `revocableBy: either`, and the org host notifies the lender on revocation. Enforced in `delegation.CheckCommit`; the operator rule is checked again at evaluation (`ErrLienNotAllowed`), the approval only at commit in v1 (decision 27). |
 | 2 | Commitment vs. plain pointer | **Hash commitment** (§10), with per-vehicle custody keys. |
 | 3 | Grantee countersignature | **Optional**, required only when `terms` is set. Enforced by the org host, not the evaluator. Not implemented yet. |
 | 4 | Blast-radius threshold | **500 vehicles** by default (`delegation.DefaultApprovalThreshold`), overridable per org tier. Also applies when tag growth pushes an existing delegation past it (`CheckMembershipGrowth`). |
@@ -561,10 +561,9 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 
 **Fixed 2026-09-22:** compiled grant keys were joined with `/`, which `ParseURI` cannot address. Keys are now `:`-joined from a restricted alphabet, and `delegation.ValidateRKey` enforces the atproto record-key rules for anyone minting a key.
 
-**Not in did-directory (other agents):**
-- **Org host:** repository commits, the `ORG_COVERAGE` stream, coverage proofs, `listDescendants`, countersignatures, lender notification. It implements `delegation.Resolver`.
-- **dauth `/exchange`:** mint credentials with `delegation.Evaluator.Authorize`.
-- **dq:** the §11.4 changes.
+**Built 2026-09-22 (org host plan §6, steps 1–8):** the org host (`cmd/org-host`: signed commit logs, write-time checks, two-person approval, `/authorize`, coverage proofs, descendants), the booking SDK, dauth's DID sign-in and `/exchange` (the evaluator runs in the host, decision 21), dq's grants, windows and DPoP, and `scripts/demo.sh` running all of it. Still not built: the `ORG_COVERAGE` stream and coverage index, `coverageRef` and the dq fleet query (deferred 2026-09-21), countersignatures, lender notification, and ODRL at any wire boundary (§5: `pkg/odrl` exists, but records cross the wire as `delegation.Record` JSON).
+
+**Reviewed 2026-09-23** across the three repositories, with the fixes on the same branches: exclusive holds and custody from repositories that had no authority over the car; a `PUT` that replaced a record without the authority to revoke it; `redelegate.exclusive` passing down without the basis allowing it; roles, memberships and openings read at their current version rather than the one in force when authority was exercised; identity tokens accepted for any audience and client assertions that were bearer identity tokens; dq reads that returned data outside the token's windows; checks that did not hold under concurrent writes; and revocation windows that did not reach the controller's earlier eras. The pattern is the one of 2026-09-17 in a new place: authority read from state the reader had not established was the right state — another repository's claims, a caller's header, the record's current version, the time before a write lands.
 
 ## 18. Open, after the renter analysis
 
@@ -588,6 +587,7 @@ Owner → insurance app, `covers: {vehicle}`. This is the same record type and t
 | 24 | Second approval | **A record fact** (`approvedBy`), collected in v1 by a second member approving a pending write. Not a vendor feature. |
 | 25 | Party attributes | **DIMO-administered table** per DID for v1. |
 | 26 | Agreement compilation | **Client side, in the booking service** (as §12 says). The host never learns what a booking is; `pkg/agreement` is an SDK. |
+| 27 | Blast-radius approvals at evaluation (2026-09-23) | **Commit time only, for v1.** The host checks the second approval for large, actuating or irrevocable delegations when they are committed, under the authoring role's policy; the evaluator does not check it again. Rechecking would need the evaluator to know every role's commit policy. What this relies on is that nothing reaches a repository except through the host's write checks, which since 2026-09-23 include updates (a `PUT` must pass the tombstone check) and run under the org's write lock. |
 
 **Open, added 2026-09-22.** `revokeSince` ends the era (§8) because a bearer SACD had no witnessed commit time. With SACDs gone every grant has one, so a compromise window alone could suffice. Ending the era still invalidates the old opening, which is a real property, so the mechanism stays until someone needs the simpler one.
 

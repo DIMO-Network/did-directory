@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/pkg/repo"
@@ -125,7 +126,9 @@ type Store interface {
 	// if the head is still expectedHead. It returns ErrHeadChanged if another
 	// writer got there first. The caller signs the commit before calling, so seq
 	// and prev are inside the signature; the head check is what makes them true.
-	AppendAfter(ctx context.Context, expectedHead Head, c repo.Committed) error
+	// Several commits append together or not at all: they must follow each
+	// other, the first following expectedHead.
+	AppendAfter(ctx context.Context, expectedHead Head, commits ...repo.Committed) error
 
 	// Current returns the state of a record key, tombstoned or not, or ErrNotFound
 	// if nothing was ever committed under it.
@@ -136,6 +139,11 @@ type Store interface {
 	// Commits returns the org's commits with seq greater than afterSeq, in order,
 	// at most limit.
 	Commits(ctx context.Context, org string, afterSeq int64, limit int) ([]repo.Committed, error)
+	// KeyCommits returns every commit to one record key, creates, updates and
+	// tombstones, in seq order: its history, which repo.Versions splits into
+	// versions. An org not on this host is ErrNotFound; a key never written
+	// has no commits.
+	KeyCommits(ctx context.Context, org, collection, rkey string) ([]repo.Committed, error)
 
 	// The resolver queries (plan §3.3) read the current view of records. Each
 	// returns live records only unless it says otherwise, ordered by seq.
@@ -145,9 +153,8 @@ type Store interface {
 	// TagSize counts the distinct vehicles with a live membership interval in
 	// org's tag that contains at.
 	TagSize(ctx context.Context, org, tag string, at time.Time) (int, error)
-	// Custody returns every live custody record for vehicle and holder, from
-	// every repository on this host.
-	Custody(ctx context.Context, vehicle, holder string) ([]Stored, error)
+	// Custody returns org's live custody records for vehicle and holder.
+	Custody(ctx context.Context, org, vehicle, holder string) ([]Stored, error)
 	// Roles returns org's role records addressed to member, tombstoned ones
 	// included: the evaluator decides for itself whether a tombstone counts.
 	Roles(ctx context.Context, org, member string) ([]Stored, error)
@@ -185,4 +192,21 @@ type Store interface {
 
 	// Close closes the store.
 	Close() error
+}
+
+// chained checks that commits follow head and each other, all in one org: the
+// shape AppendAfter appends.
+func chained(head Head, commits []repo.Committed) error {
+	prev := head
+	for i := range commits {
+		c := &commits[i]
+		if c.DID != commits[0].DID {
+			return fmt.Errorf("commit %d is for %s, not %s", i, c.DID, commits[0].DID)
+		}
+		if c.Seq != prev.Seq+1 || c.Prev != prev.CID {
+			return fmt.Errorf("commit %d (seq %d) does not follow seq %d", i, c.Seq, prev.Seq)
+		}
+		prev = Head{Seq: c.Seq, CID: c.CID, Rev: c.Rev}
+	}
+	return nil
 }
