@@ -25,6 +25,12 @@ func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 
 	// Health check.
 	app.Get("/health", func(c *fiber.Ctx) error {
+		if err := st.Ping(c.UserContext()); err != nil {
+			log.Error().Err(err).Msg("health check: store unreachable")
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "store unavailable",
+			})
+		}
 		return c.JSON(fiber.Map{
 			"status": "ok",
 		})

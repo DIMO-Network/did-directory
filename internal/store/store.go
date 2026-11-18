@@ -59,6 +59,9 @@ type Store interface {
 	// Export returns operations after the given sequence number, up to limit.
 	Export(ctx context.Context, afterSeq int64, limit int) ([]OperationRecord, error)
 
+	// Ping reports whether the store is reachable.
+	Ping(ctx context.Context) error
+
 	// Close closes the store.
 	Close() error
 }

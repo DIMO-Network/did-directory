@@ -192,6 +192,11 @@ func (s *PostgresStore) Export(ctx context.Context, afterSeq int64, limit int) (
 	return records, rows.Err()
 }
 
+// Ping checks the database connection.
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 func (s *PostgresStore) Close() error {
 	s.pool.Close()
 	return nil
@@ -302,6 +307,9 @@ func (s *MemoryStore) Export(_ context.Context, afterSeq int64, limit int) ([]Op
 	}
 	return records, nil
 }
+
+// Ping always succeeds: memory is always reachable.
+func (s *MemoryStore) Ping(context.Context) error { return nil }
 
 func (s *MemoryStore) Close() error {
 	return nil

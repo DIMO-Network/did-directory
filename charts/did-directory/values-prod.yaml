@@ -1,0 +1,26 @@
+replicaCount: 2
+fullnameOverride: did-directory-prod
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/auth-tls-secret: ingress/cf-origin-ca
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: 'on'
+    nginx.ingress.kubernetes.io/limit-rps: '20'
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: '2'
+    external-dns.alpha.kubernetes.io/hostname: did.dimo.zone
+  hosts:
+    - host: did.dimo.zone
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+resources:
+  limits:
+    cpu: 1
+    memory: 1024Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+podDisruptionBudget:
+  minAvailable: 1
