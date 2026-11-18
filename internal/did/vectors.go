@@ -41,7 +41,7 @@ type VectorFile struct {
 }
 
 // GenerateVectors builds the golden vectors. Everything is deterministic
-// except the signatures, since ECDSA signing is randomized.
+// including the signatures: decred's ecdsa.Sign is RFC 6979 deterministic.
 func GenerateVectors() (VectorFile, error) {
 	walletBytes, err := hex.DecodeString(vectorWalletKeyHex)
 	if err != nil {
@@ -109,7 +109,13 @@ func GenerateVectors() (VectorFile, error) {
 		})
 		return nil
 	}
-	prev := func(name string) *string { c := cids[name]; return &c }
+	prev := func(name string) *string {
+		c, ok := cids[name]
+		if !ok {
+			panic("vectors: unknown prev case " + name)
+		}
+		return &c
+	}
 
 	steps := []struct {
 		name string
@@ -147,7 +153,7 @@ func GenerateVectors() (VectorFile, error) {
 				VerificationMethods: map[string]string{"wallet": walletDID}, AlsoKnownAs: []string{},
 				Services: map[string]Service{
 					"a":   {Type: "x<y>&z", Endpoint: "https://e.example/p?a=1&b=2"},
-					"bbb": {Type: "t", Endpoint: "https://e.example/ "},
+					"bbb": {Type: "t", Endpoint: "https://e.example/\u2028\u2029"},
 				}}
 		}},
 		{"tombstone", func() *Operation {

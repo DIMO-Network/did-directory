@@ -1,6 +1,9 @@
 package server
 
 import (
+	"context"
+	"time"
+
 	"github.com/DIMO-Network/did-directory/internal/config"
 	"github.com/DIMO-Network/did-directory/internal/handlers"
 	"github.com/DIMO-Network/did-directory/internal/store"
@@ -23,9 +26,16 @@ func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 	app.Use(requestid.New())
 	app.Use(cors.New())
 
-	// Health check.
+	// Liveness: process only, never touches the store.
+	app.Get("/ping", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
+
+	// Readiness: includes the store.
 	app.Get("/health", func(c *fiber.Ctx) error {
-		if err := st.Ping(c.UserContext()); err != nil {
+		ctx, cancel := context.WithTimeout(c.UserContext(), 2*time.Second)
+		defer cancel()
+		if err := st.Ping(ctx); err != nil {
 			log.Error().Err(err).Msg("health check: store unreachable")
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 				"error": "store unavailable",

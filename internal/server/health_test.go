@@ -27,6 +27,11 @@ func TestHealthFailsWhenStoreDown(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 503, resp.StatusCode)
 
+	// Liveness must not depend on the store.
+	resp, err = down.Test(httptest.NewRequest("GET", "/ping", nil))
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
 	up := New(cfg, pingStore{Store: store.NewMemoryStore()}, zerolog.Nop())
 	resp, err = up.Test(httptest.NewRequest("GET", "/health", nil))
 	require.NoError(t, err)

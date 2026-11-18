@@ -31,7 +31,7 @@ fmt:
 	go mod tidy
 
 docker:
-	docker build -t dimo/did-directory:$(VERSION) .
+	docker build --target directory -t dimo/did-directory:$(VERSION) .
 
 clean:
 	rm -rf bin/ docs/odrl-builder/builder.wasm docs/odrl-builder/wasm_exec.js

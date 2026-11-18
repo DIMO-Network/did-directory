@@ -25,9 +25,6 @@ func TestVectorsUpToDate(t *testing.T) {
 	require.NoError(t, err)
 	want := readVectorFile(t, "../../testdata/vectors/did-ops.json")
 	require.Len(t, want.Cases, 8)
-	for i := range got.Cases {
-		got.Cases[i].Sig, want.Cases[i].Sig = "", "" // ECDSA is randomized
-	}
 	assert.Equal(t, want, got)
 }
 
@@ -52,4 +49,22 @@ func TestGenesisVectorsDeriveDID(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, c.DID, d, c.Name)
 	}
+}
+
+func TestEscapingVectorCoverage(t *testing.T) {
+	f := readVectorFile(t, "../../testdata/vectors/did-ops.json")
+	var found bool
+	for _, c := range f.Cases {
+		if c.Name != "genesis-services-escaping" {
+			continue
+		}
+		found = true
+		raw, err := hex.DecodeString(c.PayloadHex)
+		require.NoError(t, err)
+		text := string(raw)
+		for _, esc := range []string{`\u003c`, `\u003e`, `\u0026`, `\u2028`, `\u2029`} {
+			assert.Contains(t, text, esc)
+		}
+	}
+	require.True(t, found, "genesis-services-escaping case missing")
 }
