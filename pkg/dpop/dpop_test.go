@@ -3,10 +3,12 @@ package dpop
 import (
 	"encoding/base64"
 	"encoding/json"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -93,4 +95,75 @@ func TestRejectsPrivateJWKAndWrongTyp(t *testing.T) {
 	parts[0] = base64.RawURLEncoding.EncodeToString(raw)
 	_, err = NewVerifier().Verify(strings.Join(parts, "."), "POST", "https://dq.test/query", "")
 	assert.ErrorIs(t, err, ErrInvalid)
+}
+
+// signedProof signs a proof with key and an arbitrary jti.
+func signedProof(t *testing.T, key *Key, jti string, now time.Time) string {
+	t.Helper()
+	claims := proofClaims{JTI: jti, HTM: "POST", HTU: "https://dq.test/query", IAT: now.Unix()}
+	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	tok.Header["typ"] = typ
+	tok.Header["jwk"] = key.jwk
+	s, err := tok.SignedString(key.priv)
+	require.NoError(t, err)
+	return s
+}
+
+func TestJTILength(t *testing.T) {
+	key, err := GenerateKey()
+	require.NoError(t, err)
+	now := time.Now()
+	v := NewVerifier()
+
+	// A normal 22-character base64url jti (16 random bytes) and a P-256 key.
+	jti := base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef"))
+	require.Len(t, jti, 22)
+	jkt, err := v.Verify(signedProof(t, key, jti, now), "POST", "https://dq.test/query", "")
+	require.NoError(t, err)
+	assert.Equal(t, key.Thumbprint(), jkt)
+
+	// 64 bytes is the limit.
+	_, err = v.Verify(signedProof(t, key, strings.Repeat("a", 64), now), "POST", "https://dq.test/query", "")
+	require.NoError(t, err)
+
+	long := signedProof(t, key, strings.Repeat("a", 65), now)
+	_, err = v.Verify(long, "POST", "https://dq.test/query", "")
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Contains(t, err.Error(), "jti too long")
+	assert.Len(t, v.replay.seen, 2, "an oversized jti never reaches the replay cache")
+}
+
+func TestProofSizeCap(t *testing.T) {
+	_, err := NewVerifier().Verify(strings.Repeat("a", 4097), "POST", "https://dq.test/query", "")
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Contains(t, err.Error(), "too large")
+
+	key, err := GenerateKey()
+	require.NoError(t, err)
+	// A real proof is far under the cap, and an oversized one is cut off
+	// before parsing, not as a parse error.
+	big := signedProof(t, key, "j", time.Now()) + strings.Repeat("a", 4096)
+	_, err = NewVerifier().Verify(big, "POST", "https://dq.test/query", "")
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.Contains(t, err.Error(), "too large")
+}
+
+func TestRSAModulusBounds(t *testing.T) {
+	jwkWithBits := func(bits int) map[string]any {
+		n := new(big.Int).Lsh(big.NewInt(1), uint(bits-1)) // exactly bits long
+		return map[string]any{
+			"kty": "RSA",
+			"n":   base64.RawURLEncoding.EncodeToString(n.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString([]byte{1, 0, 1}),
+		}
+	}
+	_, err := publicKey(jwkWithBits(2047))
+	assert.Error(t, err, "below 2048 still rejected")
+	_, err = publicKey(jwkWithBits(2048))
+	assert.NoError(t, err)
+	_, err = publicKey(jwkWithBits(4096))
+	assert.NoError(t, err)
+	_, err = publicKey(jwkWithBits(4097))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too large")
 }

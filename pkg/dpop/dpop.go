@@ -39,6 +39,14 @@ const TokenType = "DPoP"
 // typ is the JOSE typ of a proof.
 const typ = "dpop+jwt"
 
+// Bounds on attacker-controlled input; Verify runs before callers check
+// anything else, so these keep an anonymous client from spending memory.
+const (
+	maxProofBytes     = 4096
+	maxJTIBytes       = 64
+	maxRSAModulusBits = 4096
+)
+
 // ErrInvalid is wrapped by every verification failure.
 var ErrInvalid = errors.New("invalid DPoP proof")
 
@@ -105,6 +113,9 @@ func (proofClaims) GetAudience() (jwt.ClaimStrings, error)       { return nil, n
 // required). It returns the thumbprint of the key that signed the proof; the
 // caller compares it to the access token's cnf.jkt.
 func (v *Verifier) Verify(proof, method, requestURL, accessToken string) (string, error) {
+	if len(proof) > maxProofBytes {
+		return "", fmt.Errorf("%w: proof too large", ErrInvalid)
+	}
 	var claims proofClaims
 	var jkt string
 	parser := jwt.NewParser(jwt.WithValidMethods([]string{"ES256", "RS256"}), jwt.WithoutClaimsValidation())
@@ -134,6 +145,9 @@ func (v *Verifier) Verify(proof, method, requestURL, accessToken string) (string
 
 	if claims.JTI == "" {
 		return "", fmt.Errorf("%w: jti is required", ErrInvalid)
+	}
+	if len(claims.JTI) > maxJTIBytes {
+		return "", fmt.Errorf("%w: jti too long", ErrInvalid)
 	}
 	if !strings.EqualFold(claims.HTM, method) {
 		return "", fmt.Errorf("%w: htm %q does not match %s", ErrInvalid, claims.HTM, method)
@@ -241,6 +255,9 @@ func publicKey(jwk map[string]any) (crypto.PublicKey, error) {
 		}
 		if !e.IsInt64() || e.Int64() < 3 || n.BitLen() < 2048 {
 			return nil, errors.New("jwk RSA key is too weak")
+		}
+		if n.BitLen() > maxRSAModulusBits {
+			return nil, errors.New("jwk RSA modulus is too large")
 		}
 		return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
 	default:

@@ -21,6 +21,33 @@ import (
 // rather than as a failure match on it with errors.Is.
 var ErrNotFound = errors.New("DID not found")
 
+// ErrGone is returned when the directory answers 410: the DID was deactivated
+// (tombstoned) and will not come back.
+var ErrGone = errors.New("DID deactivated")
+
+// StatusError is returned for a non-2xx response that has no more specific
+// error. Callers use errors.As to branch on 4xx (their request) versus 5xx
+// (retry).
+type StatusError struct {
+	Status int
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("directory returned status %d: %s", e.Status, e.Body)
+}
+
+// statusErr maps a non-2xx response to its typed error.
+func statusErr(status int, body []byte, didStr string) error {
+	switch status {
+	case http.StatusNotFound:
+		return fmt.Errorf("%w: %s", ErrNotFound, didStr)
+	case http.StatusGone:
+		return fmt.Errorf("%w: %s", ErrGone, didStr)
+	}
+	return &StatusError{Status: status, Body: truncate(string(body), 512)}
+}
+
 // Client is a Go client for the DID Directory service.
 type Client struct {
 	baseURL    string
@@ -154,12 +181,8 @@ func (c *Client) Resolve(ctx context.Context, didStr string) (*did.DIDDocument, 
 		return nil, fmt.Errorf("do request: %w", err)
 	}
 
-	if status == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, didStr)
-	}
-
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("resolve failed (status %d): %s", status, string(respBody))
+		return nil, statusErr(status, respBody, didStr)
 	}
 
 	var doc did.DIDDocument
@@ -183,12 +206,8 @@ func (c *Client) Control(ctx context.Context, didStr string) (*control.State, er
 		return nil, fmt.Errorf("do request: %w", err)
 	}
 
-	if status == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, didStr)
-	}
-
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("control lookup failed (status %d): %s", status, string(respBody))
+		return nil, statusErr(status, respBody, didStr)
 	}
 
 	var state control.State
@@ -213,7 +232,7 @@ func (c *Client) AuditLog(ctx context.Context, didStr string) ([]json.RawMessage
 	}
 
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("audit failed (status %d): %s", status, string(respBody))
+		return nil, statusErr(status, respBody, didStr)
 	}
 
 	var entries []json.RawMessage
