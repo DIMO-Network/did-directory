@@ -1,0 +1,615 @@
+<meta charset="utf-8">
+<title>ODRL Grant Builder</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+  /* Layout: a working bench. Form on the left, the codec's output pinned on the right; stacks on phones.
+     Palette and faces follow docs/eras-tags-and-grants.html; magenta marks DIMO profile terms, as in the demo. */
+  :root {
+    --ground: #f6f7f9;
+    --surface: #ffffff;
+    --raised: #eef1f4;
+    --ink: #151b23;
+    --muted: #5c6773;
+    --line: #ccd4dc;
+    --line-soft: #e3e8ed;
+    --accent: #10645c;
+    --accent-ink: #0c4a44;
+    --accent-soft: rgba(16, 100, 92, 0.10);
+    --profile: #a3257f;
+    --string: #1f5e9c;
+    --warn: #a44b18;
+    --warn-soft: rgba(164, 75, 24, 0.10);
+    --live: #b3401a;
+    --admin: #5a4bb0;
+    --serif: "IBM Plex Serif", Georgia, serif;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #10151a; --surface: #19212a; --raised: #212b35; --ink: #e9eff5; --muted: #9aa8b6;
+      --line: #32404c; --line-soft: #232d37; --accent: #57c9bb; --accent-ink: #8fdcd2;
+      --accent-soft: rgba(87, 201, 187, 0.14); --profile: #f07ad0; --string: #8cbcf0;
+      --warn: #e79461; --warn-soft: rgba(231, 148, 97, 0.14); --live: #f0946e; --admin: #b3a8f5;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #10151a; --surface: #19212a; --raised: #212b35; --ink: #e9eff5; --muted: #9aa8b6;
+    --line: #32404c; --line-soft: #232d37; --accent: #57c9bb; --accent-ink: #8fdcd2;
+    --accent-soft: rgba(87, 201, 187, 0.14); --profile: #f07ad0; --string: #8cbcf0;
+    --warn: #e79461; --warn-soft: rgba(231, 148, 97, 0.14); --live: #f0946e; --admin: #b3a8f5;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { background: var(--ground); color: var(--ink); font: 14px/1.5 var(--sans); }
+  .wrap { max-width: 1320px; margin: 0 auto; padding-inline: 20px; padding-block: 24px 48px; }
+
+  header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; margin-bottom: 18px; }
+  h1 { font: 600 26px/1.2 var(--serif); margin: 0; text-wrap: balance; }
+  .lede { color: var(--muted); margin: 4px 0 0; max-width: 68ch; }
+  .status { font: 12px var(--mono); color: var(--muted); }
+
+  .presets { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 20px; }
+  .presets .label { font: 500 11px var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
+  button { font: 500 13px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 11px; cursor: pointer; }
+  button:hover { border-color: var(--accent); color: var(--accent-ink); }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+  button.primary:hover { color: var(--surface); filter: brightness(1.08); }
+  .presets button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); }
+
+  .bench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 20px; align-items: start; }
+  @media (max-width: 900px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+
+  form { display: grid; gap: 14px; min-width: 0; }
+  fieldset { border: 1px solid var(--line-soft); background: var(--surface); border-radius: 8px; padding: 12px 16px 16px; margin: 0; display: grid; gap: 12px; min-width: 0; }
+  legend { font: 600 12px var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 0 6px; margin-left: -6px; }
+  legend code { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--profile); }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 14px; }
+  label.f { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+  label.f > span b { color: var(--ink); font-weight: 500; }
+  input[type=text], input[type=datetime-local], input[type=number], select, textarea {
+    font: 13px var(--mono); color: var(--ink); background: var(--ground); border: 1px solid var(--line);
+    border-radius: 5px; padding: 6px 8px; width: 100%; min-width: 0;
+  }
+  textarea { resize: vertical; min-height: 56px; }
+  .hint { font-size: 12px; color: var(--muted); margin: 0; }
+  .hint code { font: 12px var(--mono); }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; width: max-content; max-width: 100%; }
+  .seg label { display: flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; border-right: 1px solid var(--line); }
+  .seg label:last-child { border-right: 0; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label:has(input:checked) { background: var(--accent-soft); color: var(--accent-ink); font-weight: 500; }
+  .seg label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .seg small { font: 11px var(--mono); color: var(--muted); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px 3px 8px; font: 12px var(--mono); cursor: pointer; background: var(--ground); }
+  .chip input { margin: 0; accent-color: var(--accent); }
+  .chip:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  .chip i { font-style: normal; font: 10px var(--sans); letter-spacing: .05em; text-transform: uppercase; }
+  .cls-live { color: var(--live); } .cls-admin { color: var(--admin); } .cls-historical { color: var(--muted); }
+  .checks { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+  .checks label { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+  .checks input { accent-color: var(--accent); }
+  .dur { display: flex; gap: 8px; align-items: center; }
+  .dur output { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+
+  .out { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); display: grid; gap: 10px; min-width: 0; }
+  @media (max-width: 900px) { .out { position: static; } }
+  .card { background: var(--surface); border: 1px solid var(--line-soft); border-radius: 8px; min-width: 0; }
+  .card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); }
+  .card-head h2 { font: 600 13px var(--sans); margin: 0; }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .badge { font: 500 11px var(--sans); padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .badge.ok { color: var(--accent); } .badge.bad { color: var(--warn); } .badge.type { color: var(--muted); }
+  .summary { padding: 10px 14px; border-bottom: 1px solid var(--line-soft); font-size: 13px; }
+  .summary b { font-weight: 600; } .summary code { font: 12px var(--mono); }
+  pre.odrl { margin: 0; padding: 12px 14px; overflow: auto; max-height: min(70vh, 760px); font: 12.5px/1.55 var(--mono); tab-size: 2; }
+  .k { color: var(--accent-ink); } .k.p { color: var(--profile); font-weight: 500; }
+  .s { color: var(--string); } .n { color: var(--live); } .kw { color: var(--admin); }
+  .v.p { color: var(--profile); }
+  .error { margin: 0; padding: 12px 14px; background: var(--warn-soft); color: var(--warn); font: 13px var(--mono); border-radius: 8px; border: 1px solid var(--warn); overflow-wrap: anywhere; }
+  .error b { font-family: var(--sans); font-weight: 600; display: block; margin-bottom: 2px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); padding: 0 2px; }
+  .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; background: currentColor; }
+
+  details.import summary { cursor: pointer; padding: 10px 14px; font: 600 13px var(--sans); }
+  details.import .body { padding: 0 14px 14px; display: grid; gap: 8px; }
+  details.import textarea { min-height: 140px; }
+  .loading { padding: 40px 14px; color: var(--muted); text-align: center; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>ODRL Grant Builder</h1>
+      <p class="lede">Compose a DIMO delegation or role. The ODRL on the right comes from <code>pkg/odrl</code> compiled to WebAssembly, so it and every error message are exactly what the org host would store or refuse. Times are UTC.</p>
+    </div>
+    <span class="status" id="status">loading codec…</span>
+  </header>
+
+  <div class="presets" id="presets"><span class="label">Examples from the demo</span></div>
+
+  <div class="bench">
+    <form id="f" autocomplete="off">
+      <fieldset>
+        <legend>Kind</legend>
+        <div class="seg" role="radiogroup" aria-label="Record kind">
+          <label><input type="radio" name="type" id="type-del" value="network.dimo.delegation" checked> Delegation <small>Agreement</small></label>
+          <label><input type="radio" name="type" id="type-role" value="network.dimo.org.role"> Role <small>Set</small></label>
+        </div>
+        <label class="f"><span><b>uid</b>, the record's at-uri; the host sets it on commit</span><input type="text" id="uid" placeholder="at://did:…/network.dimo.delegation/key"></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Parties</legend>
+        <div class="row">
+          <label class="f"><span><b>From</b> · assigner</span><input type="text" id="from" placeholder="did:…"></label>
+          <label class="f"><span><b>To</b> · assignee</span><input type="text" id="to" placeholder="did:…"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Covers · target</legend>
+        <div class="seg" role="radiogroup" aria-label="What the grant covers">
+          <label><input type="radio" name="covers" id="cov-tag" value="tag" checked> Tag</label>
+          <label><input type="radio" name="covers" id="cov-vehicle" value="vehicle"> Vehicle</label>
+          <label><input type="radio" name="covers" id="cov-inherit" value="inherit"> Inherit</label>
+        </div>
+        <label class="f" id="cov-target-wrap"><span id="cov-target-label"><b>Tag URI</b> · AssetCollection</span><input type="text" id="cov-target"></label>
+        <p class="hint" id="cov-inherit-hint" hidden>Inherit covers whatever the basis covers. For a role with no basis, it covers the whole org.</p>
+        <label class="f" data-only="del"><span><b>Basis</b> · <code>dimo:basis</code>, one at-uri per line</span><textarea id="basis" rows="2"></textarea></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Abilities · action</legend>
+        <div class="chips" id="abilities"></div>
+        <label class="f"><span>Other abilities, comma-separated</span><input type="text" id="abilities-extra" placeholder="stream:telemetry, vin:read"></label>
+        <div data-only="del" id="exclusive-wrap">
+          <p class="hint">Exclusive (<code>dimo:exclusive</code>): live abilities nobody else may exercise while this grant is live.</p>
+          <div class="chips" id="exclusive"></div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Windows · constraint</legend>
+        <div class="row">
+          <label class="f"><span><b>Valid from</b> · dateTime gteq</span><input type="datetime-local" id="val-from" step="1"></label>
+          <label class="f"><span><b>Valid to</b> · dateTime lteq</span><input type="datetime-local" id="val-to" step="1"></label>
+          <label class="f"><span><b>Data from</b> · <code>dimo:dataTime</code></span><input type="datetime-local" id="data-from" step="1"></label>
+          <label class="f"><span><b>Data to</b> · <code>dimo:dataTime</code></span><input type="datetime-local" id="data-to" step="1"></label>
+        </div>
+        <div class="row">
+          <label class="f"><span><b>Purpose</b> · purpose eq</span><input type="text" id="purpose"></label>
+          <label class="f"><span><b>Clients</b> · <code>dimo:client</code> isAnyOf, comma-separated</span><input type="text" id="clients"></label>
+        </div>
+      </fieldset>
+
+      <fieldset data-only="del">
+        <legend>Redelegation · <code>dimo:redelegate</code></legend>
+        <div class="row">
+          <label class="f"><span><b>Mode</b></span>
+            <select id="redel-mode"><option value="">none (default)</option><option value="attenuated">attenuated</option><option value="allowlist">allowlist</option></select></label>
+          <label class="f" id="redel-depth-wrap"><span><b>Max depth</b></span><input type="number" id="redel-depth" min="0" step="1"></label>
+        </div>
+        <label class="f" id="redel-grantees-wrap"><span><b>Grantees</b>, comma-separated DIDs</span><input type="text" id="redel-grantees"></label>
+        <div class="checks"><label><input type="checkbox" id="redel-excl"> children may claim exclusivity</label></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Lifecycle · profile terms</legend>
+        <div class="row">
+          <label class="f" data-only="del"><span><b>Revocable by</b> · <code>dimo:revocableBy</code></span>
+            <select id="revocable"><option value="">from (default)</option><option value="to">to</option><option value="either">either</option><option value="from">from, stated</option></select></label>
+          <label class="f"><span><b>After removal</b> from the tag</span>
+            <select id="after-removal"><option value="">retainHistory (default)</option><option value="drop">drop</option><option value="retainHistory">retainHistory, stated</option></select></label>
+          <label class="f"><span><b>After transfer</b> of the car</span>
+            <select id="after-transfer"><option value="">retainHistory (default)</option><option value="drop">drop</option><option value="retainHistory">retainHistory, stated</option></select></label>
+        </div>
+        <div class="checks" data-only="del">
+          <label><input type="checkbox" id="custody"> narrow history to custody</label>
+          <label><input type="checkbox" id="recovery"> recovery (may act despite another's exclusive hold)</label>
+        </div>
+        <label class="f"><span><b>Terms</b> · <code>dimo:terms</code>, a hash or reference</span><input type="text" id="terms" placeholder="sha256:…"></label>
+      </fieldset>
+
+      <fieldset data-only="role">
+        <legend>Issue constraints · <code>dimo:issueConstraints</code></legend>
+        <div class="checks"><label><input type="checkbox" id="c-on"> bound what holders of this role may issue</label></div>
+        <div id="c-body" class="row">
+          <label class="f"><span><b>Max vehicles</b> per grant</span><input type="number" id="c-vehicles" min="0" step="1" placeholder="unlimited"></label>
+          <label class="f"><span><b>Max validity</b>, like 30d or 12h</span><span class="dur"><input type="text" id="c-validity" placeholder="unlimited"><output id="c-validity-out"></output></span></label>
+          <label class="f"><span><b>Max data reach</b> before validity</span><span class="dur"><input type="text" id="c-reach" placeholder="unlimited"><output id="c-reach-out"></output></span></label>
+          <label class="f"><span><b>Commit policy</b> profile</span><input type="text" id="c-policy" placeholder="host default"></label>
+          <label class="f" style="grid-column: 1 / -1"><span><b>Issuable abilities</b>, comma-separated; empty means the role's own</span><input type="text" id="c-abilities"></label>
+          <div class="checks" style="grid-column: 1 / -1">
+            <label><input type="checkbox" id="c-redel"> issued grants may be redelegable</label>
+            <label><input type="checkbox" id="c-excl"> issued grants may be exclusive</label>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Duties · obligation</legend>
+        <label class="f"><span>What code cannot enforce, as a JSON array of ODRL duties. Carried through untouched.</span><textarea id="duties" rows="3" placeholder='[{"action": "compensate"}]'></textarea></label>
+      </fieldset>
+    </form>
+
+    <div class="out">
+      <div id="err" hidden></div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Stored policy</h2>
+          <div class="badges"><span class="badge type" id="b-type">—</span><span class="badge ok" id="b-trip" hidden>round-trips</span></div>
+          <button type="button" id="copy">Copy JSON</button>
+        </div>
+        <div class="summary" id="summary" hidden></div>
+        <pre class="odrl" id="odrl"><div class="loading">Loading the codec…</div></pre>
+      </div>
+      <div class="legend"><span class="k">ODRL term</span><span class="k p">DIMO profile term</span><span class="s">string</span></div>
+      <details class="card import">
+        <summary>Paste ODRL to edit it</summary>
+        <div class="body">
+          <textarea id="paste" placeholder='{"@context": [...], "@type": "Agreement", ...}'></textarea>
+          <div><button type="button" class="primary" id="load">Load into form</button></div>
+          <div id="paste-err" hidden></div>
+        </div>
+      </details>
+    </div>
+  </div>
+</div>
+
+<script src="wasm_exec.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const KNOWN = ["telemetry:read", "events:read", "location:precise", "command:lock", "command:unlock",
+    "command:charge", "delegation:create", "tag:write", "org:admin", "org:members"];
+  // Fallback until the codec loads; the codec's own classOf replaces it.
+  let classOf = a => /^(delegation|tag|org|license):/.test(a) ? "admin"
+    : (/^(command|stream):/.test(a) || /:(write|deliver)$/.test(a)) ? "live" : "historical";
+  let codec = null;
+
+  // Example parties. These are made-up DIDs matching the demo's cast, not real ones.
+  const RENTAL = "did:dimo:rentalco.example", FLEET = "did:dimo:fleetco.example";
+  const P = {
+    insurer: "did:dimo:claims.insurer.example", integrator: "did:dimo:integrator.example",
+    backend: "did:dimo:bookings.rentalco.example", renter: "did:dimo:renter.example",
+    alice: "did:dimo:alice.rentalco.example", car1: "did:dimo:vehicle:137:4021"
+  };
+  const tag = (org, slug) => `at://${org}/network.dimo.org.tag/${slug}`;
+  const at = (org, coll, key) => `at://${org}/${coll}/${key}`;
+  const DEL = "network.dimo.delegation", ROLE = "network.dimo.org.role";
+  const T0 = "2026-09-28T09:00:00Z", DUE = "2026-09-30T09:00:00Z";
+
+  const PRESETS = {
+    "Insurer over the fleet": {
+      $type: DEL, uid: at(RENTAL, DEL, "insurer"), from: RENTAL, to: P.insurer,
+      covers: { tag: tag(RENTAL, "fl-fleet") }, abilities: ["telemetry:read", "events:read"],
+      validity: { from: T0 }, dataWindow: {}, purpose: "fleet-insurance", redelegate: { mode: "" }
+    },
+    "FleetCo telematics": {
+      $type: DEL, uid: at(RENTAL, DEL, "fleetco"), from: RENTAL, to: FLEET,
+      covers: { tag: tag(RENTAL, "fleetco-enrolled") }, abilities: ["telemetry:read", "command:lock", "command:unlock"],
+      validity: { from: T0 }, dataWindow: {}, purpose: "telematics",
+      redelegate: { mode: "attenuated", maxDepth: 1 }, afterTransfer: "drop"
+    },
+    "Integrator, redelegated": {
+      $type: DEL, uid: at(FLEET, DEL, "integrator"), from: FLEET, to: P.integrator,
+      basis: [at(RENTAL, DEL, "fleetco")], covers: { inherit: true }, abilities: ["telemetry:read"],
+      validity: { from: T0 }, dataWindow: {}, purpose: "analytics", redelegate: { mode: "" }
+    },
+    "Rental custody": {
+      $type: DEL, uid: at(RENTAL, DEL, "bk-0930:rental:custody"), from: RENTAL, to: P.renter,
+      covers: { vehicle: P.car1 }, abilities: ["command:unlock", "command:lock", "command:charge"],
+      exclusive: ["command:unlock", "command:lock", "command:charge"],
+      validity: { from: T0, to: DUE }, dataWindow: { from: T0, to: DUE }, purpose: "rental-custody",
+      redelegate: { mode: "" }, afterTransfer: "drop", afterRemoval: "drop", terms: "sha256:9f2c",
+      createdBy: P.backend,
+      duties: [{ action: "compensate" }, { action: "returnVehicle", constraint: [{ leftOperand: "dateTime", operator: "lteq", rightOperand: DUE }] }]
+    },
+    "Booking service role": {
+      $type: ROLE, uid: at(RENTAL, ROLE, "bookings"), from: RENTAL, to: P.backend, covers: { inherit: true },
+      abilities: ["command:charge", "command:lock", "command:unlock", "delegation:create", "events:read", "location:precise", "telemetry:read"],
+      validity: { from: T0 }, dataWindow: {}, redelegate: { mode: "" },
+      constraints: { maxVehicles: 1, maxValiditySeconds: 30 * 86400, maxDataReachSeconds: 86400, policy: "rental-booking", allowExclusive: true,
+        abilities: ["command:charge", "command:lock", "command:unlock", "telemetry:read", "events:read", "location:precise"] }
+    },
+    "Staff role": {
+      $type: ROLE, uid: at(RENTAL, ROLE, "alice"), from: RENTAL, to: P.alice, covers: { tag: tag(RENTAL, "fl-fleet") },
+      abilities: ["delegation:create", "tag:write", "telemetry:read", "events:read"],
+      validity: { from: T0 }, dataWindow: {}, redelegate: { mode: "" }
+    }
+  };
+
+  // ---- durations: "30d", "12h", "90m", "1y", "3600" (seconds) ----
+  const UNITS = { s: 1, m: 60, h: 3600, d: 86400, w: 604800, y: 31536000 };
+  function parseDur(s) {
+    s = s.trim();
+    if (!s) return 0;
+    const m = s.match(/^(\d+(?:\.\d+)?)\s*([smhdwy]?)$/i);
+    if (!m) return NaN;
+    return Math.round(parseFloat(m[1]) * UNITS[(m[2] || "s").toLowerCase()]);
+  }
+  function fmtDur(n) {
+    if (!n) return "";
+    for (const [u, k] of [["y", 31536000], ["w", 604800], ["d", 86400], ["h", 3600], ["m", 60]])
+      if (n % k === 0) return (n / k) + u;
+    return String(n);
+  }
+
+  // ---- times: datetime-local fields are read and written as UTC ----
+  const toISO = v => v ? (v.length === 16 ? v + ":00" : v) + "Z" : undefined;
+  const fromISO = v => v ? new Date(v).toISOString().slice(0, 19) : "";
+  const list = s => s.split(/[,\n]/).map(x => x.trim()).filter(Boolean);
+
+  // ---- abilities UI ----
+  function renderAbilities(selected, exclusive) {
+    const extra = selected.filter(a => !KNOWN.includes(a));
+    $("abilities").innerHTML = KNOWN.map(a => {
+      const c = classOf(a);
+      return `<label class="chip"><input type="checkbox" value="${a}"${selected.includes(a) ? " checked" : ""}>${a} <i class="cls-${c}">${c}</i></label>`;
+    }).join("");
+    $("abilities-extra").value = extra.join(", ");
+    renderExclusive(exclusive);
+  }
+  function currentAbilities() {
+    const picked = [...$("abilities").querySelectorAll("input:checked")].map(i => i.value);
+    return [...picked, ...list($("abilities-extra").value).filter(a => !picked.includes(a))];
+  }
+  function renderExclusive(keep) {
+    const was = keep ?? [...$("exclusive").querySelectorAll("input:checked")].map(i => i.value);
+    const live = currentAbilities().filter(a => classOf(a) === "live");
+    $("exclusive").innerHTML = live.length ? live.map(a =>
+      `<label class="chip"><input type="checkbox" value="${a}"${was.includes(a) ? " checked" : ""}>${a}</label>`).join("")
+      : `<span class="hint">No live abilities selected.</span>`;
+  }
+
+  // ---- form <-> record ----
+  const isRole = () => $("type-role").checked;
+  const coversKind = () => document.querySelector('input[name=covers]:checked').value;
+
+  function syncVisibility() {
+    const role = isRole();
+    document.querySelectorAll("[data-only=del]").forEach(el => el.hidden = role);
+    document.querySelectorAll("[data-only=role]").forEach(el => el.hidden = !role);
+    const k = coversKind();
+    $("cov-target-wrap").hidden = k === "inherit";
+    $("cov-inherit-hint").hidden = k !== "inherit";
+    $("cov-target-label").innerHTML = k === "tag" ? "<b>Tag URI</b> · AssetCollection" : "<b>Vehicle DID</b> · Asset";
+    $("cov-target").placeholder = k === "tag" ? "at://did:…/network.dimo.org.tag/slug" : "did:…";
+    const mode = $("redel-mode").value;
+    $("redel-depth-wrap").hidden = mode !== "attenuated";
+    $("redel-grantees-wrap").hidden = mode !== "allowlist";
+    $("c-body").hidden = !$("c-on").checked;
+    for (const [inp, out] of [["c-validity", "c-validity-out"], ["c-reach", "c-reach-out"]]) {
+      const n = parseDur($(inp).value);
+      $(out).value = !$(inp).value.trim() ? "" : isNaN(n) ? "unreadable" : `${n.toLocaleString()} s`;
+    }
+  }
+
+  function collect() {
+    const role = isRole();
+    const rec = { $type: role ? ROLE : DEL, from: $("from").value.trim(), to: $("to").value.trim() };
+    const uid = $("uid").value.trim(); if (uid) rec.uid = uid;
+    const k = coversKind(), t = $("cov-target").value.trim();
+    rec.covers = k === "inherit" ? { inherit: true } : { [k]: t };
+    if (!role) { const b = list($("basis").value); if (b.length) rec.basis = b; }
+    rec.abilities = currentAbilities();
+    rec.validity = { from: toISO($("val-from").value), to: toISO($("val-to").value) };
+    rec.dataWindow = { from: toISO($("data-from").value), to: toISO($("data-to").value) };
+    const purpose = $("purpose").value.trim(); if (purpose) rec.purpose = purpose;
+    const clients = list($("clients").value); if (clients.length) rec.clientAllowlist = clients;
+    rec.redelegate = { mode: "" };
+    if (!role) {
+      const mode = $("redel-mode").value;
+      rec.redelegate = { mode };
+      if (mode === "attenuated") rec.redelegate.maxDepth = parseInt($("redel-depth").value || "0", 10);
+      if (mode === "allowlist") rec.redelegate.grantees = list($("redel-grantees").value);
+      if ($("redel-excl").checked) rec.redelegate.exclusive = true;
+      const excl = [...$("exclusive").querySelectorAll("input:checked")].map(i => i.value);
+      if (excl.length) rec.exclusive = excl;
+      if ($("revocable").value) rec.revocableBy = $("revocable").value;
+      if ($("custody").checked) rec.narrowToCustody = true;
+      if ($("recovery").checked) rec.recovery = true;
+    }
+    if ($("after-removal").value) rec.afterRemoval = $("after-removal").value;
+    if ($("after-transfer").value) rec.afterTransfer = $("after-transfer").value;
+    const terms = $("terms").value.trim(); if (terms) rec.terms = terms;
+    if (loaded.createdBy) rec.createdBy = loaded.createdBy;
+    if (loaded.createdAt && !loaded.createdAt.startsWith("0001-")) rec.createdAt = loaded.createdAt;
+    if (role && $("c-on").checked) {
+      const c = {};
+      const v = parseInt($("c-vehicles").value || "0", 10); if (v) c.maxVehicles = v;
+      const val = parseDur($("c-validity").value), reach = parseDur($("c-reach").value);
+      if (isNaN(val)) throw new Error("Max validity: write a number with a unit, like 30d or 12h.");
+      if (isNaN(reach)) throw new Error("Max data reach: write a number with a unit, like 1d or 6h.");
+      if (val) c.maxValiditySeconds = val;
+      if (reach) c.maxDataReachSeconds = reach;
+      const ab = list($("c-abilities").value); if (ab.length) c.abilities = ab;
+      if ($("c-redel").checked) c.allowRedelegation = true;
+      if ($("c-excl").checked) c.allowExclusive = true;
+      const pol = $("c-policy").value.trim(); if (pol) c.policy = pol;
+      rec.constraints = c;
+    }
+    const d = $("duties").value.trim();
+    if (d) {
+      let duties;
+      try { duties = JSON.parse(d); } catch (e) { throw new Error("Duties must be JSON: " + e.message); }
+      if (!Array.isArray(duties)) throw new Error("Duties must be a JSON array of duty objects.");
+      rec.duties = duties;
+    }
+    return rec;
+  }
+
+  // Fields the form does not edit but a loaded policy carries.
+  let loaded = {};
+
+  function fill(rec) {
+    loaded = { createdBy: rec.createdBy, createdAt: rec.createdAt };
+    $(rec.$type === ROLE ? "type-role" : "type-del").checked = true;
+    $("uid").value = rec.uid || "";
+    $("from").value = rec.from || ""; $("to").value = rec.to || "";
+    const cov = rec.covers || {};
+    const k = cov.inherit ? "inherit" : cov.vehicle ? "vehicle" : "tag";
+    $("cov-" + k).checked = true;
+    $("cov-target").value = cov.vehicle || cov.tag || "";
+    $("basis").value = (rec.basis || []).join("\n");
+    renderAbilities(rec.abilities || [], rec.exclusive || []);
+    const v = rec.validity || {}, dw = rec.dataWindow || {};
+    $("val-from").value = fromISO(v.from); $("val-to").value = fromISO(v.to);
+    $("data-from").value = fromISO(dw.from); $("data-to").value = fromISO(dw.to);
+    $("purpose").value = rec.purpose || "";
+    $("clients").value = (rec.clientAllowlist || []).join(", ");
+    const r = rec.redelegate || {};
+    $("redel-mode").value = r.mode === "none" ? "" : (r.mode || "");
+    $("redel-depth").value = r.maxDepth || "";
+    $("redel-grantees").value = (r.grantees || []).join(", ");
+    $("redel-excl").checked = !!r.exclusive;
+    $("revocable").value = rec.revocableBy || "";
+    $("after-removal").value = rec.afterRemoval || "";
+    $("after-transfer").value = rec.afterTransfer || "";
+    $("custody").checked = !!rec.narrowToCustody;
+    $("recovery").checked = !!rec.recovery;
+    $("terms").value = rec.terms || "";
+    const c = rec.constraints;
+    $("c-on").checked = !!c;
+    $("c-vehicles").value = c?.maxVehicles || "";
+    $("c-validity").value = fmtDur(c?.maxValiditySeconds);
+    $("c-reach").value = fmtDur(c?.maxDataReachSeconds);
+    $("c-abilities").value = (c?.abilities || []).join(", ");
+    $("c-redel").checked = !!c?.allowRedelegation;
+    $("c-excl").checked = !!c?.allowExclusive;
+    $("c-policy").value = c?.policy || "";
+    $("duties").value = rec.duties?.length ? JSON.stringify(rec.duties, null, 2) : "";
+    syncVisibility();
+  }
+
+  // ---- output ----
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  function highlight(json) {
+    return esc(json).replace(/("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/g, (m, str, colon, kw) => {
+      if (str && colon) {
+        const profile = /^"(dimo:|dcterms:)/.test(str);
+        return `<span class="k${profile ? " p" : ""}">${str}</span>${colon}`;
+      }
+      if (str) return `<span class="s${/^"dimo:/.test(str) ? " v p" : ""}">${str}</span>`;
+      if (kw) return `<span class="kw">${m}</span>`;
+      return `<span class="n">${m}</span>`;
+    });
+  }
+
+  function short(did) { return (did || "").replace(/^did:dimo:/, ""); }
+  function summarize(rec) {
+    const role = rec.$type === ROLE;
+    const cov = rec.covers.inherit ? (rec.basis?.length ? "whatever its basis covers" : "the whole org")
+      : rec.covers.tag ? `tag <code>${esc(rec.covers.tag.split("/").pop())}</code>` : `vehicle <code>${esc(short(rec.covers.vehicle))}</code>`;
+    const v = rec.validity;
+    const when = v.from || v.to ? ` ${v.from ? "from " + v.from.slice(0, 16).replace("T", " ") : ""}${v.to ? " until " + v.to.slice(0, 16).replace("T", " ") : ""} UTC` : ", with no time limit";
+    const excl = rec.exclusive?.length ? `, holding ${rec.exclusive.length === rec.abilities.length ? "all of them" : esc(rec.exclusive.join(", "))} exclusively` : "";
+    const verb = role ? "gives staff member or service" : "grants";
+    return `<b>${esc(short(rec.from))}</b> ${verb} <b>${esc(short(rec.to))}</b> ${esc(rec.abilities.join(", ") || "nothing")} over ${cov}${when}${excl}.`;
+  }
+
+  function showError(el, title, msg) {
+    el.hidden = false;
+    el.innerHTML = `<p class="error"><b>${esc(title)}</b>${esc(msg)}</p>`;
+  }
+
+  let lastOdrl = "";
+  function render() {
+    syncVisibility();
+    if (!codec) return;
+    const err = $("err");
+    let rec;
+    try { rec = collect(); } catch (e) { showError(err, "Check the form", e.message); return; }
+    const res = codec.build(JSON.stringify(rec));
+    if (res.error) {
+      showError(err, "The codec refuses this record", res.error);
+      $("b-trip").hidden = true;
+      $("odrl").style.opacity = .45;
+      return;
+    }
+    err.hidden = true;
+    $("odrl").style.opacity = 1;
+    lastOdrl = res.odrl;
+    $("odrl").innerHTML = highlight(res.odrl);
+    $("b-type").textContent = JSON.parse(res.odrl)["@type"];
+    $("summary").hidden = false;
+    $("summary").innerHTML = summarize(rec);
+    // Read it back and render again: the codec promises a lossless round trip.
+    const back = codec.parse(res.odrl);
+    const again = back.form && codec.build(back.form);
+    const ok = again && again.odrl === res.odrl;
+    $("b-trip").hidden = false;
+    $("b-trip").className = "badge " + (ok ? "ok" : "bad");
+    $("b-trip").textContent = ok ? "round-trips" : "round trip differs";
+  }
+
+  // ---- wiring ----
+  const presetBar = $("presets");
+  for (const name of Object.keys(PRESETS)) {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = name; b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", () => {
+      presetBar.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      fill(structuredClone(PRESETS[name])); render();
+    });
+    presetBar.append(b);
+  }
+  const clearPreset = () => presetBar.querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", "false"));
+
+  $("f").addEventListener("submit", e => e.preventDefault());
+  $("f").addEventListener("input", e => {
+    if (e.target.closest("#abilities") || e.target.id === "abilities-extra") renderExclusive();
+    clearPreset(); render();
+  });
+  $("f").addEventListener("change", () => render());
+
+  $("copy").addEventListener("click", async () => {
+    if (!lastOdrl) return;
+    try { await navigator.clipboard.writeText(lastOdrl); $("copy").textContent = "Copied"; }
+    catch { const r = document.createRange(); r.selectNodeContents($("odrl")); getSelection().removeAllRanges(); getSelection().addRange(r); $("copy").textContent = "Selected"; }
+    setTimeout(() => $("copy").textContent = "Copy JSON", 1400);
+  });
+
+  $("load").addEventListener("click", () => {
+    const pe = $("paste-err");
+    if (!codec) return;
+    const res = codec.parse($("paste").value);
+    if (res.error) { showError(pe, "The codec refuses this policy", res.error); return; }
+    pe.hidden = true;
+    clearPreset(); fill(JSON.parse(res.form)); render();
+  });
+
+  // Start on an example so the page shows what it does before the codec arrives.
+  presetBar.querySelectorAll("button")[1].click();
+
+  async function boot() {
+    try {
+      const go = new Go();
+      window.addEventListener("odrl-builder-ready", () => {
+        codec = window.odrlBuilder;
+        classOf = a => codec.classOf(a);
+        $("status").textContent = "codec: pkg/odrl · wasm";
+        fill(collect()); render();
+      }, { once: true });
+      const bytes = await (await fetch("builder.wasm")).arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
+      go.run(instance);
+    } catch (e) {
+      $("status").textContent = "codec failed to load";
+      showError($("err"), "The codec did not load", `${e.message}. Serve this folder over HTTP (make odrl-builder-serve) rather than opening the file directly.`);
+    }
+  }
+  boot();
+})();
+</script>
