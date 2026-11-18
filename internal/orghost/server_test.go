@@ -28,6 +28,7 @@ import (
 	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 	"github.com/gofiber/fiber/v2"
 	"github.com/rs/zerolog"
@@ -199,6 +200,10 @@ func (h *host) do(method, path, as string, body any) (int, map[string]any) {
 			data = []byte(b)
 		case []byte:
 			data = b
+		case delegation.Record:
+			data = policy(h.t, &b)
+		case *delegation.Record:
+			data = policy(h.t, b)
 		default:
 			var err error
 			data, err = json.Marshal(b)
@@ -221,6 +226,15 @@ func (h *host) do(method, path, as string, body any) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
+// policy renders a record as the ODRL policy a client sends. The host fills in
+// the uid from where the policy is written.
+func policy(t *testing.T, rec *delegation.Record) []byte {
+	t.Helper()
+	data, err := odrl.Marshal(rec, "")
+	require.NoError(t, err)
+	return data
+}
+
 var orgSeq int
 
 func newOrgDID() string {
@@ -230,23 +244,36 @@ func newOrgDID() string {
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
+// delegationRecord is a grant from org to Ford Credit as the ODRL policy that
+// goes over the wire. extra replaces top-level keys of the policy.
 func delegationRecord(org string, extra map[string]any) map[string]any {
 	rec := map[string]any{
-		"$type":      delegation.TypeDelegation,
-		"from":       org,
-		"to":         "did:dimo:fordcredit",
-		"basis":      []string{},
-		"covers":     map[string]any{"tag": "at://" + org + "/network.dimo.org.tag/fleet"},
-		"abilities":  []string{"telemetry:read"},
-		"dataWindow": map[string]any{"from": ts(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))},
-		"validity":   map[string]any{"from": ts(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))},
-		"redelegate": map[string]any{"mode": "none"},
-		"createdAt":  ts(time.Now()),
+		"@context":        []string{odrl.ContextODRL, odrl.ContextDIMO},
+		"@type":           odrl.TypeAgreement,
+		"profile":         odrl.Profile,
+		"assigner":        org,
+		"assignee":        "did:dimo:fordcredit",
+		"permission":      []map[string]any{permission("at://"+org+"/network.dimo.org.tag/fleet", "dimo:telemetry.read")},
+		"dimo:redelegate": map[string]any{"mode": "none"},
+		"dcterms:issued":  ts(time.Now()),
 	}
 	for k, v := range extra {
 		rec[k] = v
 	}
 	return rec
+}
+
+// permission is an ODRL permission over target valid, and reading data, from 2026.
+func permission(target string, actions ...string) map[string]any {
+	from := ts(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	return map[string]any{
+		"target": target,
+		"action": actions,
+		"constraint": []map[string]any{
+			{"leftOperand": odrl.LeftDateTime, "operator": odrl.OpGTEQ, "rightOperand": from},
+			{"leftOperand": odrl.LeftDataTime, "operator": odrl.OpGTEQ, "rightOperand": from},
+		},
+	}
 }
 
 func TestRepositoryFlow(t *testing.T) {
@@ -311,7 +338,7 @@ func TestRepositoryFlow(t *testing.T) {
 			assert.Nil(t, body["tombstone"])
 
 			// A delegation by Alice under a stable key, as a booking service would.
-			grant := delegationRecord(org, map[string]any{"createdBy": alice})
+			grant := delegationRecord(org, map[string]any{"dimo:createdBy": alice})
 			status, body = h.do(http.MethodPut, "/orgs/"+org+"/network.dimo.delegation/booking:42:renter", alice, grant)
 			require.Equal(t, http.StatusCreated, status, body)
 
@@ -416,11 +443,17 @@ func TestStructuralChecks(t *testing.T) {
 		{"not JSON", base + "network.dimo.org.tag/x", alice, `{`, "JSON object"},
 		{"unknown field", base + "network.dimo.org.tag/x", alice, `{"name":"x","colour":"red"}`, "unknown field"},
 		{"tag without name", base + "network.dimo.org.tag/x", alice, `{"description":"x"}`, "name must not be empty"},
-		{"delegation type mismatch", base + "network.dimo.org.role/x", alice, delegationRecord(org, nil), "$type is"},
-		{"delegation from another org", base + "network.dimo.delegation/x", alice, delegationRecord(org, map[string]any{"from": "did:dimo:other"}), "repository"},
-		{"delegation invalid", base + "network.dimo.delegation/x", alice, delegationRecord(org, map[string]any{"abilities": []string{}}), "abilities must not be empty"},
-		{"createdBy contradicts member", base + "network.dimo.delegation/x", alice, delegationRecord(org, map[string]any{"createdBy": "did:dimo:bob"}), "createdBy claims did:dimo:bob but the write is by did:dimo:alice"},
-		{"createdBy contradicts org", base + "network.dimo.delegation/x", org, delegationRecord(org, map[string]any{"createdBy": alice}), "the write is by the org itself"},
+		{"delegation type mismatch", base + "network.dimo.org.role/x", alice, delegationRecord(org, nil), "an ODRL Agreement does not belong in network.dimo.org.role"},
+		{"delegation from another org", base + "network.dimo.delegation/x", alice, delegationRecord(org, map[string]any{"assigner": "did:dimo:other"}), "repository"},
+		{"delegation invalid", base + "network.dimo.delegation/x", alice, delegationRecord(org, map[string]any{"permission": []map[string]any{permission("at://" + org + "/network.dimo.org.tag/fleet")}}), "abilities must not be empty"},
+		{"createdBy contradicts member", base + "network.dimo.delegation/x", alice, delegationRecord(org, map[string]any{"dimo:createdBy": "did:dimo:bob"}), "createdBy claims did:dimo:bob but the write is by did:dimo:alice"},
+		{"createdBy contradicts org", base + "network.dimo.delegation/x", org, delegationRecord(org, map[string]any{"dimo:createdBy": alice}), "the write is by the org itself"},
+		{"delegation in the record shape", base + "network.dimo.delegation/x", alice,
+			map[string]any{"$type": delegation.TypeDelegation, "from": org, "to": "did:dimo:fordcredit"}, "not an ODRL policy"},
+		{"delegation offered, not agreed", base + "network.dimo.delegation/x", alice, delegationRecord(org, map[string]any{"@type": odrl.TypeOffer}), "grants nothing"},
+		{"delegation with an unknown term", base + "network.dimo.delegation/x", alice, delegationRecord(org, map[string]any{"dimo:maxSpeed": 120}), "unknown field"},
+		{"delegation claiming to live elsewhere", base + "network.dimo.delegation/x", alice,
+			delegationRecord(org, map[string]any{"uid": "at://" + org + "/network.dimo.delegation/y"}), "uid is"},
 		{"membership in another org's tag", base + "network.dimo.org.tagMembership/x", alice,
 			map[string]any{"tag": "at://did:dimo:other/network.dimo.org.tag/fleet", "vehicle": "did:dimo:v", "joinedAt": ts(time.Now())}, "belongs to did:dimo:other"},
 		{"membership leaves before joining", base + "network.dimo.org.tagMembership/x", alice,
@@ -447,10 +480,18 @@ func TestStructuralChecks(t *testing.T) {
 	// createdBy that agrees with the witnessed author is fine, and so is an
 	// org writing under its own name.
 	h.grantRole(org, roleRecord(org, alice, delegation.Covers{Tag: "at://" + org + "/network.dimo.org.tag/fleet"}, "delegation:create", "telemetry:read"))
-	status, body = h.do(http.MethodPut, base+"network.dimo.delegation/ok1", alice, delegationRecord(org, map[string]any{"createdBy": alice}))
+	status, body = h.do(http.MethodPut, base+"network.dimo.delegation/ok1", alice, delegationRecord(org, map[string]any{"dimo:createdBy": alice}))
 	assert.Equal(t, http.StatusCreated, status, body)
-	status, body = h.do(http.MethodPut, base+"network.dimo.delegation/ok2", org, delegationRecord(org, map[string]any{"createdBy": org}))
+	status, body = h.do(http.MethodPut, base+"network.dimo.delegation/ok2", org, delegationRecord(org, map[string]any{"dimo:createdBy": org}))
 	assert.Equal(t, http.StatusCreated, status, body)
+
+	// What was committed is the ODRL policy, identified by where it lives.
+	status, body = h.do(http.MethodGet, base+"network.dimo.delegation/ok1", alice, nil)
+	require.Equal(t, http.StatusOK, status, body)
+	stored := body["record"].(map[string]any)
+	assert.Equal(t, odrl.TypeAgreement, stored["@type"])
+	assert.Equal(t, "at://"+org+"/network.dimo.delegation/ok1", stored["uid"])
+	assert.Equal(t, "did:dimo:fordcredit", stored["assignee"])
 
 	// Nothing invalid reached the log.
 	status, body = h.do(http.MethodGet, "/orgs/"+org+"/commits", org, nil)

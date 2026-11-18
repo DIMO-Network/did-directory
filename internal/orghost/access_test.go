@@ -375,7 +375,7 @@ func TestAvisActions(t *testing.T) {
 				var aliceRole string
 				for _, r := range body["records"].([]any) {
 					rec := r.(map[string]any)["record"].(map[string]any)
-					if rec["to"] == alice {
+					if rec["assignee"] == alice {
 						aliceRole = r.(map[string]any)["rkey"].(string)
 					}
 				}
@@ -533,7 +533,7 @@ func TestOverwriteTakesWhatRevokingTakes(t *testing.T) {
 			}
 			status, body = a.do(http.MethodGet, a.path(delegation.CollectionDelegation, "fordcredit"), carol, nil)
 			require.Equal(t, http.StatusOK, status, body)
-			assert.Equal(t, "to", body["record"].(map[string]any)["revocableBy"])
+			assert.Equal(t, "to", body["record"].(map[string]any)["dimo:revocableBy"])
 
 			// Alice's insurer grant over fl-fleet is outside Bob's role, so he cannot
 			// replace it with one inside it.

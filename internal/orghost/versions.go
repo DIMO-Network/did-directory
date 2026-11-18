@@ -8,6 +8,7 @@ import (
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 )
 
@@ -31,12 +32,12 @@ func keyVersions(ctx context.Context, st store.Store, org, collection, rkey stri
 // it. A tombstone the org wrote itself has no author on the commit and is
 // handed over as the org, since revokedAt compares it to from.
 func storedVersion(org string, v *repo.Version) (*delegation.Stored, error) {
-	var rec delegation.Record
-	if err := json.Unmarshal(v.Record, &rec); err != nil {
+	rec, err := odrl.Decode(v.Record)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", v.URI(), err)
 	}
 	out := &delegation.Stored{
-		URI: v.URI(), Record: rec, CommittedAt: v.CommittedAt, CommittedBy: v.CommittedBy,
+		URI: v.URI(), Record: *rec, CommittedAt: v.CommittedAt, CommittedBy: v.CommittedBy,
 		ApprovedBy: v.ApprovedBy, Superseded: v.Superseded,
 	}
 	if t := v.Tombstone; t != nil {

@@ -23,6 +23,7 @@
 package odrl
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,15 +138,17 @@ type Redelegate struct {
 	Exclusive bool     `json:"exclusive,omitempty"`
 }
 
-// Constraints mirrors delegation.RoleConstraints. MaxValidity is seconds, not Go
+// Constraints mirrors delegation.RoleConstraints. Durations are seconds, not Go
 // nanoseconds: this is a cross-language format and a duration nobody else can
 // read is not a term.
 type Constraints struct {
 	MaxVehicles       int      `json:"maxVehicles,omitempty"`
 	MaxValiditySecs   int64    `json:"maxValiditySeconds,omitempty"`
+	MaxDataReachSecs  int64    `json:"maxDataReachSeconds,omitempty"`
 	Abilities         []string `json:"abilities,omitempty"`
 	AllowRedelegation bool     `json:"allowRedelegation,omitempty"`
 	AllowExclusive    bool     `json:"allowExclusive,omitempty"`
+	Policy            string   `json:"policy,omitempty"`
 }
 
 // Operators and left operands used by the profile.
@@ -226,7 +229,7 @@ func ToPolicy(rec *delegation.Record, uid string, duties ...Duty) (*Policy, erro
 		CreatedBy:     rec.CreatedBy,
 	}
 	if !rec.CreatedAt.IsZero() {
-		p.CreatedAt = rec.CreatedAt.UTC().Format(time.RFC3339)
+		p.CreatedAt = rec.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	if rec.Redelegate.Mode != "" {
 		p.Redelegate = &Redelegate{
@@ -241,16 +244,20 @@ func ToPolicy(rec *delegation.Record, uid string, duties ...Duty) (*Policy, erro
 		// truncate to zero and become no cap at all: the one rounding error in this
 		// codec that widens a term instead of narrowing it. A duration the format
 		// cannot carry is refused, not rounded.
-		if c.MaxValidity%time.Second != 0 {
-			return nil, fmt.Errorf("%w: maxValidity %s is not a whole number of seconds and the wire format carries seconds",
-				ErrUnsupported, c.MaxValidity)
+		for name, d := range map[string]time.Duration{"maxValidity": c.MaxValidity, "maxDataReach": c.MaxDataReach} {
+			if d%time.Second != 0 {
+				return nil, fmt.Errorf("%w: %s %s is not a whole number of seconds and the wire format carries seconds",
+					ErrUnsupported, name, d)
+			}
 		}
 		p.Constraints = &Constraints{
 			MaxVehicles:       c.MaxVehicles,
 			MaxValiditySecs:   int64(c.MaxValidity / time.Second),
+			MaxDataReachSecs:  int64(c.MaxDataReach / time.Second),
 			Abilities:         c.Abilities,
 			AllowRedelegation: c.AllowRedelegation,
 			AllowExclusive:    c.AllowExclusive,
+			Policy:            c.Policy,
 		}
 	}
 	return p, nil
@@ -258,22 +265,80 @@ func ToPolicy(rec *delegation.Record, uid string, duties ...Duty) (*Policy, erro
 
 // Unmarshal parses an ODRL policy into a record, returning its uid and any
 // duties it carried.
+//
+// A key this profile does not define is refused, at any depth, for the same
+// reason an unknown constraint is: a reader that drops a term hands back more
+// authority than the policy carries.
 func Unmarshal(data []byte) (*delegation.Record, string, []Duty, error) {
-	var p Policy
-	if err := json.Unmarshal(data, &p); err != nil {
-		return nil, "", nil, fmt.Errorf("%w: %w", ErrNotODRL, err)
+	p, err := parse(data)
+	if err != nil {
+		return nil, "", nil, err
 	}
-	rec, err := FromPolicy(&p)
+	rec, err := FromPolicy(p)
 	if err != nil {
 		return nil, "", nil, err
 	}
 	return rec, p.UID, p.Duty, nil
 }
 
+// Decode parses a stored policy into the record the evaluator works on.
+func Decode(data []byte) (*delegation.Record, error) {
+	rec, _, _, err := Unmarshal(data)
+	return rec, err
+}
+
+// Normalize parses a policy and renders it again in the one form this codec
+// produces, with uid as its identifier. A policy that already names a
+// different uid is refused: the identifier is where the grant lives, and a
+// document claiming to live elsewhere is not the document being written.
+//
+// Storing the normalized form rather than the submitted bytes means nothing is
+// signed that the codec could not read back, and two spellings of the same
+// grant commit as one.
+func Normalize(data []byte, uid string) ([]byte, *delegation.Record, error) {
+	rec, got, duties, err := Unmarshal(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if got != "" && got != uid {
+		return nil, nil, fmt.Errorf("%w: uid is %s, but the policy is written at %s", ErrNotODRL, got, uid)
+	}
+	p, err := ToPolicy(rec, uid, duties...)
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := json.Marshal(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, rec, nil
+}
+
+func parse(data []byte) (*Policy, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var p Policy
+	if err := dec.Decode(&p); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrNotODRL, err)
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("%w: trailing data after the policy", ErrNotODRL)
+	}
+	return &p, nil
+}
+
 // FromPolicy converts an ODRL policy to a record.
 func FromPolicy(p *Policy) (*delegation.Record, error) {
 	if !slices.Contains(p.Context, ContextODRL) {
 		return nil, fmt.Errorf("%w: missing the ODRL context", ErrNotODRL)
+	}
+	for _, c := range p.Context {
+		// A context defines what the terms mean to anyone reading the policy as
+		// JSON-LD, so one this profile does not know could redefine a term the
+		// evaluator reads by name.
+		if c != ContextODRL && c != ContextDIMO {
+			return nil, fmt.Errorf("%w: context %q", ErrUnsupported, c)
+		}
 	}
 	if p.Profile != Profile {
 		return nil, fmt.Errorf("%w: profile %q", ErrUnsupported, p.Profile)
@@ -316,7 +381,7 @@ func FromPolicy(p *Policy) (*delegation.Record, error) {
 		CreatedBy:       p.CreatedBy,
 	}
 
-	covers, err := covers(perm.Target, perm.TargetType, p.Basis)
+	covers, err := covers(perm.Target, perm.TargetType)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +413,7 @@ func FromPolicy(p *Policy) (*delegation.Record, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: dcterms:issued: %w", ErrNotODRL, err)
 		}
-		rec.CreatedAt = t
+		rec.CreatedAt = t.UTC()
 	}
 	if r := p.Redelegate; r != nil {
 		rec.Redelegate = delegation.Redelegate{
@@ -362,9 +427,11 @@ func FromPolicy(p *Policy) (*delegation.Record, error) {
 		rec.Constraints = &delegation.RoleConstraints{
 			MaxVehicles:       c.MaxVehicles,
 			MaxValidity:       time.Duration(c.MaxValiditySecs) * time.Second,
+			MaxDataReach:      time.Duration(c.MaxDataReachSecs) * time.Second,
 			Abilities:         c.Abilities,
 			AllowRedelegation: c.AllowRedelegation,
 			AllowExclusive:    c.AllowExclusive,
+			Policy:            c.Policy,
 		}
 	}
 
@@ -426,10 +493,10 @@ func timeBound(w *delegation.Window, c Constraint) error {
 func window(left string, w delegation.Window) []Constraint {
 	var out []Constraint
 	if w.From != nil {
-		out = append(out, Constraint{left, OpGTEQ, w.From.UTC().Format(time.RFC3339)})
+		out = append(out, Constraint{left, OpGTEQ, w.From.UTC().Format(time.RFC3339Nano)})
 	}
 	if w.To != nil {
-		out = append(out, Constraint{left, OpLTEQ, w.To.UTC().Format(time.RFC3339)})
+		out = append(out, Constraint{left, OpLTEQ, w.To.UTC().Format(time.RFC3339Nano)})
 	}
 	return out
 }
@@ -458,12 +525,12 @@ func targetType(c delegation.Covers) string {
 	}
 }
 
-func covers(target, targetType string, basis []string) (delegation.Covers, error) {
+func covers(target, targetType string) (delegation.Covers, error) {
 	switch {
 	case target == Prefix+"inherit":
-		if len(basis) == 0 {
-			return delegation.Covers{}, fmt.Errorf("%w: an inherited target needs a basis", ErrNotODRL)
-		}
+		// A delegation inherits its basis's coverage and a role with no basis
+		// covers everything the org controls; which one is allowed is the
+		// record's to say (delegation.Record.Validate).
 		return delegation.Covers{Inherit: true}, nil
 	case targetType == "AssetCollection", strings.Contains(target, "/"+delegation.CollectionTag+"/"):
 		return delegation.Covers{Tag: target}, nil

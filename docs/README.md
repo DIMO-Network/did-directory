@@ -3,7 +3,7 @@
 | File | What it is |
 |---|---|
 | [2026-09-23-spec-compliance-review.md](2026-09-23-spec-compliance-review.md) | Cross-repository spec review: authorization and history findings, reproduction results, scope deviations and validation limits. |
-| `eras-tags-and-grants.html` | Visual explainer for the controller-of-record and delegation model: today's on-chain permission stack next to the new one, where records live, coverage over time, narrowing chains, token issuance, and the Avis case study. Open it in a browser. |
+| `eras-tags-and-grants.html` | Visual explainer for the controller-of-record and delegation model: today's on-chain permission stack next to the new one, where records live, coverage over time, narrowing chains, token issuance, and the RentalCo case study. Open it in a browser. |
 
 Design spec: `superpowers/specs/2026-09-16-dimo-orgs-fleets-delegation-design.md`. Org host plan: `superpowers/plans/2026-09-22-org-host-plan.md`.
 
@@ -47,13 +47,13 @@ Tests run against the in-memory store by default; `make test-postgres` also runs
 
 ## End-to-end demo
 
-`scripts/demo.sh` runs the whole model on one machine: it builds and starts the directory, the org host, dauth and dq (from sibling checkouts, `DAUTH_DIR` and `DQ_DIR`, default `../dauth` and `../dq`) in memory, then walks the Avis story of spec §13.1 and the consumer case of §13.3 with a token from dauth's `/exchange` at every step: an org and its fleet, staff roles and a two-person approval, three partner grants including one redelegated through a second repository, a booking compiled by `dimocli booking` through pickup, breakdown and return, a sale by `dimocli transfer`, the buyer's consent, the same car's telemetry queried through dq with `dimocli query` under three grants (the renter's, the insurer's from Avis, the insurer's from the buyer), each getting the slice its windows allow, and a coverage proof verified by `dimocli verify-proof` after the host has been stopped. dq's data comes from `cmd/dq-seed` in the dq repo, which plays din for an hour of readings. It needs `go` with cgo (dq embeds DuckDB), `jq`, `curl` and `openssl`, and ports 3000 and 8080 to 8082 free (`DQ_PORT`, `DIRECTORY_PORT`, `ORG_HOST_PORT`, `DAUTH_PORT` move them).
+`scripts/demo.sh` runs the whole model on one machine: it builds and starts the directory, the org host, dauth and dq (from sibling checkouts, `DAUTH_DIR` and `DQ_DIR`, default `../dauth` and `../dq`) in memory, then walks the RentalCo story of spec §13.1 and the consumer case of §13.3 with a token from dauth's `/exchange` at every step: an org and its fleet, staff roles and a two-person approval, three partner grants including one redelegated through a second repository, a booking compiled by `dimocli booking` through pickup, breakdown and return, a sale by `dimocli transfer`, the buyer's consent, the same car's telemetry queried through dq with `dimocli query` under three grants (the renter's, the insurer's from RentalCo, the insurer's from the buyer), each getting the slice its windows allow, and a coverage proof verified by `dimocli verify-proof` after the host has been stopped. dq's data comes from `cmd/dq-seed` in the dq repo, which plays din for an hour of readings. It needs `go` with cgo (dq embeds DuckDB), `jq`, `curl` and `openssl`, and ports 3000 and 8080 to 8082 free (`DQ_PORT`, `DIRECTORY_PORT`, `ORG_HOST_PORT`, `DAUTH_PORT` move them).
 
 ```
 ./scripts/demo.sh                 # straight through, about 90 seconds
 DEMO_PRESENT=1 ./scripts/demo.sh  # for a room: one step per screen, a keypress between steps and before the key moments
 ```
 
-DIDs are shown by name (Avis, car-1, Renter) throughout; the closing summary lists the real identifiers. In presenter mode a token prints as one line per grant: abilities, window, chain.
+DIDs are shown by name (RentalCo, car-1, Renter) throughout; the closing summary lists the real identifiers. In presenter mode a token prints as one line per grant: abilities, window, chain.
 
 The `dimocli` commands it uses beyond DID operations: `signin` (an identity token from dauth), `exchange` (sign in, DPoP-prove the DID's key with its `#signing` key, mint an access token for one delegation over one vehicle; `--claims` prints what the token carries, `--client` attests an app with an assertion signed by the app's key and bound to the caller's DPoP key), `query` (mint as `exchange` does, then send a GraphQL query to dq with the token and a DPoP proof for the request), `booking` (sync an agreement JSON to the operator's host as the booking service, under `agreement.RentalCatalog`) and `verify-proof` (check a fetched coverage proof against the directory's `#dimo_org` keys and era log).

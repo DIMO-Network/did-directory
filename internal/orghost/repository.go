@@ -11,6 +11,7 @@ import (
 
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 )
 
@@ -73,6 +74,16 @@ type Result struct {
 // collection/rkey to org's repository by committedBy ("" for the org itself).
 // What it returns is what Put commits, once the role checks have passed.
 func (r *Repository) Prepare(org, collection, rkey string, body []byte, committedBy string) (json.RawMessage, error) {
+	if collection == delegation.CollectionDelegation || collection == delegation.CollectionRole {
+		// Delegations and roles are ODRL policies (spec §5). What is signed is the
+		// codec's own rendering, identified by where it lives, so nothing lands in
+		// the repository that the codec could not read back.
+		normalized, _, err := odrl.Normalize(body, "at://"+org+"/"+collection+"/"+rkey)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		body = normalized
+	}
 	record, err := repo.CanonicalRecord(body)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)

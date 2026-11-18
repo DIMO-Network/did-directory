@@ -11,6 +11,7 @@ import (
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/DIMO-Network/did-directory/pkg/proof"
 	"github.com/DIMO-Network/did-directory/pkg/repo"
 	"github.com/stretchr/testify/assert"
@@ -140,8 +141,8 @@ func roleKey(t *testing.T, commits []repo.Committed, member string) string {
 		if c.Collection != delegation.CollectionRole {
 			continue
 		}
-		var rec delegation.Record
-		require.NoError(t, json.Unmarshal(c.Record, &rec))
+		rec, err := odrl.Decode(c.Record)
+		require.NoError(t, err)
 		if rec.To == member {
 			return c.RKey
 		}

@@ -8,13 +8,15 @@ import (
 
 	"github.com/DIMO-Network/did-directory/pkg/control"
 	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 )
 
 // checkRecord is the structural check every write passes before anything is
 // signed (plan §6 step 2): the collection is one the host stores, the record
 // parses as that collection's type and validates, the key has the shape the
 // collection needs, and the record does not claim an author the host did not
-// witness. The role and policy checks follow in Server.checkWrite.
+// witness. Delegations and roles arrive as ODRL policies, already normalized
+// by Repository.Prepare. The role and policy checks follow in Server.checkWrite.
 func checkRecord(org, collection, rkey string, record json.RawMessage, committedBy string) error {
 	if err := delegation.ValidateRKey(rkey); err != nil {
 		return err
@@ -30,12 +32,13 @@ func checkRecord(org, collection, rkey string, record json.RawMessage, committed
 
 	switch collection {
 	case delegation.CollectionDelegation, delegation.CollectionRole:
-		var rec delegation.Record
-		if err := strict(&rec); err != nil {
-			return err
+		rec, err := odrl.Decode(record)
+		if err != nil {
+			return fmt.Errorf("record does not parse as %s: %w", collection, err)
 		}
 		if rec.Type != collection {
-			return fmt.Errorf("$type is %q, collection is %s", rec.Type, collection)
+			// An Agreement is a delegation and a Set is a role.
+			return fmt.Errorf("an ODRL %s does not belong in %s", odrlType(rec.Type), collection)
 		}
 		if rec.From != org {
 			return fmt.Errorf("from is %s, but this is %s's repository", rec.From, org)
@@ -87,6 +90,13 @@ func checkRecord(org, collection, rkey string, record json.RawMessage, committed
 	default:
 		return fmt.Errorf("unknown collection %s", collection)
 	}
+}
+
+func odrlType(recordType string) string {
+	if recordType == delegation.TypeRole {
+		return odrl.TypeSet
+	}
+	return odrl.TypeAgreement
 }
 
 // checkAuthor refuses a record whose createdBy the evaluator would refuse

@@ -100,16 +100,16 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 			WHERE collection = 'network.dimo.org.tagMembership';
 		CREATE INDEX IF NOT EXISTS commits_custody_idx ON commits ((record_json->>'vehicle'), (record_json->>'holder'))
 			WHERE collection = 'network.dimo.org.custody';
-		CREATE INDEX IF NOT EXISTS commits_role_idx ON commits (org, (record_json->>'to'))
+		-- Delegations and roles are ODRL policies: to is the assignee, covers is
+		-- the one permission's target, basis and exclusive are profile terms.
+		CREATE INDEX IF NOT EXISTS commits_role_assignee_idx ON commits (org, (record_json->>'assignee'))
 			WHERE collection = 'network.dimo.org.role';
-		CREATE INDEX IF NOT EXISTS commits_exclusive_vehicle_idx ON commits ((record_json->'covers'->>'vehicle'))
-			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'exclusive') = 'array';
-		CREATE INDEX IF NOT EXISTS commits_exclusive_tag_idx ON commits ((record_json->'covers'->>'tag'))
-			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'exclusive') = 'array';
-		CREATE INDEX IF NOT EXISTS commits_covers_tag_idx ON commits (org, (record_json->'covers'->>'tag'))
+		CREATE INDEX IF NOT EXISTS commits_exclusive_target_idx ON commits ((record_json->'permission'->0->>'target'))
+			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'dimo:exclusive') = 'array';
+		CREATE INDEX IF NOT EXISTS commits_target_idx ON commits (org, (record_json->'permission'->0->>'target'))
 			WHERE collection = 'network.dimo.delegation';
 		CREATE INDEX IF NOT EXISTS commits_author_idx ON commits (org, committed_by, committed_at);
-		CREATE INDEX IF NOT EXISTS commits_basis_idx ON commits USING GIN ((record_json->'basis'))
+		CREATE INDEX IF NOT EXISTS commits_dimo_basis_idx ON commits USING GIN ((record_json->'dimo:basis'))
 			WHERE collection = 'network.dimo.delegation';
 	`
 	// Two instances starting at once would race to create the same tables,
@@ -391,13 +391,13 @@ func (s *PostgresStore) Roles(ctx context.Context, org, member string) ([]Stored
 	if _, err := s.head(ctx, s.pool, org); err != nil {
 		return nil, err
 	}
-	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.org.role' AND r.record_json->>'to' = $2`, org, member)
+	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.org.role' AND r.record_json->>'assignee' = $2`, org, member)
 }
 
 func (s *PostgresStore) Exclusives(ctx context.Context, vehicle string, at time.Time) ([]Stored, error) {
 	return s.queryStored(ctx, `h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
-		AND jsonb_typeof(r.record_json->'exclusive') = 'array' AND jsonb_array_length(r.record_json->'exclusive') > 0
-		AND (r.record_json->'covers'->>'vehicle' = $1 OR r.record_json->'covers'->>'tag' IN (
+		AND jsonb_typeof(r.record_json->'dimo:exclusive') = 'array' AND jsonb_array_length(r.record_json->'dimo:exclusive') > 0
+		AND (r.record_json->'permission'->0->>'target' = $1 OR r.record_json->'permission'->0->>'target' IN (
 			SELECT m.record_json->>'tag'
 			FROM heads mh JOIN commits m ON m.org = mh.org AND m.seq = mh.record_seq
 			WHERE mh.collection = 'network.dimo.org.tagMembership' AND mh.tombstone_seq IS NULL
@@ -409,12 +409,12 @@ func (s *PostgresStore) DelegationsOverTag(ctx context.Context, org, tag string)
 		return nil, err
 	}
 	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
-		AND r.record_json->'covers'->>'tag' = $2`, org, tag)
+		AND r.record_json->'permission'->0->>'target' = $2`, org, tag)
 }
 
 func (s *PostgresStore) DelegationsWithBasis(ctx context.Context, uri string) ([]Stored, error) {
 	return s.queryStored(ctx, `h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
-		AND jsonb_typeof(r.record_json->'basis') = 'array' AND r.record_json->'basis' ? $1`, uri)
+		AND jsonb_typeof(r.record_json->'dimo:basis') = 'array' AND r.record_json->'dimo:basis' ? $1`, uri)
 }
 
 func (s *PostgresStore) Authored(ctx context.Context, org, member string, since time.Time) ([]Stored, error) {
