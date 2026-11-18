@@ -209,3 +209,20 @@ func TestOrgKeystore_RoundTrip(t *testing.T) {
 	_, err = LoadKey("did:dimo:abc")
 	assert.Error(t, err, "the org key is not the org's own signing key")
 }
+
+func TestBuildUpdate_SigningKeyHeldElsewhere(t *testing.T) {
+	_, rot, err := newKey()
+	require.NoError(t, err)
+	_, kms, err := newKey()
+	require.NoError(t, err)
+	current := &did.Operation{Type: did.OpTypeCreate, RotationKeys: []string{rot}, VerificationMethods: map[string]string{"signing": rot}}
+
+	plan, err := buildUpdate(current, "cid1", updateOptions{SigningKey: kms})
+	require.NoError(t, err)
+	assert.Equal(t, kms, plan.Op.VerificationMethods["signing"])
+	assert.Equal(t, []string{rot}, plan.Op.RotationKeys, "the rotation key stays where it was")
+	assert.Equal(t, rot, current.VerificationMethods["signing"], "the current operation is not modified")
+
+	_, err = buildUpdate(current, "cid1", updateOptions{SigningKey: "did:key:zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme"})
+	assert.ErrorContains(t, err, "P-256")
+}

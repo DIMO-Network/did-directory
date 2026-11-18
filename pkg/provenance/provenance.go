@@ -14,18 +14,21 @@ package provenance
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
-	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/pkg/didkey"
 	"github.com/multiformats/go-multicodec"
 )
@@ -112,14 +115,21 @@ func SigningInput(h Header, data []byte) ([]byte, error) {
 // Signer signs events with a P-256 key. KID is the verification method the
 // key is published under: "<did>#signing" for a directory DID, or
 // "<did:key>#<multibase>" for a did:key.
+//
+// Key is any crypto.Signer over P-256 that returns ASN.1 ECDSA signatures, as
+// *ecdsa.PrivateKey does. A key held in a KMS or an HSM fits, so a relay's
+// signing key need never leave it.
 type Signer struct {
-	Key *ecdsa.PrivateKey
+	Key crypto.Signer
 	KID string
 }
 
 // Sign returns a detached compact JWS over the event's signing input.
 func (s Signer) Sign(h Header, data []byte) (string, error) {
-	if s.Key == nil || s.Key.Curve != elliptic.P256() {
+	if s.Key == nil {
+		return "", errors.New("signer needs a P-256 key")
+	}
+	if pub, ok := s.Key.Public().(*ecdsa.PublicKey); !ok || pub.Curve != elliptic.P256() {
 		return "", errors.New("signer needs a P-256 key")
 	}
 	if s.KID == "" {
@@ -134,11 +144,33 @@ func (s Signer) Sign(h Header, data []byte) (string, error) {
 		return "", err
 	}
 	protected := base64.RawURLEncoding.EncodeToString(hdr)
-	sig, err := dimocrypto.SignOperation(s.Key, jwsInput(protected, input))
+	digest := sha256.Sum256(jwsInput(protected, input))
+	der, err := s.Key.Sign(rand.Reader, digest[:], crypto.SHA256)
+	if err != nil {
+		return "", fmt.Errorf("sign: %w", err)
+	}
+	sig, err := rawSignature(der)
 	if err != nil {
 		return "", err
 	}
-	return protected + ".." + sig, nil
+	return protected + ".." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// rawSignature turns an ASN.1 ECDSA P-256 signature into the fixed-size r||s
+// JWS uses (RFC 7518 section 3.4).
+func rawSignature(der []byte) ([]byte, error) {
+	var rs struct{ R, S *big.Int }
+	rest, err := asn1.Unmarshal(der, &rs)
+	if err != nil || len(rest) != 0 || rs.R == nil || rs.S == nil || rs.R.Sign() <= 0 || rs.S.Sign() <= 0 {
+		return nil, errors.New("signer returned a malformed ECDSA signature")
+	}
+	if rs.R.BitLen() > 256 || rs.S.BitLen() > 256 {
+		return nil, errors.New("signer returned a signature that is not P-256")
+	}
+	sig := make([]byte, 64)
+	rs.R.FillBytes(sig[:32])
+	rs.S.FillBytes(sig[32:])
+	return sig, nil
 }
 
 // Keys finds the public key behind a verification method.
