@@ -15,9 +15,14 @@ import (
 
 // AuthorizeRequest is the body of POST /authorize (plan §3.3): the delegation
 // the caller is exercising, who they are, over which vehicle, for what. With
-// no URI the caller is asking as the vehicle's controller.
+// no URI the caller is asking as the vehicle's controller. With AnyGrant and
+// no URI, the host finds the authority itself: the caller's controller root or
+// any delegation to it, or to an org it has a role in. That is how din checks
+// a source, which sends data about many cars under one identity token and
+// never names a grant (docs/2026-10-24-sources.md).
 type AuthorizeRequest struct {
 	URI       string   `json:"uri"`
+	AnyGrant  bool     `json:"anyGrant,omitempty"`
 	Caller    string   `json:"caller"`
 	ClientID  string   `json:"clientId,omitempty"`
 	Vehicle   string   `json:"vehicle"`
@@ -92,9 +97,12 @@ func (s *Server) authorize(c *fiber.Ctx) error {
 	ev := &delegation.Evaluator{Resolver: s.resolver}
 	var cov *delegation.Coverage
 	var err error
-	if req.URI == "" {
+	switch {
+	case req.AnyGrant:
+		cov, err = s.authorizeAny(c.Context(), ev, req, at)
+	case req.URI == "":
 		cov, err = s.authorizeController(c.Context(), ev, req, at)
-	} else {
+	default:
 		cov, err = ev.Authorize(c.Context(), req.URI, req.Caller, req.ClientID, req.Vehicle, req.Abilities, at)
 	}
 	if err != nil {
@@ -115,7 +123,16 @@ func (s *Server) authorize(c *fiber.Ctx) error {
 // controls it (spec §7, the implicit root). The orgs it may act for are those
 // that gave it a role on this host; the evaluator checks each role.
 func (s *Server) authorizeController(ctx context.Context, ev *delegation.Evaluator, req AuthorizeRequest, at time.Time) (*delegation.Coverage, error) {
-	roles, err := s.repo.Store.Assigned(ctx, delegation.CollectionRole, req.Caller)
+	orgs, err := s.actingFor(ctx, req.Caller)
+	if err != nil {
+		return nil, err
+	}
+	return ev.AuthorizeController(ctx, req.Caller, orgs, req.Vehicle, req.Abilities, at)
+}
+
+// actingFor returns the orgs that gave caller a role on this host.
+func (s *Server) actingFor(ctx context.Context, caller string) ([]string, error) {
+	roles, err := s.repo.Store.Assigned(ctx, delegation.CollectionRole, caller)
 	if err != nil {
 		return nil, resolveErr(err)
 	}
@@ -129,12 +146,62 @@ func (s *Server) authorizeController(ctx context.Context, ev *delegation.Evaluat
 			orgs = append(orgs, org)
 		}
 	}
-	return ev.AuthorizeController(ctx, req.Caller, orgs, req.Vehicle, req.Abilities, at)
+	return orgs, nil
+}
+
+// authorizeAny answers an AnyGrant request: the controller root first, then
+// every delegation on this host to the caller or to an org it acts for, until
+// one covers the vehicle with every ability asked for. The coverage's chain
+// says which one did.
+//
+// When none does, the refusal is the one that says the most about the vehicle
+// rather than about any one grant: somebody holding it exclusively, and
+// otherwise not_covered. A caller with many grants would learn nothing from
+// hearing that one of them, picked by order, was revoked.
+func (s *Server) authorizeAny(ctx context.Context, ev *delegation.Evaluator, req AuthorizeRequest, at time.Time) (*delegation.Coverage, error) {
+	orgs, err := s.actingFor(ctx, req.Caller)
+	if err != nil {
+		return nil, err
+	}
+	var hold error
+	cov, err := ev.AuthorizeController(ctx, req.Caller, orgs, req.Vehicle, req.Abilities, at)
+	switch {
+	case err == nil:
+		return cov, nil
+	case errors.Is(err, delegation.ErrExclusiveHold):
+		hold = err
+	case !errors.Is(err, delegation.ErrNotCovered):
+		return nil, err
+	}
+	for _, party := range append([]string{req.Caller}, orgs...) {
+		grants, err := s.repo.Store.Assigned(ctx, delegation.CollectionDelegation, party)
+		if err != nil {
+			return nil, resolveErr(err)
+		}
+		for i := range grants {
+			cov, err := ev.Authorize(ctx, grants[i].URI, req.Caller, req.ClientID, req.Vehicle, req.Abilities, at)
+			switch {
+			case err == nil:
+				return cov, nil
+			case errors.Is(err, ErrResolve):
+				return nil, err
+			case errors.Is(err, delegation.ErrExclusiveHold) && hold == nil:
+				hold = err
+			}
+		}
+	}
+	if hold != nil {
+		return nil, hold
+	}
+	return nil, delegation.ErrNotCovered
 }
 
 func (r *AuthorizeRequest) validate() error {
 	// No uri asks for the vehicle as its controller; a client allowlist is a
 	// delegation's, so there is none to check.
+	if r.AnyGrant && r.URI != "" {
+		return errors.New("anyGrant finds the grant itself, so it takes no uri")
+	}
 	if r.URI != "" {
 		if _, _, _, err := delegation.ParseURI(r.URI); err != nil {
 			return fmt.Errorf("uri: %w", err)
