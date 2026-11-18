@@ -3,6 +3,7 @@
 | File | What it is |
 |---|---|
 | [2026-09-23-spec-compliance-review.md](2026-09-23-spec-compliance-review.md) | Cross-repository spec review: authorization and history findings, reproduction results, scope deviations and validation limits. |
+| [2026-10-01-identity-explorer.md](2026-10-01-identity-explorer.md) | What replaces the identity-api: the directory as it is for public data, the org host read with each caller's own token for private data, and the routes to add first. |
 | `eras-tags-and-grants.html` | Visual explainer for the controller-of-record and delegation model: today's on-chain permission stack next to the new one, where records live, coverage over time, narrowing chains, token issuance, and the RentalCo case study. Open it in a browser. |
 
 Design spec: `superpowers/specs/2026-09-16-dimo-orgs-fleets-delegation-design.md`. Org host plan: `superpowers/plans/2026-09-22-org-host-plan.md`.

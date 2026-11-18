@@ -362,6 +362,36 @@ func (s *MemoryStore) Roles(_ context.Context, org, member string) ([]Stored, er
 	return out, nil
 }
 
+func (s *MemoryStore) Assigned(_ context.Context, collection, assignee string) ([]Stored, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	orgs := make([]string, 0, len(s.orgs))
+	for did := range s.orgs {
+		orgs = append(orgs, did)
+	}
+	sort.Strings(orgs)
+	prefix := collection + "/"
+	out := []Stored{}
+	for _, did := range orgs {
+		o := s.orgs[did]
+		var heads []memHead
+		for k, h := range o.heads {
+			if strings.HasPrefix(k, prefix) {
+				heads = append(heads, h)
+			}
+		}
+		sort.Slice(heads, func(i, j int) bool { return heads[i].record < heads[j].record })
+		for _, h := range heads {
+			st := o.stored(h)
+			var rec map[string]any
+			if json.Unmarshal(st.Record, &rec) == nil && field(rec, "assignee") == assignee {
+				out = append(out, st)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) Exclusives(_ context.Context, vehicle string, at time.Time) ([]Stored, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -387,7 +417,7 @@ func (s *MemoryStore) Exclusives(_ context.Context, vehicle string, at time.Time
 	return out, nil
 }
 
-func (s *MemoryStore) DelegationsOverTag(_ context.Context, org, tag string) ([]Stored, error) {
+func (s *MemoryStore) DelegationsOver(_ context.Context, org, over string) ([]Stored, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	o, ok := s.orgs[org]
@@ -396,11 +426,45 @@ func (s *MemoryStore) DelegationsOverTag(_ context.Context, org, tag string) ([]
 	}
 	out := []Stored{}
 	o.each("network.dimo.delegation", func(st Stored, rec map[string]any) {
-		if target(rec) == tag {
+		if target(rec) == over {
 			out = append(out, st)
 		}
 	})
 	return out, nil
+}
+
+func (s *MemoryStore) VehicleTags(_ context.Context, org, vehicle string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	tags := []string{}
+	o.each("network.dimo.org.tagMembership", func(_ Stored, rec map[string]any) {
+		if field(rec, "vehicle") == vehicle && !slices.Contains(tags, field(rec, "tag")) {
+			tags = append(tags, field(rec, "tag"))
+		}
+	})
+	sort.Strings(tags)
+	return tags, nil
+}
+
+func (s *MemoryStore) TagVehicles(_ context.Context, org, tag string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	o, ok := s.orgs[org]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	vehicles := []string{}
+	o.each("network.dimo.org.tagMembership", func(_ Stored, rec map[string]any) {
+		if field(rec, "tag") == tag && !slices.Contains(vehicles, field(rec, "vehicle")) {
+			vehicles = append(vehicles, field(rec, "vehicle"))
+		}
+	})
+	sort.Strings(vehicles)
+	return vehicles, nil
 }
 
 func (s *MemoryStore) DelegationsWithBasis(_ context.Context, uri string) ([]Stored, error) {

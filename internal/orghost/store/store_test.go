@@ -368,7 +368,7 @@ func TestStore_ResolverQueries(t *testing.T) {
 	}
 }
 
-func TestStore_AuthoredAndDelegationsOverTag(t *testing.T) {
+func TestStore_AuthoredAndDelegationsOver(t *testing.T) {
 	for name, s := range stores(t) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
@@ -390,15 +390,15 @@ func TestStore_AuthoredAndDelegationsOverTag(t *testing.T) {
 			c4 := commit(did, head, repo.OpUpdate, "network.dimo.delegation", "a", `{"permission":[{"target":"`+tag+`"}],"assignee":"did:dimo:z"}`, "did:dimo:bob")
 			require.NoError(t, s.AppendAfter(ctx, head, c4))
 
-			over, err := s.DelegationsOverTag(ctx, did, tag)
+			over, err := s.DelegationsOver(ctx, did, tag)
 			require.NoError(t, err)
 			require.Len(t, over, 1)
 			assert.Equal(t, "a", over[0].RKey)
 			assert.Equal(t, "did:dimo:bob", over[0].CommittedBy)
-			over, err = s.DelegationsOverTag(ctx, did, "at://"+did+"/network.dimo.org.tag/other")
+			over, err = s.DelegationsOver(ctx, did, "at://"+did+"/network.dimo.org.tag/other")
 			require.NoError(t, err)
 			assert.Empty(t, over)
-			_, err = s.DelegationsOverTag(ctx, "did:dimo:nobody", tag)
+			_, err = s.DelegationsOver(ctx, "did:dimo:nobody", tag)
 			assert.True(t, IsNotFound(err))
 
 			byAlice, err := s.Authored(ctx, did, "did:dimo:alice", before)
@@ -502,6 +502,95 @@ func TestStore_DelegationsWithBasis(t *testing.T) {
 			got, err = s.DelegationsWithBasis(ctx, "at://"+owner+"/network.dimo.delegation/nothing")
 			require.NoError(t, err)
 			assert.Empty(t, got)
+		})
+	}
+}
+
+func TestStore_Assigned(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			a, b := newOrg(t, s), newOrg(t, s)
+			member := a + "-member"
+			roles, delegations := "network.dimo.org.role", "network.dimo.delegation"
+			add := func(org, op, coll, rkey, record string) {
+				t.Helper()
+				head, err := s.Head(ctx, org)
+				require.NoError(t, err)
+				require.NoError(t, s.AppendAfter(ctx, head, commit(org, head, op, coll, rkey, record, "")))
+			}
+			add(a, repo.OpCreate, roles, "r1", `{"assignee":"`+member+`"}`)
+			add(a, repo.OpCreate, roles, "r2", `{"assignee":"did:dimo:someone"}`)
+			add(b, repo.OpCreate, roles, "r3", `{"assignee":"`+member+`"}`)
+			add(b, repo.OpTombstone, roles, "r3", "")
+			add(b, repo.OpCreate, delegations, "d1", `{"assignee":"`+member+`"}`)
+
+			got, err := s.Assigned(ctx, roles, member)
+			require.NoError(t, err)
+			uris := []string{}
+			for _, st := range got {
+				uris = append(uris, st.URI)
+			}
+			assert.ElementsMatch(t, []string{"at://" + a + "/" + roles + "/r1", "at://" + b + "/" + roles + "/r3"}, uris,
+				"both repositories, tombstones included")
+			for _, st := range got {
+				assert.Equal(t, st.RKey == "r3", !st.Live())
+			}
+
+			got, err = s.Assigned(ctx, delegations, member)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			assert.Equal(t, "d1", got[0].RKey)
+
+			got, err = s.Assigned(ctx, roles, "did:dimo:nobody")
+			require.NoError(t, err)
+			assert.Empty(t, got)
+		})
+	}
+}
+
+func TestStore_VehicleTags(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			org := newOrg(t, s)
+			car := org + "-car"
+			tag := func(slug string) string { return "at://" + org + "/network.dimo.org.tag/" + slug }
+			memberships := "network.dimo.org.tagMembership"
+			add := func(op, rkey, record string) {
+				t.Helper()
+				head, err := s.Head(ctx, org)
+				require.NoError(t, err)
+				require.NoError(t, s.AppendAfter(ctx, head, commit(org, head, op, memberships, rkey, record, "")))
+			}
+			add(repo.OpCreate, "m1", `{"tag":"`+tag("fleet")+`","vehicle":"`+car+`","joinedAt":"2026-01-01T00:00:00Z"}`)
+			// Ended, but still a membership the car had.
+			add(repo.OpCreate, "m2", `{"tag":"`+tag("alpha")+`","vehicle":"`+car+`","joinedAt":"2026-01-01T00:00:00Z","leftAt":"2026-01-02T00:00:00Z"}`)
+			add(repo.OpCreate, "m3", `{"tag":"`+tag("fleet")+`","vehicle":"`+car+`","joinedAt":"2026-02-01T00:00:00Z"}`)
+			add(repo.OpCreate, "m4", `{"tag":"`+tag("gone")+`","vehicle":"`+car+`","joinedAt":"2026-01-01T00:00:00Z"}`)
+			add(repo.OpTombstone, "m4", "")
+			add(repo.OpCreate, "m5", `{"tag":"`+tag("other")+`","vehicle":"`+org+`-other-car","joinedAt":"2026-01-01T00:00:00Z"}`)
+
+			got, err := s.VehicleTags(ctx, org, car)
+			require.NoError(t, err)
+			assert.Equal(t, []string{tag("alpha"), tag("fleet")}, got)
+			got, err = s.VehicleTags(ctx, org, org+"-no-car")
+			require.NoError(t, err)
+			assert.Empty(t, got)
+			_, err = s.VehicleTags(ctx, "did:dimo:nobody", car)
+			assert.True(t, IsNotFound(err))
+
+			got, err = s.TagVehicles(ctx, org, tag("fleet"))
+			require.NoError(t, err)
+			assert.Equal(t, []string{car}, got, "two memberships, one car")
+			got, err = s.TagVehicles(ctx, org, tag("alpha"))
+			require.NoError(t, err)
+			assert.Equal(t, []string{car}, got, "an ended membership still counts")
+			got, err = s.TagVehicles(ctx, org, tag("gone"))
+			require.NoError(t, err)
+			assert.Empty(t, got, "a tombstoned membership does not")
+			_, err = s.TagVehicles(ctx, "did:dimo:nobody", tag("fleet"))
+			assert.True(t, IsNotFound(err))
 		})
 	}
 }

@@ -21,6 +21,9 @@ const (
 	// AbilityOrgAdmin lets a member read everything in the repository, the
 	// control openings included.
 	AbilityOrgAdmin = "org:admin"
+	// AbilityOrgRead lets a member read the repository's records within the
+	// role's scope (spec §6.2), but not the control openings or the log.
+	AbilityOrgRead = "org:read"
 )
 
 // ManageAbility returns the ability that manages records of rec's kind: what a

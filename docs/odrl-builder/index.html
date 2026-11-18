@@ -272,7 +272,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   const KNOWN = ["telemetry:read", "events:read", "location:precise", "command:lock", "command:unlock",
-    "command:charge", "delegation:create", "tag:write", "org:admin", "org:members"];
+    "command:charge", "delegation:create", "tag:write", "org:admin", "org:read", "org:members"];
   // Fallback until the codec loads; the codec's own classOf replaces it.
   let classOf = a => /^(delegation|tag|org|license):/.test(a) ? "admin"
     : (/^(command|stream):/.test(a) || /:(write|deliver)$/.test(a)) ? "live" : "historical";

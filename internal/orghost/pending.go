@@ -2,25 +2,75 @@ package orghost
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
+	"github.com/DIMO-Network/did-directory/pkg/delegation"
+	"github.com/DIMO-Network/did-directory/pkg/odrl"
 	"github.com/gofiber/fiber/v2"
 )
 
-// listPending returns the org's writes awaiting approval, for approvers: any
-// member may see them, and approving is checked per write.
+// listPending returns the org's writes awaiting approval that the caller may
+// see: those they could read once committed, and those they hold the
+// authority to approve (checkApprover). Approving is still checked per write.
 func (s *Server) listPending(c *fiber.Ctx) error {
 	org, _, _ := params(c)
-	if err := s.checkRead(c.Context(), org, caller(c), "pending"); err != nil {
+	who := caller(c)
+	r, err := s.reader(c.Context(), org, who)
+	if err != nil {
 		return s.fail(c, err)
 	}
 	pending, err := s.repo.Store.ListPending(c.Context(), org)
 	if err != nil {
 		return s.fail(c, err)
 	}
-	return c.JSON(fiber.Map{"pending": pending})
+	out := []store.Pending{}
+	for i := range pending {
+		p := &pending[i]
+		uri := "at://" + org + "/" + p.Collection + "/" + p.RKey
+		ok, err := r.canRead(c.Context(), uri, p.Collection, p.Record, p.CommittedBy)
+		if err != nil {
+			return s.fail(c, err)
+		}
+		if !ok {
+			if ok, err = s.couldApprove(c.Context(), org, who, p); err != nil {
+				return s.fail(c, err)
+			}
+		}
+		if ok {
+			out = append(out, *p)
+		}
+	}
+	return c.JSON(fiber.Map{"pending": out})
+}
+
+// couldApprove reports whether member holds the authority an approver of p
+// needs: the managing ability over a delegation's or role's scope, or
+// tag:write over a membership's tag. The author-and-recipient exclusions are
+// left to the approval itself.
+func (s *Server) couldApprove(ctx context.Context, org, member string, p *store.Pending) (bool, error) {
+	var scope delegation.Covers
+	var need string
+	switch p.Collection {
+	case delegation.CollectionDelegation, delegation.CollectionRole:
+		rec, err := odrl.Decode(p.Record)
+		if err != nil {
+			return false, err
+		}
+		scope, need = rec.Covers, delegation.ManageAbility(rec)
+	case delegation.CollectionTagMembership:
+		var m delegation.MembershipRecord
+		if err := json.Unmarshal(p.Record, &m); err != nil {
+			return false, err
+		}
+		scope, need = delegation.Covers{Tag: m.Tag}, delegation.AbilityTagWrite
+	default:
+		return false, nil
+	}
+	roles, err := s.evaluator().RolesCovering(ctx, org, member, scope, []string{need}, s.repo.now())
+	return len(roles) > 0, err
 }
 
 // approve commits a pending write as approved by the caller (plan §3.2 step
@@ -114,12 +164,24 @@ func (s *Server) revokeAuthoredBy(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	if err := s.checkRead(c.Context(), org, caller(c), "revoke-authored-by"); err != nil {
-		return s.fail(c, err)
-	}
-	authored, err := s.repo.Store.Authored(c.Context(), org, req.Member, since)
+	r, err := s.reader(c.Context(), org, caller(c))
 	if err != nil {
 		return s.fail(c, err)
+	}
+	all, err := s.repo.Store.Authored(c.Context(), org, req.Member, since)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	// The caller sees, and may send back, only what they could read.
+	authored := []store.Stored{}
+	for i := range all {
+		ok, err := r.canReadStored(c.Context(), &all[i])
+		if err != nil {
+			return s.fail(c, err)
+		}
+		if ok {
+			authored = append(authored, all[i])
+		}
 	}
 	if req.URIs == nil {
 		return c.JSON(fiber.Map{"records": authored})

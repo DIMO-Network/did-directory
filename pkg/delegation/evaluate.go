@@ -1140,6 +1140,13 @@ func (e *Evaluator) roleActive(ctx context.Context, r *Stored, org, member strin
 	return true, nil
 }
 
+// RoleScopeCovers reports whether a role scoped to role includes target at
+// time at: the same test a write is held to, which an org host also applies to
+// what an org:read role may read.
+func (e *Evaluator) RoleScopeCovers(ctx context.Context, role, target Covers, at time.Time) (bool, error) {
+	return e.roleScopeCovers(ctx, role, target, at)
+}
+
 // roleScopeCovers reports whether a role's scope includes the target scope at
 // time at.
 //

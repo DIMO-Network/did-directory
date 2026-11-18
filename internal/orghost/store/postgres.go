@@ -98,12 +98,17 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		-- heads is what picks the current one.
 		CREATE INDEX IF NOT EXISTS commits_membership_idx ON commits (org, (record_json->>'tag'), (record_json->>'vehicle'))
 			WHERE collection = 'network.dimo.org.tagMembership';
+		CREATE INDEX IF NOT EXISTS commits_membership_vehicle_idx ON commits (org, (record_json->>'vehicle'))
+			WHERE collection = 'network.dimo.org.tagMembership';
 		CREATE INDEX IF NOT EXISTS commits_custody_idx ON commits ((record_json->>'vehicle'), (record_json->>'holder'))
 			WHERE collection = 'network.dimo.org.custody';
 		-- Delegations and roles are ODRL policies: to is the assignee, covers is
 		-- the one permission's target, basis and exclusive are profile terms.
 		CREATE INDEX IF NOT EXISTS commits_role_assignee_idx ON commits (org, (record_json->>'assignee'))
 			WHERE collection = 'network.dimo.org.role';
+		-- The same, host-wide, for a caller asking what it holds.
+		CREATE INDEX IF NOT EXISTS commits_assignee_idx ON commits ((record_json->>'assignee'), collection)
+			WHERE collection IN ('network.dimo.org.role', 'network.dimo.delegation');
 		CREATE INDEX IF NOT EXISTS commits_exclusive_target_idx ON commits ((record_json->'permission'->0->>'target'))
 			WHERE collection = 'network.dimo.delegation' AND jsonb_typeof(record_json->'dimo:exclusive') = 'array';
 		CREATE INDEX IF NOT EXISTS commits_target_idx ON commits (org, (record_json->'permission'->0->>'target'))
@@ -394,6 +399,10 @@ func (s *PostgresStore) Roles(ctx context.Context, org, member string) ([]Stored
 	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.org.role' AND r.record_json->>'assignee' = $2`, org, member)
 }
 
+func (s *PostgresStore) Assigned(ctx context.Context, collection, assignee string) ([]Stored, error) {
+	return s.queryStored(ctx, `h.collection = $1 AND r.record_json->>'assignee' = $2`, collection, assignee)
+}
+
 func (s *PostgresStore) Exclusives(ctx context.Context, vehicle string, at time.Time) ([]Stored, error) {
 	return s.queryStored(ctx, `h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
 		AND jsonb_typeof(r.record_json->'dimo:exclusive') = 'array' AND jsonb_array_length(r.record_json->'dimo:exclusive') > 0
@@ -404,12 +413,58 @@ func (s *PostgresStore) Exclusives(ctx context.Context, vehicle string, at time.
 				AND m.record_json->>'vehicle' = $1 AND `+memberAtSQL("$2")+`))`, vehicle, at)
 }
 
-func (s *PostgresStore) DelegationsOverTag(ctx context.Context, org, tag string) ([]Stored, error) {
+func (s *PostgresStore) DelegationsOver(ctx context.Context, org, target string) ([]Stored, error) {
 	if _, err := s.head(ctx, s.pool, org); err != nil {
 		return nil, err
 	}
 	return s.queryStored(ctx, `h.org = $1 AND h.collection = 'network.dimo.delegation' AND h.tombstone_seq IS NULL
-		AND r.record_json->'permission'->0->>'target' = $2`, org, tag)
+		AND r.record_json->'permission'->0->>'target' = $2`, org, target)
+}
+
+func (s *PostgresStore) VehicleTags(ctx context.Context, org, vehicle string) ([]string, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT r.record_json->>'tag' `+storedFrom+`
+		WHERE h.org = $1 AND h.collection = 'network.dimo.org.tagMembership' AND h.tombstone_seq IS NULL
+			AND r.record_json->>'vehicle' = $2
+		ORDER BY 1`, org, vehicle)
+	if err != nil {
+		return nil, fmt.Errorf("query vehicle tags: %w", err)
+	}
+	defer rows.Close()
+	tags := []string{}
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, fmt.Errorf("scan vehicle tag: %w", err)
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
+}
+
+func (s *PostgresStore) TagVehicles(ctx context.Context, org, tag string) ([]string, error) {
+	if _, err := s.head(ctx, s.pool, org); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT r.record_json->>'vehicle' `+storedFrom+`
+		WHERE h.org = $1 AND h.collection = 'network.dimo.org.tagMembership' AND h.tombstone_seq IS NULL
+			AND r.record_json->>'tag' = $2
+		ORDER BY 1`, org, tag)
+	if err != nil {
+		return nil, fmt.Errorf("query tag vehicles: %w", err)
+	}
+	defer rows.Close()
+	vehicles := []string{}
+	for rows.Next() {
+		var vehicle string
+		if err := rows.Scan(&vehicle); err != nil {
+			return nil, fmt.Errorf("scan tag vehicle: %w", err)
+		}
+		vehicles = append(vehicles, vehicle)
+	}
+	return vehicles, rows.Err()
 }
 
 func (s *PostgresStore) DelegationsWithBasis(ctx context.Context, uri string) ([]Stored, error) {
