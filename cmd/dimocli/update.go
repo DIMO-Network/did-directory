@@ -10,8 +10,10 @@ import (
 	"os"
 	"strings"
 
+	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/pkg/client"
+	"github.com/multiformats/go-multicodec"
 )
 
 // updateOptions is everything runUpdate reads from its flags.
@@ -22,6 +24,9 @@ type updateOptions struct {
 	OrgKey    string
 	NewOrgKey bool
 	OrgHost   string
+	// SigningKey publishes the given did:key as #signing, for a key held
+	// somewhere else (a KMS, an HSM). The rotation key does not change.
+	SigningKey string
 }
 
 // updatePlan is a plc_operation update ready to sign, plus the generated
@@ -50,6 +55,24 @@ func buildUpdate(current *did.Operation, prevCID string, opts updateOptions) (*u
 	}
 
 	vms := current.VerificationMethods
+	if opts.SigningKey != "" {
+		if current.IsControlled() {
+			return nil, errors.New("a controlled DID cannot carry #signing: it has no verification methods")
+		}
+		pub, err := dimocrypto.DecodeDIDKey(opts.SigningKey)
+		if err != nil {
+			return nil, fmt.Errorf("--signing-key: %w", err)
+		}
+		if pub.Codec() != multicodec.P256Pub {
+			return nil, errors.New("--signing-key must be a P-256 did:key: events are signed with ES256")
+		}
+		next := make(map[string]string, len(vms)+1)
+		for k, v := range vms {
+			next[k] = v
+		}
+		next["signing"] = opts.SigningKey
+		vms = next
+	}
 	choice := orgKeyChoice{Given: opts.OrgKey, Generate: opts.NewOrgKey}
 	var orgKey *ecdsa.PrivateKey
 	if choice.wanted() {
@@ -87,6 +110,7 @@ func runUpdate(args []string) {
 	orgKey := fs.String("org-key", "", "did:key to publish as #dimo_org (the org host holds the private half)")
 	newOrgKey := fs.Bool("new-org-key", false, "generate a new #dimo_org commit signing key and store it in the keystore")
 	orgHost := fs.String("org-host", "", "org host URL, published as the #dimo_org_host service entry")
+	signingKey := fs.String("signing-key", "", "P-256 did:key to publish as #signing, when the private half is held elsewhere (a KMS)")
 	fs.Parse(args)
 
 	if *didStr == "" {
@@ -117,11 +141,12 @@ func runUpdate(args []string) {
 	}
 
 	plan, err := buildUpdate(currentOp, prevCID, updateOptions{
-		Services:  *service,
-		Aliases:   *alias,
-		OrgKey:    *orgKey,
-		NewOrgKey: *newOrgKey,
-		OrgHost:   *orgHost,
+		Services:   *service,
+		Aliases:    *alias,
+		OrgKey:     *orgKey,
+		NewOrgKey:  *newOrgKey,
+		OrgHost:    *orgHost,
+		SigningKey: *signingKey,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -150,6 +175,9 @@ func runUpdate(args []string) {
 	}
 	if *orgKey != "" || *newOrgKey {
 		fmt.Printf("Org commit key (#%s): %s\n", OrgKeyID, plan.Op.VerificationMethods[OrgKeyID])
+	}
+	if *signingKey != "" {
+		fmt.Printf("Signing key (#signing): %s\n", *signingKey)
 	}
 	if *orgHost != "" {
 		fmt.Printf("Org host (#%s): %s\n", OrgHostServiceID, *orgHost)

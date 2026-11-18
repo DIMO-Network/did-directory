@@ -2,10 +2,12 @@ package provenance
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -208,4 +210,30 @@ func TestSigningInput_RejectsLineBreaks(t *testing.T) {
 	h.Subject = ""
 	_, err = SigningInput(h, data)
 	assert.ErrorIs(t, err, ErrInvalidHeader)
+}
+
+// opaqueSigner hides the private key behind crypto.Signer, the way a KMS or
+// HSM key looks to the code that uses it.
+type opaqueSigner struct{ key *ecdsa.PrivateKey }
+
+func (o opaqueSigner) Public() crypto.PublicKey { return &o.key.PublicKey }
+func (o opaqueSigner) Sign(r io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return o.key.Sign(r, digest, opts)
+}
+
+func TestSign_AnyCryptoSigner(t *testing.T) {
+	key := newKey(t)
+	keys := DIDKeys{Directory: directory{relay: key}}
+	h := header("imei:1")
+
+	jws := sign(t, Signer{Key: opaqueSigner{key}, KID: relay + "#signing"}, h, data)
+	_, err := Verify(context.Background(), keys, h, data, Signatures{Source: jws})
+	require.NoError(t, err)
+}
+
+func TestSign_RefusesOtherCurves(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	_, err = Signer{Key: key, KID: relay + "#signing"}.Sign(header("imei:1"), data)
+	assert.ErrorContains(t, err, "P-256")
 }
