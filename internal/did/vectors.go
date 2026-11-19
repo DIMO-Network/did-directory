@@ -69,7 +69,8 @@ func GenerateVectors() (VectorFile, error) {
 		return VectorFile{}, fmt.Errorf("phone did:key: %w", err)
 	}
 
-	alias := []string{"did:ethr:137:0x" + "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12"}
+	// EIP-55 checksummed: the person-DID policy (spec §5) requires checksummed aliases.
+	alias := []string{"did:ethr:137:0xAB12cd34Ef56aB12Cd34Ef56ab12Cd34Ef56aB12"}
 	noServices := func() map[string]Service { return map[string]Service{} }
 
 	var cases []Vector
