@@ -60,6 +60,12 @@ DIRECTORY_PORT="${DIRECTORY_PORT:-8082}"
 ORG_HOST_PORT="${ORG_HOST_PORT:-8081}"
 DAUTH_PORT="${DAUTH_PORT:-8080}"
 DQ_PORT="${DQ_PORT:-3000}"
+# The services' monitoring and gRPC listeners. Nothing in the demo calls them,
+# but they must be free; move them when another stack holds the defaults.
+DIRECTORY_MON_PORT="${DIRECTORY_MON_PORT:-18888}"
+DAUTH_OPS_PORT="${DAUTH_OPS_PORT:-18089}"
+DQ_GRPC_PORT="${DQ_GRPC_PORT:-13001}"
+DQ_MON_PORT="${DQ_MON_PORT:-18889}"
 DIRECTORY_URL="http://localhost:$DIRECTORY_PORT"
 ORG_HOST_URL="http://localhost:$ORG_HOST_PORT"
 DAUTH_URL="http://localhost:$DAUTH_PORT"
@@ -431,9 +437,10 @@ for tool in go jq curl openssl; do
 done
 [ -d "$DAUTH_DIR/cmd/dauth" ] || die "dauth checkout not found at $DAUTH_DIR (set DAUTH_DIR)"
 [ -d "$DQ_DIR/cmd/dq" ] || die "dq checkout not found at $DQ_DIR (set DQ_DIR)"
-for port in "$DIRECTORY_PORT" "$ORG_HOST_PORT" "$DAUTH_PORT" "$DQ_PORT"; do
+for port in "$DIRECTORY_PORT" "$ORG_HOST_PORT" "$DAUTH_PORT" "$DQ_PORT" \
+    "$DIRECTORY_MON_PORT" "$DAUTH_OPS_PORT" "$DQ_GRPC_PORT" "$DQ_MON_PORT"; do
     if curl -s --max-time 2 "http://localhost:$port/" >/dev/null 2>&1; then
-        die "port $port is in use; stop what is listening there or set DIRECTORY_PORT, ORG_HOST_PORT, DAUTH_PORT and DQ_PORT"
+        die "port $port is in use; stop what is listening there or set DIRECTORY_PORT, ORG_HOST_PORT, DAUTH_PORT, DQ_PORT, DIRECTORY_MON_PORT, DAUTH_OPS_PORT, DQ_GRPC_PORT or DQ_MON_PORT"
     fi
 done
 
@@ -449,7 +456,7 @@ step "Building dq and dq-seed from $DQ_DIR (CGO, embedded DuckDB)..."
 success "built $BIN/dq and $BIN/dq-seed"
 
 step "Starting the DID directory (in memory) on :$DIRECTORY_PORT..."
-DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT=18888 LOG_LEVEL=warn \
+DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
     "$BIN/did-directory" -settings /dev/null >"$DEMO_DIR/directory.log" 2>&1 &
 PIDS+=($!)
 wait_for "$DIRECTORY_URL/health" "directory"
@@ -460,7 +467,7 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$DEMO_DIR/exc
 # The demo reuses tokens signed in at the start to the end, which outlasts the
 # 15-minute default lifetime.
 DATABASE_URL="" ENVIRONMENT=local LOG_LEVEL=info \
-    HTTP_ADDRESS="127.0.0.1:$DAUTH_PORT" OPS_ADDRESS="127.0.0.1:18089" \
+    HTTP_ADDRESS="127.0.0.1:$DAUTH_PORT" OPS_ADDRESS="127.0.0.1:$DAUTH_OPS_PORT" \
     PUBLIC_BASE_URL="$DAUTH_URL" DIRECTORY_URL="$DIRECTORY_URL" \
     SIGNIN_ISSUER="$DAUTH_URL/signin" JWT_AUDIENCE=dimo TOKEN_TTL=1h \
     SIGNIN_SIGNING_KEY_1="$(cat "$DEMO_DIR/signin.pem")" \
@@ -861,7 +868,7 @@ step "Starting dq on :$DQ_PORT over the seeded catalog..."
 info "It verifies tokens against dauth's exchange keys and expects audience dq."
 DUCKLAKE_CATALOG_DSN="$LAKE/catalog.ducklake" DUCKLAKE_DATA_PATH="$LAKE/data" BLOB_BUCKET="$LAKE/blobs" \
     MATERIALIZER_ENABLED=true MATERIALIZER_POLL_INTERVAL=1s LATEST_KV_READ_MODE=off LAKE_ROLLUP_DAILY_SERVING=true \
-    PORT="$DQ_PORT" GRPC_PORT=13001 MON_PORT=18889 DIMO_REGISTRY_CHAIN_ID=137 LOG_LEVEL=info \
+    PORT="$DQ_PORT" GRPC_PORT="$DQ_GRPC_PORT" MON_PORT="$DQ_MON_PORT" DIMO_REGISTRY_CHAIN_ID=137 LOG_LEVEL=info \
     PUBLIC_BASE_URL="$DQ_URL" TOKEN_EXCHANGE_JWK_KEY_SET_URL="$DAUTH_URL/exchange/keys" \
     TOKEN_EXCHANGE_ISSUER_URL="$DAUTH_URL/exchange" TOKEN_AUDIENCE=dq \
     "$BIN/dq" -settings /dev/null >"$DEMO_DIR/dq.log" 2>&1 &
