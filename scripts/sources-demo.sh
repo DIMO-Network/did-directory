@@ -36,6 +36,11 @@ DIRECTORY_PORT="${DIRECTORY_PORT:-8082}"
 ORG_HOST_PORT="${ORG_HOST_PORT:-8081}"
 DAUTH_PORT="${DAUTH_PORT:-8080}"
 DIN_PORT="${DIN_PORT:-9443}"
+# The services' other listeners; move them when another stack holds the defaults.
+DIRECTORY_MON_PORT="${DIRECTORY_MON_PORT:-18888}"
+DAUTH_OPS_PORT="${DAUTH_OPS_PORT:-18089}"
+DIN_ATTESTATION_PORT="${DIN_ATTESTATION_PORT:-9442}"
+DIN_OPS_PORT="${DIN_OPS_PORT:-18080}"
 DIRECTORY_URL="http://localhost:$DIRECTORY_PORT"
 ORG_HOST_URL="http://localhost:$ORG_HOST_PORT"
 DAUTH_URL="http://localhost:$DAUTH_PORT"
@@ -162,9 +167,10 @@ STATUS_DATA() { # a status payload in DIMO's default format, verbatim bytes
 # ── Services ──────────────────────────────────────────────────────────────
 
 header "Starting the services"
-for port in "$DIRECTORY_PORT" "$ORG_HOST_PORT" "$DAUTH_PORT" "$DIN_PORT" 9442 18080; do
+for port in "$DIRECTORY_PORT" "$ORG_HOST_PORT" "$DAUTH_PORT" "$DIN_PORT" \
+    "$DIRECTORY_MON_PORT" "$DAUTH_OPS_PORT" "$DIN_ATTESTATION_PORT" "$DIN_OPS_PORT"; do
     if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-        die "port $port is in use"
+        die "port $port is in use; stop what is listening there or set DIRECTORY_PORT, ORG_HOST_PORT, DAUTH_PORT, DIN_PORT, DIRECTORY_MON_PORT, DAUTH_OPS_PORT, DIN_ATTESTATION_PORT or DIN_OPS_PORT"
     fi
 done
 
@@ -175,7 +181,7 @@ mkdir -p "$BIN"
 (cd "$DIN_DIR" && CGO_ENABLED=1 go build -o "$BIN/din" ./cmd/din)
 success "built into $BIN"
 
-DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT=18888 LOG_LEVEL=warn \
+DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
     "$BIN/did-directory" -settings /dev/null >"$DEMO_DIR/directory.log" 2>&1 &
 PIDS+=($!)
 wait_for "$DIRECTORY_URL/health" "directory" -f
@@ -183,7 +189,7 @@ wait_for "$DIRECTORY_URL/health" "directory" -f
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$DEMO_DIR/signin.pem" 2>/dev/null
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$DEMO_DIR/exchange.pem" 2>/dev/null
 DATABASE_URL="" ENVIRONMENT=local LOG_LEVEL=info \
-    HTTP_ADDRESS="127.0.0.1:$DAUTH_PORT" OPS_ADDRESS="127.0.0.1:18089" \
+    HTTP_ADDRESS="127.0.0.1:$DAUTH_PORT" OPS_ADDRESS="127.0.0.1:$DAUTH_OPS_PORT" \
     PUBLIC_BASE_URL="$DAUTH_URL" DIRECTORY_URL="$DIRECTORY_URL" \
     SIGNIN_ISSUER="$DAUTH_URL/signin" JWT_AUDIENCE=dimo TOKEN_TTL=1h \
     SIGNIN_SIGNING_KEY_1="$(cat "$DEMO_DIR/signin.pem")" \
@@ -256,7 +262,7 @@ LOG_LEVEL=info NATS_MODE=embedded NATS_STORE_DIR="$DEMO_DIR/nats" \
     DUCKLAKE_CATALOG_DSN="$DEMO_DIR/lake/meta.ducklake" DUCKLAKE_DATA_PATH="$DEMO_DIR/lake/data" \
     BLOB_BUCKET="$DEMO_DIR/blobs" SINK_MAX_AGE=1s SINK_MAX_AGE_HARD=2s \
     NATS_STREAM_MAX_BYTES=268435456 SIGNALS_MAX_BYTES=268435456 EVENTS_MAX_BYTES=268435456 \
-    DIS_CONNECTION_ADDRESS="127.0.0.1:$DIN_PORT" DIS_ATTESTATION_ADDRESS="127.0.0.1:9442" OPS_ADDRESS="127.0.0.1:18080" \
+    DIS_CONNECTION_ADDRESS="127.0.0.1:$DIN_PORT" DIS_ATTESTATION_ADDRESS="127.0.0.1:$DIN_ATTESTATION_PORT" OPS_ADDRESS="127.0.0.1:$DIN_OPS_PORT" \
     TLS_CERT_FILE="$DEMO_DIR/din.pem" TLS_KEY_FILE="$DEMO_DIR/din.key" TLS_CA_CERT_FILE="$DEMO_DIR/ca.pem" \
     RPC_URL=http://127.0.0.1:1 \
     TOKEN_EXCHANGE_ISSUER_URL="$DAUTH_URL/exchange" TOKEN_EXCHANGE_JWK_KEY_SET_URL="$DAUTH_URL/signin/keys" \
@@ -268,7 +274,7 @@ LOG_LEVEL=info NATS_MODE=embedded NATS_STORE_DIR="$DEMO_DIR/nats" \
     "$BIN/din" >"$DEMO_DIR/din.log" 2>&1 &
 DIN_PID=$!
 PIDS+=($DIN_PID)
-wait_for "http://127.0.0.1:18080/ready" "din" -f
+wait_for "http://127.0.0.1:$DIN_OPS_PORT/ready" "din" -f
 
 # ── Step 3: Flespi sends ──────────────────────────────────────────────────
 
