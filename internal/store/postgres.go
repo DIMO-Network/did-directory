@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/did"
@@ -26,6 +27,8 @@ func IsNotFound(err error) bool {
 type PostgresStore struct {
 	pool *pgxpool.Pool
 	log  zerolog.Logger
+	// lastAcquire is pool.Stat().AcquireCount() at the previous Busy probe.
+	lastAcquire atomic.Int64
 }
 
 // NewPostgresStore creates a new PostgreSQL-backed store.
@@ -192,14 +195,35 @@ func (s *PostgresStore) Export(ctx context.Context, afterSeq int64, limit int) (
 	return records, rows.Err()
 }
 
+// Busy reports whether the pool is saturated and still working: every
+// connection is acquired and AcquireCount has advanced since the previous
+// probe, which proves connections are cycling and so the database answers. A
+// saturated pool whose count is flat may be stuck on a dead database, so it
+// is not busy and the caller must Ping.
+// Busy has a side effect (it records the AcquireCount): only the readiness handler may call it.
+func (s *PostgresStore) Busy() bool {
+	st := s.pool.Stat()
+	return s.busy(st.AcquiredConns(), st.MaxConns(), st.AcquireCount())
+}
+
+func (s *PostgresStore) busy(acquired, maxConns int32, acquireCount int64) bool {
+	prev := s.lastAcquire.Swap(acquireCount)
+	return acquired >= maxConns && acquireCount > prev
+}
+
+// Ping checks the database connection.
+func (s *PostgresStore) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 func (s *PostgresStore) Close() error {
 	s.pool.Close()
 	return nil
 }
 
-// MemoryStore implements Store using in-memory maps. It is the default when
-// DATABASE_URL is unset, so it is a production code path and not only a test
-// fixture: Fiber serves every request in its own goroutine, and mu is what keeps
+// MemoryStore implements Store using in-memory maps. The service uses it only
+// when DATABASE_URL is unset and ALLOW_MEMORY_STORE=true (local runs and
+// demos), but it is still a concurrent code path and not only a test fixture: Fiber serves every request in its own goroutine, and mu is what keeps
 // concurrent appends from losing a sequence number or tripping Go's
 // unrecoverable "concurrent map writes".
 type MemoryStore struct {
@@ -302,6 +326,9 @@ func (s *MemoryStore) Export(_ context.Context, afterSeq int64, limit int) ([]Op
 	}
 	return records, nil
 }
+
+// Ping always succeeds: memory is always reachable.
+func (s *MemoryStore) Ping(context.Context) error { return nil }
 
 func (s *MemoryStore) Close() error {
 	return nil

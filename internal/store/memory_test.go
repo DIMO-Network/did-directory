@@ -32,7 +32,7 @@ func TestMemoryStore_AppendCopiesAliasedStrings(t *testing.T) {
 	assert.Equal(t, "did:dimo:aaaaaaaaaaaaaaaaaaaaaaaa", recs[0].DID)
 }
 
-// MemoryStore is the production default when DATABASE_URL is unset, and Fiber
+// MemoryStore backs local runs (DATABASE_URL unset, ALLOW_MEMORY_STORE=true), and Fiber
 // serves every request in its own goroutine. Without a lock `s.seq++` loses
 // updates and the concurrent `s.byDID[...] = append(...)` trips Go's
 // unrecoverable "fatal error: concurrent map writes", which -race cannot even

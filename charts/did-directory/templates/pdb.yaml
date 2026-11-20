@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  namespace: {{ .Release.Namespace }}
+  name: {{ include "did-directory.fullname" . }}
+  labels:
+    {{- include "did-directory.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+    {{- include "did-directory.selectorLabels" . | nindent 6 }}
+{{ toYaml .Values.podDisruptionBudget | indent 2 }}

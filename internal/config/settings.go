@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 
@@ -51,6 +52,20 @@ func LoadConfig(path string) (*Settings, error) {
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		s.LogLevel = v
+	}
+	if v := os.Getenv("MAX_OPERATIONS_PER_DID"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("MAX_OPERATIONS_PER_DID must be a positive integer, got %q", v)
+		}
+		s.MaxOperationsPerDID = n
+	}
+	if v := os.Getenv("EXPORT_PAGE_SIZE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("EXPORT_PAGE_SIZE must be a positive integer, got %q", v)
+		}
+		s.ExportPageSize = n
 	}
 
 	return s, nil
