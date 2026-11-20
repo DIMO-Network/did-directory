@@ -1,7 +1,10 @@
 replicaCount: 2
 fullnameOverride: did-directory-prod
 image:
-  tag: v0.2.0
+  # Empty on purpose: prod fails to render until a PR promotes a SHA that is
+  # already running in dev (see README.md).
+  tag: ""
+  requireTag: true
 ingress:
   enabled: true
   className: nginx

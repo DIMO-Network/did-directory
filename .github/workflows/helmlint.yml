@@ -12,3 +12,6 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
       - name: Lint did-directory chart
         run: helm lint charts/did-directory
+
+      - name: Lint did-directory chart with prod values
+        run: helm lint charts/did-directory -f charts/did-directory/values-prod.yaml --set image.tag=0000000

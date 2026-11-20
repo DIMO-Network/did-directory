@@ -3,8 +3,10 @@ fullnameOverride: did-directory-dev
 image:
   repository: dimozone/did-directory
   pullPolicy: IfNotPresent
-  # Empty falls back to v<Chart.appVersion>. Dev CI sets a short SHA; prod CI
-  # sets it in values-prod.yaml.
+  # Dev: CI writes the 7-character SHA of the latest main image. Empty falls
+  # back to v<Chart.appVersion>.
+  # Prod sets requireTag, so an empty tag fails the render.
+  requireTag: false
   tag: ''
 imagePullSecrets: []
 nameOverride: ''
