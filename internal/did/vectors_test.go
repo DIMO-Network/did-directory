@@ -31,7 +31,8 @@ func TestVectorsUpToDate(t *testing.T) {
 func TestVectorSignaturesVerify(t *testing.T) {
 	f := readVectorFile(t, "../../testdata/vectors/did-ops.json")
 	for _, c := range f.Cases {
-		payload, _ := hex.DecodeString(c.PayloadHex)
+		payload, err := hex.DecodeString(c.PayloadHex)
+		require.NoError(t, err, c.Name)
 		assert.NoError(t, dimocrypto.VerifyWithDIDKey(c.SignerDIDKey, payload, c.Sig), c.Name)
 		marshalled, _ := json.Marshal(c.Unsigned)
 		assert.Equal(t, c.PayloadHex, hex.EncodeToString(marshalled), c.Name)

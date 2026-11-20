@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
@@ -110,10 +111,12 @@ func GenerateVectors() (VectorFile, error) {
 		})
 		return nil
 	}
+	var prevErr error
 	prev := func(name string) *string {
 		c, ok := cids[name]
 		if !ok {
-			panic("vectors: unknown prev case " + name)
+			prevErr = errors.Join(prevErr, fmt.Errorf("vectors: unknown prev case %q", name))
+			return nil
 		}
 		return &c
 	}
@@ -163,7 +166,11 @@ func GenerateVectors() (VectorFile, error) {
 		}},
 	}
 	for _, s := range steps {
-		if err := add(s.name, s.op()); err != nil {
+		op := s.op()
+		if prevErr != nil {
+			return VectorFile{}, prevErr
+		}
+		if err := add(s.name, op); err != nil {
 			return VectorFile{}, err
 		}
 	}
