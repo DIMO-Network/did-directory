@@ -456,7 +456,7 @@ step "Building dq and dq-seed from $DQ_DIR (CGO, embedded DuckDB)..."
 success "built $BIN/dq and $BIN/dq-seed"
 
 step "Starting the DID directory (in memory) on :$DIRECTORY_PORT..."
-DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
+ALLOW_MEMORY_STORE=true DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
     "$BIN/did-directory" -settings /dev/null >"$DEMO_DIR/directory.log" 2>&1 &
 PIDS+=($!)
 wait_for "$DIRECTORY_URL/health" "directory"

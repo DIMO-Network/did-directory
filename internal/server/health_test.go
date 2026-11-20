@@ -37,3 +37,28 @@ func TestHealthFailsWhenStoreDown(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
 }
+
+type busyStore struct {
+	store.Store
+	busy bool
+	err  error
+}
+
+func (b busyStore) Busy() bool                 { return b.busy }
+func (b busyStore) Ping(context.Context) error { return b.err }
+
+func TestHealthReadyWhenPoolSaturated(t *testing.T) {
+	cfg := &config.Settings{ExportPageSize: 100}
+
+	// Every connection busy: a Ping would fail or queue, but busy proves the DB is up.
+	app := New(cfg, busyStore{Store: store.NewMemoryStore(), busy: true, err: errors.New("pool exhausted")}, zerolog.Nop())
+	resp, err := app.Test(httptest.NewRequest("GET", "/health", nil))
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+
+	// Not saturated: the ping decides.
+	app = New(cfg, busyStore{Store: store.NewMemoryStore(), err: errors.New("db down")}, zerolog.Nop())
+	resp, err = app.Test(httptest.NewRequest("GET", "/health", nil))
+	require.NoError(t, err)
+	require.Equal(t, 503, resp.StatusCode)
+}

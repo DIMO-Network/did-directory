@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/DIMO-Network/did-directory/internal/config"
@@ -31,15 +32,26 @@ func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 		return c.JSON(fiber.Map{"status": "ok"})
 	})
 
-	// Readiness: includes the store.
+	// Readiness: includes the store. Logs only on a state change.
+	var ready atomic.Bool
+	ready.Store(true)
 	app.Get("/health", func(c *fiber.Ctx) error {
 		ctx, cancel := context.WithTimeout(c.UserContext(), 2*time.Second)
 		defer cancel()
-		if err := st.Ping(ctx); err != nil {
-			log.Error().Err(err).Msg("health check: store unreachable")
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-				"error": "store unavailable",
-			})
+		// A saturated pool proves the database is reachable; pinging would
+		// queue behind the load and fail readiness for the wrong reason.
+		if b, ok := st.(interface{ Busy() bool }); !(ok && b.Busy()) {
+			if err := st.Ping(ctx); err != nil {
+				if ready.Swap(false) {
+					log.Warn().Err(err).Msg("health check: store unreachable, not ready")
+				}
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+					"error": "store unavailable",
+				})
+			}
+		}
+		if !ready.Swap(true) {
+			log.Info().Msg("health check: store reachable, ready")
 		}
 		return c.JSON(fiber.Map{
 			"status": "ok",

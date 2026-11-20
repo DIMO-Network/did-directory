@@ -181,7 +181,7 @@ mkdir -p "$BIN"
 (cd "$DIN_DIR" && CGO_ENABLED=1 go build -o "$BIN/din" ./cmd/din)
 success "built into $BIN"
 
-DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
+ALLOW_MEMORY_STORE=true DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
     "$BIN/did-directory" -settings /dev/null >"$DEMO_DIR/directory.log" 2>&1 &
 PIDS+=($!)
 wait_for "$DIRECTORY_URL/health" "directory" -f

@@ -192,6 +192,13 @@ func (s *PostgresStore) Export(ctx context.Context, afterSeq int64, limit int) (
 	return records, rows.Err()
 }
 
+// Busy reports whether every pooled connection is in use. A busy pool proves
+// the database is reachable, and a Ping would only queue behind the load.
+func (s *PostgresStore) Busy() bool {
+	st := s.pool.Stat()
+	return st.AcquiredConns() >= st.MaxConns()
+}
+
 // Ping checks the database connection.
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
