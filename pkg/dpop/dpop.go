@@ -60,7 +60,8 @@ type Verifier struct {
 	Now func() time.Time
 	// MaxReplayEntries caps the replay cache; zero means
 	// DefaultMaxReplayEntries. When the cache is full of unexpired proofs,
-	// further proofs are refused.
+	// further proofs are refused until entries expire, so size the cap
+	// against the ingress rate limit.
 	MaxReplayEntries int
 
 	replay *replayCache

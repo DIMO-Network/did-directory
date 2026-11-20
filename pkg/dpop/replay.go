@@ -45,9 +45,9 @@ func (c *replayCache) sweep(now time.Time) {
 }
 
 // add records jti until expiry. It reports addReplayed if jti was already
-// present, and addFull if the cache holds max live entries even after dropping
+// present, and addFull if the cache holds limit live entries even after dropping
 // expired ones, so an anonymous client cannot grow it without bound.
-func (c *replayCache) add(jti string, expiry, now time.Time, max int) addResult {
+func (c *replayCache) add(jti string, expiry, now time.Time, limit int) addResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !now.Before(c.sweepAt) {
@@ -56,14 +56,14 @@ func (c *replayCache) add(jti string, expiry, now time.Time, max int) addResult 
 	if exp, ok := c.seen[jti]; ok && now.Before(exp) {
 		return addReplayed
 	}
-	if _, ok := c.seen[jti]; !ok && len(c.seen) >= max {
+	if _, ok := c.seen[jti]; !ok && len(c.seen) >= limit {
 		// The periodic sweep may be a minute stale, so sweep before refusing,
 		// but at most once a second: a full cache walked on every request
 		// would hand an attacker a CPU lever.
 		if now.Sub(c.swept) >= time.Second {
 			c.sweep(now)
 		}
-		if len(c.seen) >= max {
+		if len(c.seen) >= limit {
 			return addFull
 		}
 	}

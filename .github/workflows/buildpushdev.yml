@@ -49,8 +49,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # One group with buildpushtagged's update-values: they never write main together.
+    concurrency:
+      group: chart-values-main
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: main
 
       - name: Update did-directory image tag
         uses: fjogeleit/yaml-update-action@dffe9a5223d84653c13374032382f6bb5de8e5ef # v0.17.0

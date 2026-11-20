@@ -62,3 +62,30 @@ func TestHealthReadyWhenPoolSaturated(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 503, resp.StatusCode)
 }
+
+// hangStore's Ping blocks until the probe's context expires, as a stuck DB does.
+type hangStore struct {
+	store.Store
+	busy bool
+}
+
+func (h hangStore) Busy() bool { return h.busy }
+func (h hangStore) Ping(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestHealthStuckSaturatedPoolFailsOnPing(t *testing.T) {
+	cfg := &config.Settings{ExportPageSize: 100}
+	// Saturated with a flat AcquireCount: Busy is false, so Ping runs and times out.
+	app := New(cfg, hangStore{Store: store.NewMemoryStore()}, zerolog.Nop())
+	resp, err := app.Test(httptest.NewRequest("GET", "/health", nil), 5000)
+	require.NoError(t, err)
+	require.Equal(t, 503, resp.StatusCode)
+
+	// Saturated and cycling: ready without touching Ping.
+	app = New(cfg, hangStore{Store: store.NewMemoryStore(), busy: true}, zerolog.Nop())
+	resp, err = app.Test(httptest.NewRequest("GET", "/health", nil))
+	require.NoError(t, err)
+	require.Equal(t, 200, resp.StatusCode)
+}

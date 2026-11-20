@@ -40,7 +40,11 @@ func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 		defer cancel()
 		// A saturated pool proves the database is reachable; pinging would
 		// queue behind the load and fail readiness for the wrong reason.
-		if b, ok := st.(interface{ Busy() bool }); !(ok && b.Busy()) {
+		busy := false
+		if b, ok := st.(interface{ Busy() bool }); ok {
+			busy = b.Busy()
+		}
+		if !busy {
 			if err := st.Ping(ctx); err != nil {
 				if ready.Swap(false) {
 					log.Warn().Err(err).Msg("health check: store unreachable, not ready")
@@ -51,7 +55,11 @@ func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 			}
 		}
 		if !ready.Swap(true) {
-			log.Info().Msg("health check: store reachable, ready")
+			if busy {
+				log.Info().Msg("health check: pool busy, ready")
+			} else {
+				log.Info().Msg("health check: store reachable, ready")
+			}
 		}
 		return c.JSON(fiber.Map{
 			"status": "ok",

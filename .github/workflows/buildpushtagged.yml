@@ -2,7 +2,7 @@ name: buildpushtagged
 on:
   push:
     tags:
-      - v*
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: read
@@ -50,8 +50,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # One group with buildpushdev's update-values: they never write main together.
+    concurrency:
+      group: chart-values-main
+      cancel-in-progress: false
     steps:
+      # The tag commit is not main; the values file must be main's current one.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: main
 
       - name: Update did-directory prod image tag
         uses: fjogeleit/yaml-update-action@dffe9a5223d84653c13374032382f6bb5de8e5ef # v0.17.0
