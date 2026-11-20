@@ -58,6 +58,10 @@ type Verifier struct {
 	Skew time.Duration
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// MaxReplayEntries caps the replay cache; zero means
+	// DefaultMaxReplayEntries. When the cache is full of unexpired proofs,
+	// further proofs are refused.
+	MaxReplayEntries int
 
 	replay *replayCache
 }
@@ -73,6 +77,13 @@ func (v *Verifier) maxAge() time.Duration {
 		return v.MaxAge
 	}
 	return 5 * time.Minute
+}
+
+func (v *Verifier) maxReplay() int {
+	if v.MaxReplayEntries > 0 {
+		return v.MaxReplayEntries
+	}
+	return DefaultMaxReplayEntries
 }
 
 func (v *Verifier) skew() time.Duration {
@@ -168,8 +179,13 @@ func (v *Verifier) Verify(proof, method, requestURL, accessToken string) (string
 			return "", fmt.Errorf("%w: ath does not match the access token", ErrInvalid)
 		}
 	}
-	if v.replay != nil && !v.replay.add(claims.JTI, now.Add(v.maxAge()+v.skew()), now) {
-		return "", fmt.Errorf("%w: proof replayed", ErrInvalid)
+	if v.replay != nil {
+		switch v.replay.add(claims.JTI, now.Add(v.maxAge()+v.skew()), now, v.maxReplay()) {
+		case addReplayed:
+			return "", fmt.Errorf("%w: proof replayed", ErrInvalid)
+		case addFull:
+			return "", fmt.Errorf("%w: replay cache full", ErrInvalid)
+		}
 	}
 	return jkt, nil
 }
