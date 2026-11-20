@@ -3,6 +3,8 @@ fullnameOverride: did-directory-dev
 image:
   repository: dimozone/did-directory
   pullPolicy: IfNotPresent
+  # Empty falls back to v<Chart.appVersion>. Dev CI sets a short SHA; prod CI
+  # sets it in values-prod.yaml.
   tag: ''
 imagePullSecrets: []
 nameOverride: ''
