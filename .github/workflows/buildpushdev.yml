@@ -49,9 +49,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # One group with buildpushtagged's update-values: they never write main together.
+    # Its own group: a shared one would let this job cancel a queued prod bump
+    # (GitHub keeps one pending job per group). The two write different files.
     concurrency:
-      group: chart-values-main
+      group: chart-values-dev
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0

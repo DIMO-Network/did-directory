@@ -200,6 +200,7 @@ func (s *PostgresStore) Export(ctx context.Context, afterSeq int64, limit int) (
 // probe, which proves connections are cycling and so the database answers. A
 // saturated pool whose count is flat may be stuck on a dead database, so it
 // is not busy and the caller must Ping.
+// Busy has a side effect (it records the AcquireCount): only the readiness handler may call it.
 func (s *PostgresStore) Busy() bool {
 	st := s.pool.Stat()
 	return s.busy(st.AcquiredConns(), st.MaxConns(), st.AcquireCount())

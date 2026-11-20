@@ -50,9 +50,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # One group with buildpushdev's update-values: they never write main together.
+    # Its own group, apart from buildpushdev's: a shared one would let a dev bump
+    # cancel this queued prod bump (one pending job per group).
     concurrency:
-      group: chart-values-main
+      group: chart-values-prod
       cancel-in-progress: false
     steps:
       # The tag commit is not main; the values file must be main's current one.
@@ -68,3 +69,42 @@ jobs:
           value: ${{ needs.build.outputs.tag }}
           branch: main
           message: "Update did-directory prod image to ${{ needs.build.outputs.tag }}"
+
+      - name: Verify prod tag on main
+        id: verify
+        continue-on-error: true
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          git fetch --quiet origin main
+          got=$(git show origin/main:charts/did-directory/values-prod.yaml | yq -r '.image.tag')
+          echo "origin/main values-prod.yaml image.tag=${got}, want ${TAG}"
+          [ "${got}" = "${TAG}" ]
+
+      - name: Retry prod tag bump
+        if: steps.verify.outcome == 'failure'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: main
+
+      - name: Update did-directory prod image tag (retry)
+        if: steps.verify.outcome == 'failure'
+        uses: fjogeleit/yaml-update-action@dffe9a5223d84653c13374032382f6bb5de8e5ef # v0.17.0
+        with:
+          valueFile: "charts/did-directory/values-prod.yaml"
+          propertyPath: "image.tag"
+          value: ${{ needs.build.outputs.tag }}
+          branch: main
+          message: "Update did-directory prod image to ${{ needs.build.outputs.tag }}"
+
+      - name: Re-verify prod tag on main
+        if: steps.verify.outcome == 'failure'
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          git fetch --quiet origin main
+          got=$(git show origin/main:charts/did-directory/values-prod.yaml | yq -r '.image.tag')
+          if [ "${got}" != "${TAG}" ]; then
+            echo "::error::Prod bump to ${TAG} did not land on main (values-prod.yaml image.tag is ${got}). Prod is NOT updated; fix and re-run this job."
+            exit 1
+          fi
