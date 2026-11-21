@@ -118,7 +118,10 @@ type host struct {
 	t      *testing.T
 	app    *fiber.App
 	issuer *issuer
-	repo   *Repository
+	// auth is the host's authenticator, for tests that reach into its DPoP
+	// verifier.
+	auth *JWKSAuthenticator
+	repo *Repository
 	// directory is what the resolver reads control state from.
 	directory *fakeDirectory
 	// clock is the host's time; tests move it to commit and evaluate at fixed
@@ -187,7 +190,7 @@ func newHostWith(t *testing.T, st store.Store, policies Policies) *host {
 	require.NoError(t, err)
 	sealer, err := NewEphemeralSealer()
 	require.NoError(t, err)
-	h := &host{t: t, issuer: iss, directory: &fakeDirectory{}}
+	h := &host{t: t, issuer: iss, auth: auth, directory: &fakeDirectory{}}
 	r := &Repository{Store: st, Signer: NewLocalSigner(st, sealer), Now: func() time.Time {
 		if h.clock.IsZero() {
 			return time.Now()
@@ -730,6 +733,49 @@ func TestJWKSAuthenticator(t *testing.T) {
 	// Leeway: a token a few seconds past exp still passes.
 	_, err = auth.Authenticate(ctx, tokenCase(with("exp", now-5)))
 	assert.NoError(t, err)
+}
+
+// TestReplayCacheFull: a full DPoP replay cache is this host's capacity, not
+// the caller's credentials, so a sound request is answered 503 with
+// Retry-After and no WWW-Authenticate challenge, bad credentials are still 401,
+// and the request passes once there is room.
+func TestReplayCacheFull(t *testing.T) {
+	h := newHost(t, store.NewMemoryStore())
+	org := newOrgDID()
+	h.auth.proofs.MaxReplayEntries = 1
+	// The register request's proof fills the cache.
+	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
+	require.Equal(t, http.StatusCreated, status, body)
+
+	path := "/orgs/" + org
+	token := h.issuer.identity(t, org)
+	proof, err := h.issuer.holder.Proof(http.MethodGet, hostAudience+path, token, time.Now())
+	require.NoError(t, err)
+	_, err = h.auth.Authenticate(t.Context(), Credentials{Authorization: "DPoP " + token, Proof: proof, Method: http.MethodGet, Path: path})
+	require.ErrorIs(t, err, ErrUnavailable)
+	assert.NotErrorIs(t, err, ErrUnauthenticated)
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	require.NoError(t, h.issuer.present(req, h.issuer.identity(t, org)))
+	resp, err := h.app.Test(req, -1)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, "1", resp.Header.Get(fiber.HeaderRetryAfter))
+	assert.Empty(t, resp.Header.Get(fiber.HeaderWWWAuthenticate), "not an authentication failure")
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	assert.Equal(t, "temporarily_unavailable", out["code"])
+
+	// Bad credentials are still 401: the token is checked before the proof.
+	status, body = h.do(http.MethodGet, path, "", nil)
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+	assert.Equal(t, "invalid_token", body["code"])
+
+	// With room again the same request passes.
+	h.auth.proofs.MaxReplayEntries = 2
+	status, body = h.do(http.MethodGet, path, org, nil)
+	assert.Equal(t, http.StatusOK, status, body)
 }
 
 // TestScopes: each route takes only tokens carrying its scope, and refuses

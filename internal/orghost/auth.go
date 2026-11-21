@@ -23,13 +23,20 @@ import (
 // ErrUnauthenticated is returned when a request carries no usable identity.
 var ErrUnauthenticated = errors.New("unauthenticated")
 
+// ErrUnavailable is returned when a request's credentials could not be checked
+// right now, as when the DPoP replay cache is full. It says nothing about the
+// credentials: the same request may pass on retry, so it is answered 503, not
+// 401.
+var ErrUnavailable = errors.New("authentication temporarily unavailable")
+
 // Authenticator answers "which DID is making this request, and for what". The
 // v1 implementation checks a dauth-issued identity token whose sub is the
 // member DID (plan §1 decision B), bound to a DPoP key; it is an interface so
 // tests and a later service-to-service scheme can supply their own.
 type Authenticator interface {
-	// Authenticate returns the identity behind the request's credentials, or
-	// ErrUnauthenticated.
+	// Authenticate returns the identity behind the request's credentials,
+	// ErrUnauthenticated when they are missing or bad, or ErrUnavailable when
+	// they could not be checked right now.
 	Authenticate(ctx context.Context, cred Credentials) (Identity, error)
 }
 
@@ -263,6 +270,12 @@ func (a *JWKSAuthenticator) Authenticate(ctx context.Context, cred Credentials) 
 	}
 	jkt, err := a.proofs.Verify(cred.Proof, cred.Method, strings.TrimRight(a.audience, "/")+cred.Path, raw)
 	if err != nil {
+		// Every proof failure wraps dpop.ErrInvalid; anything else, such as
+		// dpop.ErrReplayCacheFull, is this host's capacity, not the caller's
+		// credentials.
+		if !errors.Is(err, dpop.ErrInvalid) {
+			return Identity{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
 		return Identity{}, fmt.Errorf("%w: %v", ErrUnauthenticated, err)
 	}
 	if jkt != claims.Cnf.JKT {

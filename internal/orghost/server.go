@@ -140,7 +140,9 @@ const callerKey = "caller"
 const scopesKey = "scopes"
 
 // authenticate resolves the caller's DID into c.Locals(callerKey) and its
-// token's scopes into c.Locals(scopesKey).
+// token's scopes into c.Locals(scopesKey). Bad credentials are 401
+// invalid_token; credentials that could not be checked (ErrUnavailable, or any
+// other failure that is not ErrUnauthenticated) are 503, retryable.
 func (s *Server) authenticate(c *fiber.Ctx) error {
 	id, err := s.auth.Authenticate(c.Context(), Credentials{
 		Authorization: c.Get(fiber.HeaderAuthorization),
@@ -149,8 +151,16 @@ func (s *Server) authenticate(c *fiber.Ctx) error {
 		Path:          strings.Clone(c.Path()),
 	})
 	if err != nil {
-		c.Set(fiber.HeaderWWWAuthenticate, `DPoP error="invalid_token"`)
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error(), "code": "invalid_token"})
+		if errors.Is(err, ErrUnauthenticated) {
+			c.Set(fiber.HeaderWWWAuthenticate, `DPoP error="invalid_token"`)
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error(), "code": "invalid_token"})
+		}
+		s.log.Warn().Err(err).Str("path", c.Path()).Msg("could not authenticate the request")
+		c.Set(fiber.HeaderRetryAfter, "1")
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "could not check the request's credentials, retry shortly",
+			"code":  "temporarily_unavailable",
+		})
 	}
 	c.Locals(callerKey, strings.Clone(id.DID))
 	c.Locals(scopesKey, id.Scopes)
