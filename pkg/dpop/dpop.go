@@ -47,8 +47,18 @@ const (
 	maxRSAModulusBits = 4096
 )
 
-// ErrInvalid is wrapped by every verification failure.
+// ErrInvalid is wrapped by every proof failure: a proof that is malformed,
+// badly signed, for another request or token, outside its time window, or
+// replayed. A caller answers it as a bad proof (400 or 401); presenting the
+// same proof again never succeeds.
 var ErrInvalid = errors.New("invalid DPoP proof")
+
+// ErrReplayCacheFull is returned for a proof that passed every check but could
+// not be recorded because the replay cache holds MaxReplayEntries unexpired
+// proofs. It says nothing about the proof and does not wrap ErrInvalid: a
+// caller answers it as a retryable capacity problem (503), and the client
+// retries with a fresh proof.
+var ErrReplayCacheFull = errors.New("DPoP replay cache full")
 
 // Verifier checks proofs.
 type Verifier struct {
@@ -60,8 +70,8 @@ type Verifier struct {
 	Now func() time.Time
 	// MaxReplayEntries caps the replay cache; zero means
 	// DefaultMaxReplayEntries. When the cache is full of unexpired proofs,
-	// further proofs are refused until entries expire, so size the cap
-	// against the ingress rate limit.
+	// Verify refuses further proofs with ErrReplayCacheFull until entries
+	// expire, so size the cap against the ingress rate limit.
 	MaxReplayEntries int
 
 	replay *replayCache
@@ -124,6 +134,10 @@ func (proofClaims) GetAudience() (jwt.ClaimStrings, error)       { return nil, n
 // and against accessToken when one was presented (the ath claim is then
 // required). It returns the thumbprint of the key that signed the proof; the
 // caller compares it to the access token's cnf.jkt.
+//
+// Every proof failure wraps ErrInvalid. A sound proof refused only because the
+// replay cache is full returns ErrReplayCacheFull instead, which a caller
+// should answer as retryable (503) rather than as a bad proof.
 func (v *Verifier) Verify(proof, method, requestURL, accessToken string) (string, error) {
 	if len(proof) > maxProofBytes {
 		return "", fmt.Errorf("%w: proof too large", ErrInvalid)
@@ -185,7 +199,7 @@ func (v *Verifier) Verify(proof, method, requestURL, accessToken string) (string
 		case addReplayed:
 			return "", fmt.Errorf("%w: proof replayed", ErrInvalid)
 		case addFull:
-			return "", fmt.Errorf("%w: replay cache full", ErrInvalid)
+			return "", ErrReplayCacheFull
 		}
 	}
 	return jkt, nil

@@ -181,15 +181,17 @@ func TestReplayCacheCap(t *testing.T) {
 		_, err := v.Verify(signedProof(t, key, jti, now), "POST", target, "")
 		require.NoError(t, err, jti)
 	}
-	// Full: a new proof is refused.
+	// Full: a new proof is refused, as a capacity problem rather than a bad
+	// proof, so callers can answer it as retryable.
 	_, err = v.Verify(signedProof(t, key, "d", now), "POST", target, "")
-	require.ErrorIs(t, err, ErrInvalid)
-	assert.Contains(t, err.Error(), "replay cache full")
+	require.ErrorIs(t, err, ErrReplayCacheFull)
+	assert.NotErrorIs(t, err, ErrInvalid)
 	assert.Len(t, v.replay.seen, 3)
 
 	// A replay of a cached proof is still reported as a replay.
 	_, err = v.Verify(signedProof(t, key, "a", now), "POST", target, "")
 	require.ErrorIs(t, err, ErrInvalid)
+	assert.NotErrorIs(t, err, ErrReplayCacheFull)
 	assert.Contains(t, err.Error(), "replayed")
 
 	// Once the entries expire they free space.
