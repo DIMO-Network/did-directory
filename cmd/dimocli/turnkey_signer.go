@@ -23,9 +23,11 @@ type turnkeyAPI interface {
 	ListWalletAccounts(ctx context.Context, org, walletID string) ([]walletAccount, error)
 	// GetWalletAccount returns the account with the Ethereum address.
 	GetWalletAccount(ctx context.Context, org, walletID, address string) (walletAccount, error)
+	// GetWalletAccountAtPath returns the account at the BIP-32 path.
+	GetWalletAccountAtPath(ctx context.Context, org, walletID, path string) (walletAccount, error)
 	// CreateWalletAccount adds a secp256k1 Ethereum-format account at path
-	// (CREATE_WALLET_ACCOUNTS).
-	CreateWalletAccount(ctx context.Context, org, walletID, path string) error
+	// (CREATE_WALLET_ACCOUNTS) and returns the address Turnkey derived for it.
+	CreateWalletAccount(ctx context.Context, org, walletID, path string) (address string, err error)
 	// SignRawPayload signs the UTF-8 payload with signWith, Turnkey hashing it
 	// with SHA-256 (SIGN_RAW_PAYLOAD), and returns r and s as hex. It returns
 	// *ErrConsensusNeeded when the activity waits for approval.
@@ -137,36 +139,61 @@ func accountDIDKey(a walletAccount) (string, error) {
 
 var accountPath = regexp.MustCompile(`^m/44'/60'/0'/0/(\d+)$`)
 
-// createNextAccount adds the account after the wallet's highest
-// m/44'/60'/0'/0/<i> and returns it.
-func createNextAccount(ctx context.Context, api turnkeyAPI, org, walletID string) (walletAccount, error) {
+func accountPathAt(index uint64) string { return fmt.Sprintf("m/44'/60'/0'/0/%d", index) }
+
+// nextAccountIndex is one more than the wallet's highest m/44'/60'/0'/0/<i>,
+// from one listing of the wallet.
+func nextAccountIndex(ctx context.Context, api turnkeyAPI, org, walletID string) (uint64, error) {
 	accts, err := api.ListWalletAccounts(ctx, org, walletID)
 	if err != nil {
-		return walletAccount{}, err
+		return 0, err
 	}
-	next := 0
+	var next uint64
 	for _, a := range accts {
 		if m := accountPath.FindStringSubmatch(a.Path); m != nil {
-			if i, err := strconv.Atoi(m[1]); err == nil && i+1 > next {
+			if i, err := strconv.ParseUint(m[1], 10, 31); err == nil && i+1 > next {
 				next = i + 1
 			}
 		}
 	}
-	path := fmt.Sprintf("m/44'/60'/0'/0/%d", next)
-	if err := api.CreateWalletAccount(ctx, org, walletID, path); err != nil {
-		return walletAccount{}, err
-	}
-	// The create result carries only the address; list again for the key.
-	accts, err = api.ListWalletAccounts(ctx, org, walletID)
-	if err != nil {
-		return walletAccount{}, err
-	}
-	for _, a := range accts {
-		if a.Path == path {
-			return a, nil
+	return next, nil
+}
+
+// createAccount adds the account at m/44'/60'/0'/0/<index>, or after the
+// wallet's highest index when index is nil, and returns it. A batch that
+// passes the index per car never lists the wallet; without one, each car costs
+// one listing. The new key is read by the address the create returned.
+func createAccount(ctx context.Context, api turnkeyAPI, org, walletID string, index *uint32) (walletAccount, error) {
+	var path string
+	if index != nil {
+		path = accountPathAt(uint64(*index))
+	} else {
+		next, err := nextAccountIndex(ctx, api, org, walletID)
+		if err != nil {
+			return walletAccount{}, err
 		}
+		path = accountPathAt(next)
 	}
-	return walletAccount{}, fmt.Errorf("account %s not found in wallet after creating it", path)
+	addr, err := api.CreateWalletAccount(ctx, org, walletID, path)
+	if err != nil {
+		// Turnkey refuses a path the wallet holds; say so plainly, without
+		// depending on the wording of its error.
+		var cn *ErrConsensusNeeded
+		if index != nil && !errors.As(err, &cn) {
+			if _, gerr := api.GetWalletAccountAtPath(ctx, org, walletID, path); gerr == nil {
+				return walletAccount{}, fmt.Errorf("account index %d already exists", *index)
+			}
+		}
+		return walletAccount{}, err
+	}
+	acct, err := api.GetWalletAccount(ctx, org, walletID, addr)
+	if err != nil {
+		return walletAccount{}, fmt.Errorf("read the new account %s: %w", addr, err)
+	}
+	if acct.Path != path {
+		return walletAccount{}, fmt.Errorf("Turnkey's account %s is at %s, not %s", addr, acct.Path, path)
+	}
+	return acct, nil
 }
 
 // ethAddress is the EIP-55 checksummed Ethereum address of pub, the address

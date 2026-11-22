@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/DIMO-Network/did-directory/internal/did"
@@ -95,6 +96,15 @@ func runCreate(args []string) {
 	orgKey := fs.String("org-key", "", "did:key to publish as #dimo_org when the org host already holds the private half (implies --org)")
 	orgHost := fs.String("org-host", "", "org host URL, published as the #dimo_org_host service entry (implies --org)")
 	tk := bindTurnkeyFlags(fs)
+	fs.Func("turnkey-index", "create the Turnkey account at m/44'/60'/0'/0/<i> rather than after the wallet's highest, which takes a listing of the wallet", func(v string) error {
+		i, err := strconv.ParseUint(v, 10, 31)
+		if err != nil {
+			return errors.New("must be an account index from 0 to 2147483647")
+		}
+		idx := uint32(i)
+		tk.Index = &idx
+		return nil
+	})
 	fs.Parse(args)
 
 	if err := tk.validate(); err != nil {
@@ -118,9 +128,10 @@ func runCreate(args []string) {
 		opts.Aliases = strings.Split(*alias, ",")
 	}
 
-	// The rotation key: the next account of the Turnkey wallet (the org root
-	// for --org, the custody key for --controller), else a new P-256 key that
-	// goes to the keystore. A controlled DID's key only authorizes DID operations.
+	// The rotation key: a new account of the Turnkey wallet (the org root for
+	// --org, the custody key for --controller), at --turnkey-index or the next
+	// free index, else a new P-256 key that goes to the keystore. A controlled
+	// DID's key only authorizes DID operations.
 	ctx := context.Background()
 	var signer opSigner
 	if tk.enabled() {

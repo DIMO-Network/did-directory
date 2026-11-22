@@ -136,6 +136,9 @@ type tkActivity struct {
 			R string `json:"r"`
 			S string `json:"s"`
 		} `json:"signRawPayloadResult"`
+		CreateWalletAccountsResult struct {
+			Addresses []string `json:"addresses"`
+		} `json:"createWalletAccountsResult"`
 	} `json:"result"`
 }
 
@@ -238,18 +241,25 @@ func (c *turnkeyHTTPClient) ListWalletAccounts(ctx context.Context, org, walletI
 }
 
 func (c *turnkeyHTTPClient) GetWalletAccount(ctx context.Context, org, walletID, address string) (walletAccount, error) {
+	return c.getWalletAccount(ctx, map[string]string{"organizationId": org, "walletId": walletID, "address": address})
+}
+
+func (c *turnkeyHTTPClient) GetWalletAccountAtPath(ctx context.Context, org, walletID, path string) (walletAccount, error) {
+	return c.getWalletAccount(ctx, map[string]string{"organizationId": org, "walletId": walletID, "path": path})
+}
+
+func (c *turnkeyHTTPClient) getWalletAccount(ctx context.Context, body map[string]string) (walletAccount, error) {
 	var res struct {
 		Account tkAccount `json:"account"`
 	}
-	if err := c.post(ctx, "/public/v1/query/get_wallet_account",
-		map[string]string{"organizationId": org, "walletId": walletID, "address": address}, &res); err != nil {
+	if err := c.post(ctx, "/public/v1/query/get_wallet_account", body, &res); err != nil {
 		return walletAccount{}, err
 	}
 	return res.Account.account(), nil
 }
 
-func (c *turnkeyHTTPClient) CreateWalletAccount(ctx context.Context, org, walletID, path string) error {
-	_, err := c.submit(ctx, "/public/v1/submit/create_wallet_accounts", org, "ACTIVITY_TYPE_CREATE_WALLET_ACCOUNTS",
+func (c *turnkeyHTTPClient) CreateWalletAccount(ctx context.Context, org, walletID, path string) (string, error) {
+	act, err := c.submit(ctx, "/public/v1/submit/create_wallet_accounts", org, "ACTIVITY_TYPE_CREATE_WALLET_ACCOUNTS",
 		map[string]any{
 			"walletId": walletID,
 			"accounts": []map[string]string{{
@@ -259,7 +269,14 @@ func (c *turnkeyHTTPClient) CreateWalletAccount(ctx context.Context, org, wallet
 				"addressFormat": "ADDRESS_FORMAT_ETHEREUM",
 			}},
 		})
-	return err
+	if err != nil {
+		return "", err
+	}
+	addrs := act.Result.CreateWalletAccountsResult.Addresses
+	if len(addrs) != 1 || addrs[0] == "" {
+		return "", fmt.Errorf("Turnkey returned %d addresses for one new account", len(addrs))
+	}
+	return addrs[0], nil
 }
 
 func (c *turnkeyHTTPClient) SignRawPayload(ctx context.Context, org, signWith, payload string) (string, string, error) {

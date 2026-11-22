@@ -77,6 +77,9 @@ type turnkeyFlags struct {
 	// AdminAPIKey is an unrestricted credential for the same sub-org.
 	AdminAPIKey string
 	BaseURL     string
+	// Index, when set, is the account index a new key is created at
+	// (m/44'/60'/0'/0/<Index>), so the wallet is not listed for the next one.
+	Index *uint32
 
 	// api replaces the HTTP client; tests set it.
 	api turnkeyAPI
@@ -99,6 +102,9 @@ func (t *turnkeyFlags) enabled() bool {
 
 func (t *turnkeyFlags) validate() error {
 	if !t.enabled() {
+		if t.Index != nil {
+			return errors.New("--turnkey-index needs --turnkey-org, --turnkey-wallet and a Turnkey credential")
+		}
 		return nil
 	}
 	if t.Org == "" || t.Wallet == "" {
@@ -151,7 +157,8 @@ func (t *turnkeyFlags) client() (turnkeyAPI, error) {
 	return newTurnkeyHTTPClient(t.BaseURL, key), nil
 }
 
-// newSigner provisions the wallet's next account and returns a signer for it.
+// newSigner provisions a new wallet account, at Index or the wallet's next
+// index, and returns a signer for it.
 func (t *turnkeyFlags) newSigner(ctx context.Context) (*turnkeySigner, error) {
 	if err := t.validate(); err != nil {
 		return nil, err
@@ -160,7 +167,7 @@ func (t *turnkeyFlags) newSigner(ctx context.Context) (*turnkeySigner, error) {
 	if err != nil {
 		return nil, err
 	}
-	acct, err := createNextAccount(ctx, api, t.Org, t.Wallet)
+	acct, err := createAccount(ctx, api, t.Org, t.Wallet, t.Index)
 	if err != nil {
 		return nil, err
 	}

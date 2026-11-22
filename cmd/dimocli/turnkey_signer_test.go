@@ -42,6 +42,8 @@ type fakeTurnkey struct {
 	created  []string                         // paths created through the API
 	signed   int
 	gets     int
+	lists    int      // ListWalletAccounts calls
+	gotAddrs []string // the addresses GetWalletAccount was asked for
 	// consensus makes every signing activity wait for approval.
 	consensus *ErrConsensusNeeded
 	// trim returns r and s with leading zero bytes stripped, as Turnkey does.
@@ -77,6 +79,7 @@ func (f *fakeTurnkey) add(t *testing.T, index int) walletAccount {
 func (f *fakeTurnkey) ListWalletAccounts(_ context.Context, _, _ string) ([]walletAccount, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lists++
 	return append([]walletAccount(nil), f.accounts...), nil
 }
 
@@ -84,6 +87,7 @@ func (f *fakeTurnkey) GetWalletAccount(_ context.Context, _, _, address string) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.gets++
+	f.gotAddrs = append(f.gotAddrs, address)
 	for _, a := range f.accounts {
 		if a.Address == address {
 			return a, nil
@@ -92,19 +96,36 @@ func (f *fakeTurnkey) GetWalletAccount(_ context.Context, _, _, address string) 
 	return walletAccount{}, errors.New("no such account")
 }
 
-func (f *fakeTurnkey) CreateWalletAccount(_ context.Context, _, _, path string) error {
+func (f *fakeTurnkey) GetWalletAccountAtPath(_ context.Context, _, _, path string) (walletAccount, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.gets++
+	for _, a := range f.accounts {
+		if a.Path == path {
+			return a, nil
+		}
+	}
+	return walletAccount{}, errors.New("no such account")
+}
+
+// CreateWalletAccount refuses a path the wallet already holds, as Turnkey does,
+// with an error that does not say why: dimocli must not depend on its wording.
+func (f *fakeTurnkey) CreateWalletAccount(_ context.Context, _, _, path string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.accounts {
+		if a.Path == path {
+			return "", errors.New("turnkey activity a1 ended ACTIVITY_STATUS_FAILED")
+		}
+	}
 	f.created = append(f.created, path)
-	idx := 0
-	_, _ = fmt.Sscanf(path, "m/44'/60'/0'/0/%d", &idx)
 	priv, _ := secp256k1.GeneratePrivateKey()
 	pub := priv.PubKey().SerializeCompressed()
 	addr := ethAddress(priv.PubKey())
 	a := walletAccount{ID: "wa-" + addr, Address: addr, Path: path, PublicKey: hex.EncodeToString(pub)}
 	f.keys[a.Address] = priv
 	f.accounts = append(f.accounts, a)
-	return nil
+	return addr, nil
 }
 
 func (f *fakeTurnkey) SignRawPayload(_ context.Context, _, signWith, payload string) (string, string, error) {
@@ -425,7 +446,15 @@ func turnkeyHTTPStub(t *testing.T, f *fakeTurnkey, signStatus string) *httptest.
 		ctx := context.Background()
 		switch r.URL.Path {
 		case "/public/v1/query/list_wallet_accounts":
-			accts, _ := f.ListWalletAccounts(ctx, "", "")
+			// The fake counts calls; the stub counts pages, so read the accounts directly.
+			f.mu.Lock()
+			accts := append([]walletAccount(nil), f.accounts...)
+			f.mu.Unlock()
+			if po, _ := body["paginationOptions"].(map[string]any); po["after"] == nil {
+				f.mu.Lock()
+				f.lists++
+				f.mu.Unlock()
+			}
 			// Turnkey pages: 10 by default, up to 100, after a walletAccountId cursor.
 			limit, after := 10, ""
 			if po, ok := body["paginationOptions"].(map[string]any); ok {
@@ -456,7 +485,13 @@ func turnkeyHTTPStub(t *testing.T, f *fakeTurnkey, signStatus string) *httptest.
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": out})
 		case "/public/v1/query/get_wallet_account":
-			a, err := f.GetWalletAccount(ctx, "", "", body["address"].(string))
+			var a walletAccount
+			var err error
+			if path, ok := body["path"].(string); ok {
+				a, err = f.GetWalletAccountAtPath(ctx, "", "", path)
+			} else {
+				a, err = f.GetWalletAccount(ctx, "", "", body["address"].(string))
+			}
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
@@ -468,8 +503,15 @@ func turnkeyHTTPStub(t *testing.T, f *fakeTurnkey, signStatus string) *httptest.
 			assert.Equal(t, "CURVE_SECP256K1", acct["curve"])
 			assert.Equal(t, "ADDRESS_FORMAT_ETHEREUM", acct["addressFormat"])
 			assert.Equal(t, "ACTIVITY_TYPE_CREATE_WALLET_ACCOUNTS", body["type"])
-			_ = f.CreateWalletAccount(ctx, "", "", acct["path"].(string))
-			_ = json.NewEncoder(w).Encode(map[string]any{"activity": map[string]any{"id": "a1", "status": "ACTIVITY_STATUS_COMPLETED"}})
+			addr, err := f.CreateWalletAccount(ctx, "", "", acct["path"].(string))
+			if err != nil {
+				http.Error(w, `{"code":3,"message":"internal error"}`, http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"activity": map[string]any{
+				"id": "a1", "status": "ACTIVITY_STATUS_COMPLETED",
+				"result": map[string]any{"createWalletAccountsResult": map[string]any{"addresses": []string{addr}}},
+			}})
 		case "/public/v1/submit/sign_raw_payload":
 			params := body["parameters"].(map[string]any)
 			assert.Equal(t, "PAYLOAD_ENCODING_TEXT_UTF8", params["encoding"])
@@ -574,9 +616,11 @@ func TestHTTPClient_WalletWithTwoHundredFiftyAccountsPages(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"m/44'/60'/0'/0/250"}, f.created, "index 250, not 10 or 100")
 	assert.Equal(t, f.didKeyAt(t, "m/44'/60'/0'/0/250"), sg.DIDKey())
-	// Two listings (before and after the create), each with two cursors:
-	// after account 99, then after account 199.
-	assert.Equal(t, []string{f.accounts[99].ID, f.accounts[199].ID, f.accounts[99].ID, f.accounts[199].ID}, stubAfters[:4])
+	// One listing, with two cursors: after account 99, then after account 199.
+	// The new account is read by the address the create returned.
+	assert.Equal(t, []string{f.accounts[99].ID, f.accounts[199].ID}, stubAfters)
+	assert.Equal(t, 1, f.lists)
+	assert.Equal(t, []string{f.accounts[250].Address}, f.gotAddrs)
 
 	// An account on the third page is found by address.
 	want := f.didKeyAt(t, "m/44'/60'/0'/0/230")
@@ -746,5 +790,76 @@ func TestRotateAndUpdate_OnboardingCredentialSignsCarDIDs(t *testing.T) {
 		require.Equal(t, 0, code, stderr)
 		require.Len(t, *ops, 1, cmd[0])
 		verifyOp(t, old, (*ops)[0])
+	}
+}
+
+// --- onboarding cost: one listing per car, none with --turnkey-index ---
+
+func TestTurnkeyFlags_OneListingPerCarAndTheReturnedAddressIsUsed(t *testing.T) {
+	f := newFakeTurnkey(t, 0)
+	tf := tkFlags(f, true)
+	for i := 1; i <= 3; i++ {
+		sg, err := tf.newSigner(context.Background())
+		require.NoError(t, err)
+		path := fmt.Sprintf("m/44'/60'/0'/0/%d", i)
+		assert.Equal(t, f.didKeyAt(t, path), sg.DIDKey())
+		assert.Equal(t, i, f.lists, "one listing per car, not two")
+		created := f.accounts[len(f.accounts)-1]
+		assert.Equal(t, created.Address, f.gotAddrs[len(f.gotAddrs)-1], "the key is read by the address the create returned")
+		assert.Equal(t, created.Address, sg.signWith)
+	}
+	assert.Len(t, f.gotAddrs, 3, "one lookup per car")
+}
+
+func TestTurnkeyFlags_IndexCreatesAtThatPathWithoutListing(t *testing.T) {
+	f := newFakeTurnkey(t, 0, 1, 2)
+	tf := tkFlags(f, true)
+	idx := uint32(41)
+	tf.Index = &idx
+	sg, err := tf.newSigner(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"m/44'/60'/0'/0/41"}, f.created)
+	assert.Equal(t, f.didKeyAt(t, "m/44'/60'/0'/0/41"), sg.DIDKey())
+	assert.Zero(t, f.lists, "no listing with --turnkey-index")
+}
+
+func TestTurnkeyFlags_IndexThatExistsIsReported(t *testing.T) {
+	f := newFakeTurnkey(t, 0, 1, 2)
+	tf := tkFlags(f, true)
+	idx := uint32(2)
+	tf.Index = &idx
+	_, err := tf.newSigner(context.Background())
+	require.Error(t, err)
+	assert.Equal(t, "account index 2 already exists", err.Error())
+	assert.Empty(t, f.created)
+	assert.Zero(t, f.lists)
+}
+
+func TestTurnkeyFlags_IndexNeedsTurnkey(t *testing.T) {
+	idx := uint32(1)
+	assert.EqualError(t, (&turnkeyFlags{Index: &idx}).validate(), "--turnkey-index needs --turnkey-org, --turnkey-wallet and a Turnkey credential")
+}
+
+func TestCreate_TurnkeyIndexFlag(t *testing.T) {
+	f := newFakeTurnkey(t, 0)
+	srv := turnkeyHTTPStub(t, f, "ACTIVITY_STATUS_COMPLETED")
+	dirURL, ops := opDirectory(t, "did:dimo:new", did.Operation{})
+	base := append([]string{"create", "--controller", "did:dimo:avis", "--server", dirURL}, onboardingArgs(t, srv.URL)...)
+
+	stderr, code := runDimocli(t, append(base, "--turnkey-index", "7")...)
+	require.Equal(t, 0, code, stderr)
+	assert.Equal(t, []string{"m/44'/60'/0'/0/7"}, f.created)
+	assert.Zero(t, f.lists)
+	require.Len(t, *ops, 1)
+	assert.Equal(t, []string{f.didKeyAt(t, "m/44'/60'/0'/0/7")}, (*ops)[0].RotationKeys)
+
+	stderr, code = runDimocli(t, append(base, "--turnkey-index", "7")...)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr, "account index 7 already exists")
+	assert.Len(t, *ops, 1)
+
+	for _, bad := range []string{"-1", "2147483648", "x"} {
+		_, code = runDimocli(t, append(base, "--turnkey-index", bad)...)
+		assert.NotEqual(t, 0, code, bad)
 	}
 }
