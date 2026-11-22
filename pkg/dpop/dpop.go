@@ -72,7 +72,10 @@ type Verifier struct {
 	// MaxReplayEntries caps the replay cache; zero means
 	// DefaultMaxReplayEntries. When the cache is full of unexpired proofs,
 	// Verify refuses further proofs with ErrReplayCacheFull until entries
-	// expire, so size the cap against the ingress rate limit.
+	// expire. Size the cap against the rate that reaches Verify (every limit in
+	// front of it: the ingress's and the service's own per-client one) and
+	// against the process's memory: an entry with a 64-byte jti takes about
+	// 160 bytes of heap, so a full default cache is about 160 MiB.
 	MaxReplayEntries int
 
 	replay *replayCache
