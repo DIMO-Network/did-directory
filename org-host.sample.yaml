@@ -4,6 +4,14 @@ LOG_LEVEL: "info"
 # Base64 of 32 random bytes; seals org signing keys at rest. Required with DATABASE_URL.
 #   openssl rand -base64 32
 MASTER_KEY: ""
+# Where new orgs' #dimo_org keys live: local (sealed under MASTER_KEY) or kms.
+# Orgs already registered keep the backend their row names, so switching to kms
+# keeps MASTER_KEY needed until no local org remains. kms uses the AWS default
+# credential chain (IRSA in the cluster) and needs kms:CreateKey,
+# kms:CreateAlias, kms:TagResource, kms:Sign and kms:GetPublicKey.
+ORG_SIGNER: "local"
+KMS_REGION: ""
+KMS_ALIAS_PREFIX: "alias/dimo-org/"
 # Identity tokens (RS256, sub = member DID) are verified against this key set.
 IDENTITY_JWKS_URL: "http://localhost:8080/signin/keys"
 IDENTITY_ISSUER: "http://localhost:8080/signin"

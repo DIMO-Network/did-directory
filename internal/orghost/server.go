@@ -237,6 +237,9 @@ func (s *Server) register(c *fiber.Ctx) error {
 		}
 	}
 	didKey, err := s.repo.Register(c.Context(), org, key)
+	if errors.Is(err, ErrPrivateKeyNotAccepted) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "privateKey is not accepted with the KMS signer"})
+	}
 	if errors.Is(err, store.ErrOrgExists) {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "org is already registered on this host"})
 	}

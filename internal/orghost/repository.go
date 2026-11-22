@@ -54,11 +54,11 @@ func (r *Repository) lock(org string) *sync.Mutex {
 // Register puts org on this host. When key is nil the signer generates one.
 // It returns the did:key to publish as the org's #dimo_org.
 func (r *Repository) Register(ctx context.Context, org string, key *ecdsa.PrivateKey) (string, error) {
-	local, ok := r.Signer.(*LocalSigner)
+	reg, ok := r.Signer.(Registrar)
 	if !ok {
 		return "", errors.New("this signer does not register orgs")
 	}
-	return local.Register(ctx, org, key)
+	return reg.Register(ctx, org, key)
 }
 
 // Result is what a write returns.

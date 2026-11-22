@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/client"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/rs/zerolog"
 )
 
@@ -37,18 +40,31 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	if cfg.Signer != "local" && cfg.Signer != "kms" {
+		log.Fatal().Str("value", cfg.Signer).Msg("ORG_SIGNER must be local or kms")
+	}
+	if cfg.Signer == "kms" && !strings.HasPrefix(cfg.KMSAliasPrefix, "alias/") {
+		log.Fatal().Str("value", cfg.KMSAliasPrefix).Msg("KMS_ALIAS_PREFIX must start with alias/")
+	}
+
 	var st store.Store
 	var sealer *orghost.Sealer
 	if cfg.DatabaseURL != "" {
-		if cfg.MasterKey == "" {
+		// Orgs registered under the local signer stay sealed under MASTER_KEY, so
+		// it is required unless this host is KMS-only from the start.
+		if cfg.MasterKey == "" && cfg.Signer == "local" {
 			log.Fatal().Msg("MASTER_KEY is required with DATABASE_URL: org signing keys are sealed at rest")
 		}
-		masterKey, err := base64.StdEncoding.DecodeString(cfg.MasterKey)
-		if err != nil {
-			log.Fatal().Err(err).Msg("MASTER_KEY must be base64")
-		}
-		if sealer, err = orghost.NewSealer(masterKey); err != nil {
-			log.Fatal().Err(err).Msg("Bad MASTER_KEY")
+		if cfg.MasterKey != "" {
+			masterKey, err := base64.StdEncoding.DecodeString(cfg.MasterKey)
+			if err != nil {
+				log.Fatal().Err(err).Msg("MASTER_KEY must be base64")
+			}
+			if sealer, err = orghost.NewSealer(masterKey); err != nil {
+				log.Fatal().Err(err).Msg("Bad MASTER_KEY")
+			}
+		} else {
+			log.Warn().Msg("No MASTER_KEY: orgs sealed under a host key cannot sign on this host")
 		}
 		pg, err := store.NewPostgresStore(ctx, cfg.DatabaseURL, log)
 		if err != nil {
@@ -100,7 +116,22 @@ func main() {
 	booking := agreement.CommitPolicy()
 	policies := orghost.Policies{booking.Name: booking}
 
-	repo := &orghost.Repository{Store: st, Signer: orghost.NewLocalSigner(st, sealer)}
+	var local *orghost.LocalSigner
+	if sealer != nil {
+		local = orghost.NewLocalSigner(st, sealer)
+	}
+	var kmsSigner *orghost.KMSSigner
+	registerWith := orghost.Registrar(local)
+	if cfg.Signer == "kms" {
+		awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.KMSRegion))
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to load AWS config")
+		}
+		kmsSigner = orghost.NewKMSSigner(st, kms.NewFromConfig(awsCfg), cfg.KMSAliasPrefix)
+		registerWith = kmsSigner
+	}
+	log.Info().Str("signer", cfg.Signer).Msg("New orgs register with this signer")
+	repo := &orghost.Repository{Store: st, Signer: orghost.NewRoutingSigner(st, local, kmsSigner, registerWith)}
 	app := orghost.New(orghost.Options{
 		Repo:            repo,
 		Auth:            auth,

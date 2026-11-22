@@ -43,9 +43,12 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	query := `
 		CREATE TABLE IF NOT EXISTS orgs (
 			did             TEXT PRIMARY KEY,
-			signing_key_enc BYTEA NOT NULL,
+			signing_key_enc BYTEA,
+			signing_key_ref TEXT,
 			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+		ALTER TABLE orgs ADD COLUMN IF NOT EXISTS signing_key_ref TEXT;
+		ALTER TABLE orgs ALTER COLUMN signing_key_enc DROP NOT NULL;
 		CREATE TABLE IF NOT EXISTS commits (
 			org          TEXT NOT NULL REFERENCES orgs(did),
 			seq          BIGINT NOT NULL,
@@ -138,8 +141,8 @@ func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
 		org.CreatedAt = time.Now().UTC()
 	}
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO orgs (did, signing_key_enc, created_at) VALUES ($1, $2, $3) ON CONFLICT (did) DO NOTHING`,
-		org.DID, org.KeyEnc, org.CreatedAt)
+		`INSERT INTO orgs (did, signing_key_enc, signing_key_ref, created_at) VALUES ($1, $2, NULLIF($3, ''), $4) ON CONFLICT (did) DO NOTHING`,
+		org.DID, org.KeyEnc, org.KeyRef, org.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert org: %w", err)
 	}
@@ -151,8 +154,8 @@ func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
 
 func (s *PostgresStore) GetOrg(ctx context.Context, did string) (*Org, error) {
 	var org Org
-	err := s.pool.QueryRow(ctx, `SELECT did, signing_key_enc, created_at FROM orgs WHERE did = $1`, did).
-		Scan(&org.DID, &org.KeyEnc, &org.CreatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT did, signing_key_enc, COALESCE(signing_key_ref, ''), created_at FROM orgs WHERE did = $1`, did).
+		Scan(&org.DID, &org.KeyEnc, &org.KeyRef, &org.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

@@ -594,3 +594,25 @@ func TestStore_VehicleTags(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_OrgKeyRef(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			did := fmt.Sprintf("did:dimo:kms%d-%d", time.Now().UnixNano(), orgCounter.Add(1))
+			const arn = "arn:aws:kms:us-east-1:111122223333:key/abc"
+			require.NoError(t, s.CreateOrg(ctx, Org{DID: did, KeyRef: arn}))
+			org, err := s.GetOrg(ctx, did)
+			require.NoError(t, err)
+			assert.Equal(t, arn, org.KeyRef)
+			assert.Empty(t, org.KeyEnc)
+
+			// A row sealed under the master key has no ref and still loads.
+			old := newOrg(t, s)
+			org, err = s.GetOrg(ctx, old)
+			require.NoError(t, err)
+			assert.Equal(t, []byte("sealed"), org.KeyEnc)
+			assert.Empty(t, org.KeyRef)
+		})
+	}
+}

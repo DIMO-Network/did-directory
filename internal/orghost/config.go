@@ -17,6 +17,14 @@ type Settings struct {
 	// MasterKey seals org signing keys at rest, base64 of 32 bytes. Required
 	// with DATABASE_URL; the in-memory store runs under an ephemeral key.
 	MasterKey string `yaml:"MASTER_KEY"`
+	// Signer picks where new orgs' #dimo_org keys live: "local" (sealed under
+	// MASTER_KEY, the default) or "kms". Orgs already registered keep the backend
+	// their row names, whatever this says.
+	Signer string `yaml:"ORG_SIGNER"`
+	// KMSRegion is the AWS region of the KMS keys; empty uses the SDK default.
+	KMSRegion string `yaml:"KMS_REGION"`
+	// KMSAliasPrefix prefixes each org key's alias; it must start with "alias/".
+	KMSAliasPrefix string `yaml:"KMS_ALIAS_PREFIX"`
 	// IdentityJWKSURL is where the identity token issuer publishes its signing
 	// keys; IdentityJWKS is the same key set given inline, for development.
 	IdentityJWKSURL string `yaml:"IDENTITY_JWKS_URL"`
@@ -44,7 +52,7 @@ type Settings struct {
 
 // LoadSettings reads path, then applies environment overrides.
 func LoadSettings(path string) (*Settings, error) {
-	s := &Settings{Port: 8081, LogLevel: "info", PageSize: 100}
+	s := &Settings{Port: 8081, LogLevel: "info", PageSize: 100, Signer: "local", KMSAliasPrefix: "alias/dimo-org/"}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := yaml.Unmarshal(data, s); err != nil {
 			return nil, err
@@ -58,6 +66,9 @@ func LoadSettings(path string) (*Settings, error) {
 	env("DATABASE_URL", &s.DatabaseURL)
 	env("LOG_LEVEL", &s.LogLevel)
 	env("MASTER_KEY", &s.MasterKey)
+	env("ORG_SIGNER", &s.Signer)
+	env("KMS_REGION", &s.KMSRegion)
+	env("KMS_ALIAS_PREFIX", &s.KMSAliasPrefix)
 	env("IDENTITY_JWKS_URL", &s.IdentityJWKSURL)
 	env("IDENTITY_JWKS", &s.IdentityJWKS)
 	env("IDENTITY_ISSUER", &s.IdentityIssuer)

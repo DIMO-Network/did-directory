@@ -39,8 +39,12 @@ func IsHeadChanged(err error) bool { return errors.Is(err, ErrHeadChanged) }
 type Org struct {
 	DID string
 	// KeyEnc is the org's #dimo_org private key, sealed by the host's master key.
-	// The store never sees it in the clear.
-	KeyEnc    []byte
+	// The store never sees it in the clear. Empty for an org whose key lives in
+	// KMS.
+	KeyEnc []byte
+	// KeyRef is the ARN of the org's #dimo_org key in KMS. Exactly one of KeyEnc
+	// and KeyRef is set.
+	KeyRef    string
 	CreatedAt time.Time
 }
 
