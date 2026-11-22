@@ -35,6 +35,14 @@ type Settings struct {
 	// Both are required.
 	IdentityIssuer   string `yaml:"IDENTITY_ISSUER"`
 	IdentityAudience string `yaml:"IDENTITY_AUDIENCE"`
+	// PublicURL is this host's own URL, which an org's DID must publish as its
+	// #dimo_org_host for the org to register here. Empty means
+	// IdentityAudience, which is the same URL unless tokens name the host by
+	// another one. See HostURL.
+	PublicURL string `yaml:"PUBLIC_URL"`
+	// RegisterRateLimitPerMinute bounds registers host-wide in any rolling
+	// minute, since under KMS each one makes a billable key; 0 disables it.
+	RegisterRateLimitPerMinute int `yaml:"REGISTER_RATE_LIMIT_PER_MINUTE"`
 	// DirectoryURL is the DID directory, for control state (plan §3.3).
 	DirectoryURL string `yaml:"DIRECTORY_URL"`
 	// IssuerDIDs are the DIDs that may call POST /authorize: dauth's.
@@ -52,7 +60,8 @@ type Settings struct {
 
 // LoadSettings reads path, then applies environment overrides.
 func LoadSettings(path string) (*Settings, error) {
-	s := &Settings{Port: 8081, LogLevel: "info", PageSize: 100, Signer: "local", KMSAliasPrefix: "alias/dimo-org/"}
+	s := &Settings{Port: 8081, LogLevel: "info", PageSize: 100, Signer: "local", KMSAliasPrefix: "alias/dimo-org/",
+		RegisterRateLimitPerMinute: 10}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := yaml.Unmarshal(data, s); err != nil {
 			return nil, err
@@ -73,6 +82,7 @@ func LoadSettings(path string) (*Settings, error) {
 	env("IDENTITY_JWKS", &s.IdentityJWKS)
 	env("IDENTITY_ISSUER", &s.IdentityIssuer)
 	env("IDENTITY_AUDIENCE", &s.IdentityAudience)
+	env("PUBLIC_URL", &s.PublicURL)
 	env("DIRECTORY_URL", &s.DirectoryURL)
 	env("CONTROL_CACHE_TTL", &s.ControlCacheTTL)
 	// Comma-separated in the environment.
@@ -92,7 +102,22 @@ func LoadSettings(path string) (*Settings, error) {
 			s.PageSize = p
 		}
 	}
+	if v := os.Getenv("REGISTER_RATE_LIMIT_PER_MINUTE"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			s.RegisterRateLimitPerMinute = p
+		}
+	}
 	return s, nil
+}
+
+// HostURL is the URL an org's #dimo_org_host must equal: PublicURL, else
+// IdentityAudience, without a trailing slash.
+func (s *Settings) HostURL() string {
+	u := s.PublicURL
+	if u == "" {
+		u = s.IdentityAudience
+	}
+	return strings.TrimRight(u, "/")
 }
 
 func splitList(v string) []string {

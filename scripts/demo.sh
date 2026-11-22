@@ -485,7 +485,7 @@ created "DIMO" "$DIMO"
 step "Starting the org host (in memory) on :$ORG_HOST_PORT..."
 info "It trusts identity tokens from dauth's sign-in keys, lets $DAUTH_DID call"
 info "/authorize, and lets DIMO set party attributes."
-DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" \
+DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" PUBLIC_URL="$ORG_HOST_URL" \
     IDENTITY_JWKS_URL="$DAUTH_URL/signin/keys" IDENTITY_ISSUER="$DAUTH_URL/signin" IDENTITY_AUDIENCE="$ORG_HOST_URL" \
     ISSUER_DIDS="$DAUTH_DID" ADMIN_DIDS="$DIMO" CONTROL_CACHE_TTL=1s \
     "$BIN/org-host" -settings /dev/null >"$DEMO_DIR/org-host.log" 2>&1 &
@@ -815,14 +815,16 @@ pause
 echo ""
 step "The buyer starts clean: a repository of their own, the era-1 opening, and a consent to the insurer..."
 info "This is spec §13.3: a person granting one app over one car is the same"
-info "record and the same issuer path as a fleet. The host generated this"
-info "repository's key, so the buyer publishes it as #dimo_org."
+info "record and the same issuer path as a fleet. A host only registers an org"
+info "whose DID names it, so the buyer publishes #dimo_org_host first. The host"
+info "generates the repository's key, and the buyer publishes it as #dimo_org."
 BUYER_TOKEN=$(signin "$BUYER")
 host PUT "/parties/$BUYER" "$DIMO_TOKEN" '{"kind":"person"}'
 expect 200 "DIMO attests the buyer as a person"
+"$DIMOCLI" update -server "$DIRECTORY_URL" --did "$BUYER" --org-host "$ORG_HOST_URL" | show
 host POST "/orgs/$BUYER" "$(signin "$BUYER" approve)"
 expect 201 "repository registered with a host-generated key"
-"$DIMOCLI" update -server "$DIRECTORY_URL" --did "$BUYER" --org-key "$(echo "$BODY" | jq -r .key)" --org-host "$ORG_HOST_URL" | show
+"$DIMOCLI" update -server "$DIRECTORY_URL" --did "$BUYER" --org-key "$(echo "$BODY" | jq -r .key)" | show
 host PUT "/orgs/$BUYER/network.dimo.org.vehicleControl/$CAR1" "$BUYER_TOKEN" "$(cat "$KEYS/${CAR1#did:dimo:}.control.json")"
 expect 201 "era-1 opening committed to the buyer's repository"
 REC=$(grant "$BUYER" "$INSURER" "{\"vehicle\":\"$CAR1\"}" "telemetry:read" consumer-insurance)

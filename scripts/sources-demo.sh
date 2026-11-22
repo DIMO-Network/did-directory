@@ -206,7 +206,7 @@ info "din: $DIN_DID"
 DIMO=$(create --alias "dimo.zone")
 
 info "The org host lets dauth and din call /authorize."
-DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" \
+DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" PUBLIC_URL="$ORG_HOST_URL" \
     IDENTITY_JWKS_URL="$DAUTH_URL/signin/keys" IDENTITY_ISSUER="$DAUTH_URL/signin" IDENTITY_AUDIENCE="$ORG_HOST_URL" \
     ISSUER_DIDS="$DAUTH_DID,$DIN_DID" ADMIN_DIDS="$DIMO" CONTROL_CACHE_TTL=1s \
     "$BIN/org-host" -settings /dev/null >"$DEMO_DIR/org-host.log" 2>&1 &

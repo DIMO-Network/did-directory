@@ -119,6 +119,12 @@ func main() {
 	if len(cfg.IssuerDIDs) == 0 {
 		log.Warn().Msg("No ISSUER_DIDS configured: nothing may call /authorize")
 	}
+	if cfg.RegisterRateLimitPerMinute < 0 {
+		log.Fatal().Int("value", cfg.RegisterRateLimitPerMinute).Msg("REGISTER_RATE_LIMIT_PER_MINUTE must be 0 (no limit) or more")
+	}
+	publicURL := cfg.HostURL()
+	log.Info().Str("public_url", publicURL).Int("register_per_minute", cfg.RegisterRateLimitPerMinute).
+		Msg("Orgs register here only if their DID names this URL as #dimo_org_host")
 
 	// The commit policy profiles a role may name (plan §3.2). The booking
 	// profile is registered here by name; what a booking is stays with the
@@ -142,16 +148,20 @@ func main() {
 	}
 	log.Info().Str("signer", cfg.Signer).Msg("New orgs register with this signer")
 	repo := &orghost.Repository{Store: st, Signer: orghost.NewRoutingSigner(st, local, kmsSigner, registerWith)}
+	directory := client.New(cfg.DirectoryURL)
 	app := orghost.New(orghost.Options{
-		Repo:            repo,
-		Auth:            auth,
-		Control:         client.New(cfg.DirectoryURL),
-		Issuers:         cfg.IssuerDIDs,
-		Admins:          cfg.AdminDIDs,
-		Policies:        policies,
-		PageSize:        cfg.PageSize,
-		ControlCacheTTL: controlTTL,
-		Log:             log,
+		Repo:              repo,
+		Auth:              auth,
+		Control:           directory,
+		Documents:         directory,
+		PublicURL:         publicURL,
+		RegisterPerMinute: cfg.RegisterRateLimitPerMinute,
+		Issuers:           cfg.IssuerDIDs,
+		Admins:            cfg.AdminDIDs,
+		Policies:          policies,
+		PageSize:          cfg.PageSize,
+		ControlCacheTTL:   controlTTL,
+		Log:               log,
 	})
 
 	go func() {

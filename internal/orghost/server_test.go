@@ -23,6 +23,7 @@ import (
 	"time"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
+	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/client"
@@ -136,12 +137,50 @@ const (
 	dimoDID  = "did:dimo:dimo"
 )
 
-// fakeDirectory answers control lookups for the vehicles a test registers.
+// fakeDirectory answers control lookups for the vehicles a test registers,
+// and resolves the DID documents a test publishes.
 type fakeDirectory struct {
 	mu     sync.Mutex
 	states map[string]*control.State
 	calls  int
+	docs   map[string]*did.DIDDocument
+	// resolveErr, when set, is what every Resolve returns.
+	resolveErr error
+	resolves   int
 }
+
+func (d *fakeDirectory) Resolve(_ context.Context, didStr string) (*did.DIDDocument, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.resolves++
+	if d.resolveErr != nil {
+		return nil, d.resolveErr
+	}
+	doc, ok := d.docs[didStr]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", client.ErrNotFound, didStr)
+	}
+	return doc, nil
+}
+
+// publishDoc makes didStr resolve to a document with the given services.
+func (d *fakeDirectory) publishDoc(didStr string, services ...did.ServiceEntry) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.docs == nil {
+		d.docs = map[string]*did.DIDDocument{}
+	}
+	d.docs[didStr] = &did.DIDDocument{ID: didStr, AlsoKnownAs: []string{}, Service: services}
+}
+
+// publishHost makes org's DID name endpoint as its #dimo_org_host.
+func (d *fakeDirectory) publishHost(org, endpoint string) {
+	d.publishDoc(org, did.ServiceEntry{ID: "#" + OrgHostServiceID, Type: "DimoOrgHost", ServiceEndpoint: endpoint})
+}
+
+// publish makes org's DID name this host as its #dimo_org_host, which
+// registering on it needs.
+func (h *host) publish(org string) { h.directory.publishHost(org, hostAudience) }
 
 func (d *fakeDirectory) Control(_ context.Context, did string) (*control.State, error) {
 	d.mu.Lock()
@@ -183,7 +222,7 @@ func newHost(t *testing.T, st store.Store) *host {
 	return newHostWith(t, st, Policies{booking.Name: booking})
 }
 
-func newHostWith(t *testing.T, st store.Store, policies Policies) *host {
+func newHostWith(t *testing.T, st store.Store, policies Policies, opts ...func(*Options)) *host {
 	t.Helper()
 	iss := newIssuer(t)
 	auth, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test", hostAudience)
@@ -198,11 +237,15 @@ func newHostWith(t *testing.T, st store.Store, policies Policies) *host {
 		return h.clock
 	}}
 	h.repo = r
-	h.app = New(Options{
-		Repo: r, Auth: auth, Control: h.directory,
+	o := Options{
+		Repo: r, Auth: auth, Control: h.directory, Documents: h.directory, PublicURL: hostAudience,
 		Issuers: []string{dauthDID}, Admins: []string{dimoDID}, Policies: policies,
 		PageSize: 50, Log: zerolog.Nop(),
-	})
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	h.app = New(o)
 	return h
 }
 
@@ -324,6 +367,7 @@ func TestRepositoryFlow(t *testing.T) {
 			// Only the org can register itself.
 			status, body = h.do(http.MethodPost, "/orgs/"+org, alice, nil)
 			assert.Equal(t, http.StatusForbidden, status, body)
+			h.publish(org)
 			status, body = h.do(http.MethodPost, "/orgs/"+org, org, nil)
 			require.Equal(t, http.StatusCreated, status, body)
 			orgKey := body["key"].(string)
@@ -459,6 +503,7 @@ func TestStructuralChecks(t *testing.T) {
 	h := newHost(t, store.NewMemoryStore())
 	org := newOrgDID()
 	const alice = "did:dimo:alice"
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 
@@ -543,6 +588,7 @@ func TestRegisterWithSuppliedKey(t *testing.T) {
 	want, err := dimocrypto.EncodeDIDKey(&key.PublicKey)
 	require.NoError(t, err)
 
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, map[string]string{"privateKey": base64.StdEncoding.EncodeToString(der)})
 	require.Equal(t, http.StatusCreated, status, body)
 	assert.Equal(t, want, body["key"])
@@ -560,6 +606,7 @@ func TestRegisterWithSuppliedKey(t *testing.T) {
 	status, body = h.do(http.MethodPost, "/orgs/"+newOrgDID(), "did:dimo:x", map[string]string{"privateKey": "nope"})
 	assert.Equal(t, http.StatusForbidden, status, body)
 	other := newOrgDID()
+	h.publish(other)
 	status, body = h.do(http.MethodPost, "/orgs/"+other, other, map[string]string{"privateKey": "nope"})
 	assert.Equal(t, http.StatusBadRequest, status, body)
 }
@@ -606,6 +653,7 @@ func TestConcurrentWritesKeepOneChain(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHost(t, st)
 			org := newOrgDID()
+			h.publish(org)
 			status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 			require.Equal(t, http.StatusCreated, status, body)
 			orgKey := body["key"].(string)
@@ -744,6 +792,7 @@ func TestReplayCacheFull(t *testing.T) {
 	org := newOrgDID()
 	h.auth.proofs.MaxReplayEntries = 1
 	// The register request's proof fills the cache.
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 
@@ -783,6 +832,7 @@ func TestReplayCacheFull(t *testing.T) {
 func TestScopes(t *testing.T) {
 	h := newHost(t, store.NewMemoryStore())
 	org := newOrgDID()
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 

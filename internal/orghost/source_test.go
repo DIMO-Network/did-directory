@@ -80,6 +80,7 @@ func TestAuthorizeAnyGrant_SourceOrgMember(t *testing.T) {
 
 	relayOrg := newOrgDID()
 	server := relayOrg + "-ingest"
+	h.publish(relayOrg)
 	status, body := h.do(http.MethodPost, "/orgs/"+relayOrg, relayOrg, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 	h.writeGrant(org, relayOrg, car)

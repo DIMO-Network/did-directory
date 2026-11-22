@@ -47,6 +47,7 @@ func newAvis(t *testing.T, st store.Store) *avis {
 	a.fordPro = a.org + "-fordpro"
 	a.clock = day(1)
 
+	a.publish(a.org)
 	status, body := a.do(http.MethodPost, "/orgs/"+a.org, a.org, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 	status, body = a.do(http.MethodPut, "/parties/"+a.org, dimoDID, map[string]any{"kind": "org", "operator": true})
@@ -206,6 +207,7 @@ func TestAvisActions(t *testing.T) {
 				// A lien from an org nobody attested as an operator is refused
 				// outright, not parked.
 				other := newOrgDID()
+				a.publish(other)
 				status, body = a.do(http.MethodPost, "/orgs/"+other, other, nil)
 				require.Equal(t, http.StatusCreated, status, body)
 				stranger := lien
@@ -238,6 +240,7 @@ func TestAvisActions(t *testing.T) {
 				require.Equal(t, http.StatusCreated, status, body)
 
 				// Ford Pro passes telemetry to its integrator from its own repository.
+				a.publish(fordPro)
 				status, body = a.do(http.MethodPost, "/orgs/"+fordPro, fordPro, nil)
 				require.Equal(t, http.StatusCreated, status, body)
 				status, body = a.do(http.MethodPut, "/parties/"+fordPro, dimoDID, map[string]any{"kind": "org", "operator": true})

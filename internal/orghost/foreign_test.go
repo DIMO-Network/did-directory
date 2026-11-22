@@ -58,6 +58,7 @@ func TestForeignEvidenceCountsForNothing(t *testing.T) {
 			attacker := newOrgDID()
 			puppet := attacker + "-puppet"
 			h.clock = day(2)
+			h.publish(attacker)
 			status, body = h.do(http.MethodPost, "/orgs/"+attacker, attacker, nil)
 			require.Equal(t, http.StatusCreated, status, body)
 			h.grantRole(attacker, roleRecord(attacker, puppet, delegation.Covers{Inherit: true}, "delegation:create"))

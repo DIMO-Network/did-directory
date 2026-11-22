@@ -18,6 +18,7 @@ func TestMyRoles(t *testing.T) {
 			kept, dropped, demoted := base+"-kept", base+"-dropped", base+"-demoted"
 			member, other := base+"-member", base+"-other"
 			for _, did := range []string{kept, dropped, demoted} {
+				h.publish(did)
 				status, body := h.do(http.MethodPost, "/orgs/"+did, did, nil)
 				require.Equal(t, http.StatusCreated, status, body)
 			}
@@ -62,6 +63,7 @@ func TestMyDelegations(t *testing.T) {
 			car, notTheirs := base+"-car", base+"-other-car"
 			h.clock = day(1)
 			for _, did := range []string{owner, stranger, dealer} {
+				h.publish(did)
 				status, body := h.do(http.MethodPost, "/orgs/"+did, did, nil)
 				require.Equal(t, http.StatusCreated, status, body)
 			}

@@ -299,6 +299,7 @@ func TestRegisterHandler_KMSRefusesPrivateKey(t *testing.T) {
 	require.NoError(t, err)
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	require.NoError(t, err)
+	h.publish(org)
 	status, body := h.do("POST", "/orgs/"+org, org, map[string]string{"privateKey": base64.StdEncoding.EncodeToString(der)})
 	assert.Equal(t, 400, status, body)
 	assert.Equal(t, "privateKey is not accepted with the KMS signer", body["error"])

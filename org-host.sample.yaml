@@ -19,7 +19,17 @@ IDENTITY_ISSUER: "http://localhost:8080/signin"
 # Tokens must name this host in aud: its public URL, which members request
 # from dauth when they sign in to write here.
 IDENTITY_AUDIENCE: "http://localhost:8081"
-# The DID directory, for control state.
+# This host's public URL. POST /orgs/{org} registers an org only when the org's
+# DID, resolved through DIRECTORY_URL, publishes exactly this URL as its
+# #dimo_org_host service endpoint; anything else is 403. A trailing slash here
+# is dropped, and the DID's endpoint must then match it character for
+# character. Empty means IDENTITY_AUDIENCE, which is the same URL unless tokens
+# name the host by another one.
+PUBLIC_URL: ""
+# Registers allowed host-wide in any rolling minute (each can make a billable
+# KMS key); past it, 429 with Retry-After. 0 disables the limit.
+REGISTER_RATE_LIMIT_PER_MINUTE: 10
+# The DID directory, for control state and for the org DIDs register checks.
 DIRECTORY_URL: "http://localhost:8082"
 # How long a vehicle's control state read from the directory is served before
 # it is fetched again; empty means 30s. scripts/demo.sh sets 1s.

@@ -35,14 +35,17 @@ import (
 // pending when the policy wants a second approval. /authorize is for the
 // issuer (dauth) and /parties for DIMO, each an allowlist of DIDs.
 type Server struct {
-	repo     *Repository
-	auth     Authenticator
-	resolver *Resolver
-	policies Policies
-	issuers  map[string]bool
-	admins   map[string]bool
-	pageSize int
-	log      zerolog.Logger
+	repo      *Repository
+	auth      Authenticator
+	resolver  *Resolver
+	documents DocumentSource
+	publicURL string
+	registers *rateLimiter
+	policies  Policies
+	issuers   map[string]bool
+	admins    map[string]bool
+	pageSize  int
+	log       zerolog.Logger
 }
 
 // Options configures a Server.
@@ -51,6 +54,16 @@ type Options struct {
 	Auth Authenticator
 	// Control is where control state comes from: the DID directory.
 	Control ControlSource
+	// Documents resolves DID documents, also from the directory: register
+	// checks that the org's DID names this host.
+	Documents DocumentSource
+	// PublicURL is this host's own URL, which an org's DID must publish as its
+	// #dimo_org_host to register here. A trailing slash is dropped; the
+	// endpoint is then compared exactly.
+	PublicURL string
+	// RegisterPerMinute bounds registers host-wide in any rolling minute, since
+	// each one can make a billable KMS key; zero means no limit.
+	RegisterPerMinute int
 	// Issuers are the DIDs that may call POST /authorize (plan §3.3): dauth.
 	Issuers []string
 	// Admins are the DIDs that may set party attributes (plan §1 decision E).
@@ -86,9 +99,11 @@ func New(o Options) *fiber.App {
 	}
 	s := &Server{
 		repo: o.Repo, auth: o.Auth,
-		resolver: &Resolver{Store: o.Repo.Store, Control: o.Control, Now: o.Repo.now, ControlCacheTTL: o.ControlCacheTTL},
-		policies: policies,
-		issuers:  set(o.Issuers), admins: set(o.Admins),
+		resolver:  &Resolver{Store: o.Repo.Store, Control: o.Control, Now: o.Repo.now, ControlCacheTTL: o.ControlCacheTTL},
+		documents: o.Documents, publicURL: strings.TrimRight(o.PublicURL, "/"),
+		registers: &rateLimiter{limit: o.RegisterPerMinute},
+		policies:  policies,
+		issuers:   set(o.Issuers), admins: set(o.Admins),
 		pageSize: o.PageSize, log: o.Log.With().Str("component", "orghost").Logger(),
 	}
 
@@ -204,12 +219,33 @@ func params(c *fiber.Ctx) (org, collection, rkey string) {
 }
 
 // register puts an org on this host. Only the org itself may do it: this is
-// where its signing key is born, and in v1 an identity token for the org DID is
-// the proof the directory-level check (does #dimo_org match) will join in step 3.
+// where its signing key is born, and under KMS each key is billed. So the
+// caller must be the org, the org's DID must already name this host as its
+// #dimo_org_host, and registers are rate limited host-wide.
 func (s *Server) register(c *fiber.Ctx) error {
 	org, _, _ := params(c)
 	if caller(c) != org {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "only the org itself may register its repository"})
+	}
+	if ok, wait := s.registers.allow(s.repo.now()); !ok {
+		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(retryAfterSeconds(wait)))
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "too many registers on this host, retry later"})
+	}
+	if s.documents == nil {
+		s.log.Error().Str("org", org).Msg("register: no DID document source configured")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	}
+	ours, err := namesThisHost(c.Context(), s.documents, org, s.publicURL)
+	if err != nil {
+		s.log.Warn().Err(err).Str("org", org).Msg("register: could not resolve the org's DID")
+		c.Set(fiber.HeaderRetryAfter, "1")
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "could not resolve the org's DID, retry shortly",
+			"code":  "temporarily_unavailable",
+		})
+	}
+	if !ours {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": errNotThisHost})
 	}
 	var body struct {
 		// PrivateKey is an optional PKCS#8 key in base64, for an org whose key

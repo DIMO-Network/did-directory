@@ -64,6 +64,7 @@ func (h *host) fleet(org string) {
 	h.t.Helper()
 	car := carOf(org)
 	h.clock = day(1)
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 	require.Equal(h.t, http.StatusCreated, status, body)
 	status, body = h.do(http.MethodPut, "/parties/"+org, dimoDID, map[string]any{"kind": "org", "operator": true})
@@ -349,6 +350,7 @@ func TestAuthorizeGuards(t *testing.T) {
 func TestParties(t *testing.T) {
 	h := newHost(t, store.NewMemoryStore())
 	org := newOrgDID()
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 
