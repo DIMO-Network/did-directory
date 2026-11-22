@@ -10,10 +10,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/didkey"
 	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/stretchr/testify/assert"
@@ -71,26 +74,31 @@ func newAudienceDauth(t *testing.T, pub *didkey.PublicKey) *audienceDauth {
 }
 
 // fakeOrgHost registers orgs as the org host does: the token's sub must be
-// the org, its scope approve, and the request DPoP-proved by the token's key.
+// the org, its scope must hold approve (read for GET), and every request must
+// be DPoP-proved by the token's key, each proof once. unavailable answers that
+// many POSTs 503 with Retry-After first.
 type fakeOrgHost struct {
-	url       string
-	key       string
-	status    int
-	mu        sync.Mutex
-	registers []string
+	url         string
+	key         string
+	status      int
+	unavailable int
+	mu          sync.Mutex
+	registers   []string
+	posts, gets int
+	registered  map[string]bool
 }
 
 func newFakeOrgHost(t *testing.T) *fakeOrgHost {
 	t.Helper()
 	_, hostKey, err := newKey()
 	require.NoError(t, err)
-	h := &fakeOrgHost{key: hostKey, status: http.StatusCreated}
+	h := &fakeOrgHost{key: hostKey, status: http.StatusCreated, registered: map[string]bool{}}
 	verifier := dpop.NewVerifier()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		org, ok := strings.CutPrefix(r.URL.Path, "/orgs/")
-		if r.Method != http.MethodPost || !ok {
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
@@ -102,18 +110,47 @@ func newFakeOrgHost(t *testing.T) *fakeOrgHost {
 			Cnf        struct{ Jkt string }
 		}
 		require.NoError(t, json.Unmarshal(claims, &c))
-		jkt, err := verifier.Verify(r.Header.Get(dpop.HeaderName), http.MethodPost, h.url+r.URL.Path, tok)
-		if err != nil || jkt != c.Cnf.Jkt || c.Sub != org || c.Scope != "approve" {
+		scopes := strings.Fields(c.Scope)
+		jkt, err := verifier.Verify(r.Header.Get(dpop.HeaderName), r.Method, h.url+r.URL.Path, tok)
+		if err != nil || jkt != c.Cnf.Jkt || c.Sub != org {
 			http.Error(w, `{"error":"invalid_token"}`, http.StatusUnauthorized)
 			return
 		}
-		h.registers = append(h.registers, org)
-		w.WriteHeader(h.status)
-		if h.status == http.StatusCreated {
-			_ = json.NewEncoder(w).Encode(map[string]string{"did": org, "key": h.key})
-			return
+		switch r.Method {
+		case http.MethodGet:
+			h.gets++
+			if !slices.Contains(scopes, "read") || !h.registered[org] {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"did": org, "key": h.key, "head": map[string]any{"seq": 0}})
+		case http.MethodPost:
+			h.posts++
+			if !slices.Contains(scopes, "approve") {
+				http.Error(w, `{"error":"insufficient_scope"}`, http.StatusForbidden)
+				return
+			}
+			if h.unavailable > 0 {
+				h.unavailable--
+				w.Header().Set("Retry-After", "2")
+				http.Error(w, `{"error":"the register did not finish, retry shortly","code":"temporarily_unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			if h.registered[org] {
+				http.Error(w, `{"error":"org is already registered on this host"}`, http.StatusConflict)
+				return
+			}
+			h.registers = append(h.registers, org)
+			w.WriteHeader(h.status)
+			if h.status == http.StatusCreated {
+				h.registered[org] = true
+				_ = json.NewEncoder(w).Encode(map[string]string{"did": org, "key": h.key})
+				return
+			}
+			_, _ = w.Write([]byte(`{"error":"the org's DID does not name this host as #dimo_org_host"}`))
+		default:
+			http.NotFound(w, r)
 		}
-		_, _ = w.Write([]byte(`{"error":"the org's DID does not name this host as #dimo_org_host"}`))
 	}))
 	t.Cleanup(srv.Close)
 	h.url = srv.URL
@@ -146,7 +183,8 @@ func TestCreate_OrgHostRegistersThenPublishesTheHostKey(t *testing.T) {
 	verifyOp(t, sg.DIDKey(), genesis)
 
 	assert.Equal(t, []string{derived}, host.registers)
-	assert.Equal(t, []string{"approve"}, dauth.scopes, "register takes an approve token")
+	require.Len(t, dauth.scopes, 1, "one sign-in")
+	assert.Contains(t, strings.Fields(dauth.scopes[0]), "approve", "register takes an approve token")
 	assert.Equal(t, host.key, update.VerificationMethods[OrgKeyID])
 	assert.Equal(t, sg.DIDKey(), update.VerificationMethods["signing"])
 	assert.Equal(t, genesis.Services, update.Services)
@@ -174,7 +212,7 @@ func TestCreate_OrgHostRegisterRefusedSaysHowToFinish(t *testing.T) {
 	_, err = executeCreate(context.Background(), c, createOptions{OrgHost: host.url, Dauth: dauth.url}, sg, &bytes.Buffer{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not name this host")
-	assert.Contains(t, err.Error(), "dimocli update")
+	assert.Contains(t, err.Error(), "dimocli register --did")
 	assert.Len(t, *ops, 1, "the genesis only")
 }
 
@@ -190,4 +228,160 @@ func TestCreate_OrgHostWithOrgKeyDoesNotRegister(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, *ops, 1)
 	assert.Equal(t, given, (*ops)[0].VerificationMethods[OrgKeyID])
+}
+
+// noWait stands in for the Retry-After sleep and records what was asked.
+func noWait(t *testing.T) *[]time.Duration {
+	t.Helper()
+	var waits []time.Duration
+	old := retryWait
+	retryWait = func(_ context.Context, d time.Duration) error {
+		waits = append(waits, d)
+		return nil
+	}
+	t.Cleanup(func() { retryWait = old })
+	return &waits
+}
+
+// Fix round 1, item 4: a 503 from the host (a KMS register to retry) is
+// retried once, after its Retry-After, with a fresh proof.
+func TestRegisterOnHost_RetriesOnceOn503(t *testing.T) {
+	sg, err := newFileSignerK1()
+	require.NoError(t, err)
+	pub, err := didkey.Decode(sg.DIDKey())
+	require.NoError(t, err)
+	dauth := newAudienceDauth(t, pub)
+	const org = "did:dimo:retry"
+
+	waits := noWait(t)
+	host := newFakeOrgHost(t)
+	host.unavailable = 1
+	key, err := registerOnHost(context.Background(), dauth.url, host.url, org, sg)
+	require.NoError(t, err)
+	assert.Equal(t, host.key, key)
+	assert.Equal(t, 2, host.posts)
+	assert.Equal(t, []time.Duration{2 * time.Second}, *waits)
+
+	// Only once.
+	host = newFakeOrgHost(t)
+	host.unavailable = 2
+	_, err = registerOnHost(context.Background(), dauth.url, host.url, "did:dimo:retry2", sg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "503")
+	assert.Equal(t, 2, host.posts)
+}
+
+// Fix round 1, item 4: an org already on the host (a run whose publish failed)
+// answers 409, and the CLI reads the key the host holds instead.
+func TestRegisterOnHost_ConflictReadsTheKey(t *testing.T) {
+	sg, err := newFileSignerK1()
+	require.NoError(t, err)
+	pub, err := didkey.Decode(sg.DIDKey())
+	require.NoError(t, err)
+	dauth := newAudienceDauth(t, pub)
+	host := newFakeOrgHost(t)
+	const org = "did:dimo:again"
+	host.registered[org] = true
+
+	key, err := registerOnHost(context.Background(), dauth.url, host.url, org, sg)
+	require.NoError(t, err)
+	assert.Equal(t, host.key, key)
+	assert.Equal(t, 1, host.posts)
+	assert.Equal(t, 1, host.gets)
+}
+
+// recordingDirectory accepts submissions and serves each DID's audit log back,
+// so a command that reads the head after a create sees it. failPost, when
+// set, is the one submission (1-based) it refuses.
+type recordingDirectory struct {
+	mu       sync.Mutex
+	logs     map[string][]map[string]any
+	posts    int
+	failPost int
+	ops      []map[string]any
+}
+
+func newRecordingDirectory(t *testing.T) (*recordingDirectory, *httptest.Server) {
+	t.Helper()
+	d := &recordingDirectory{logs: map[string][]map[string]any{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		switch {
+		case r.Method == http.MethodPost:
+			d.posts++
+			if d.posts == d.failPost {
+				http.Error(w, `{"error":"unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			var op map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&op))
+			cid := fmt.Sprintf("bafy%d", len(d.ops))
+			d.ops = append(d.ops, op)
+			d.logs[path] = append(d.logs[path], map[string]any{"cid": cid, "operation": op})
+			_, _ = w.Write([]byte(`{"did":"` + path + `","cid":"` + cid + `"}`))
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/log/audit"):
+			_ = json.NewEncoder(w).Encode(d.logs[strings.TrimSuffix(path, "/log/audit")])
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return d, srv
+}
+
+// Fix round 1, item 4: dimocli register finishes a create --org-host run that
+// failed after the genesis: when the host refused, and when the host
+// registered but publishing the key failed. It is safe to run again.
+func TestRegisterCmd_FinishesAFailedCreate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	noWait(t)
+	sg, err := newFileSignerK1()
+	require.NoError(t, err)
+	pub, err := didkey.Decode(sg.DIDKey())
+	require.NoError(t, err)
+	dauth := newAudienceDauth(t, pub)
+
+	t.Run("the host refused", func(t *testing.T) {
+		host := newFakeOrgHost(t)
+		host.status = http.StatusForbidden
+		dir, srv := newRecordingDirectory(t)
+		c := client.New(srv.URL)
+		org, err := executeCreate(context.Background(), c, createOptions{OrgHost: host.url, Dauth: dauth.url}, sg, &bytes.Buffer{})
+		require.Error(t, err)
+		require.NotEmpty(t, org)
+		assert.Contains(t, err.Error(), "dimocli register --did "+org)
+
+		host.status = http.StatusCreated
+		var out bytes.Buffer
+		require.NoError(t, executeRegister(context.Background(), c, &turnkeyFlags{}, org, dauth.url, &out))
+		require.Len(t, dir.ops, 2)
+		vms := dir.ops[1]["verificationMethods"].(map[string]any)
+		assert.Equal(t, host.key, vms[OrgKeyID])
+
+		// Again: nothing left to do.
+		require.NoError(t, executeRegister(context.Background(), c, &turnkeyFlags{}, org, dauth.url, &out))
+		assert.Len(t, dir.ops, 2, "no second update")
+		assert.Contains(t, out.String(), "already publishes")
+	})
+
+	t.Run("publishing the key failed", func(t *testing.T) {
+		host := newFakeOrgHost(t)
+		dir, srv := newRecordingDirectory(t)
+		c := client.New(srv.URL)
+		// The genesis lands; the update that publishes the host key does not.
+		dir.failPost = 2
+		org, err := executeCreate(context.Background(), c, createOptions{OrgHost: host.url, Dauth: dauth.url}, sg, &bytes.Buffer{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is registered on")
+		assert.Contains(t, err.Error(), "dimocli register --did "+org)
+		require.Len(t, dir.ops, 1)
+
+		require.NoError(t, executeRegister(context.Background(), c, &turnkeyFlags{}, org, dauth.url, &bytes.Buffer{}))
+		assert.Equal(t, 2, host.posts, "the second register is a 409")
+		assert.Equal(t, 1, host.gets, "and the key is read back")
+		require.Len(t, dir.ops, 2)
+		assert.Equal(t, host.key, dir.ops[1]["verificationMethods"].(map[string]any)[OrgKeyID])
+	})
 }

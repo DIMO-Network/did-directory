@@ -38,6 +38,8 @@ func main() {
 		runTransfer(args)
 	case "custody-proof":
 		runCustodyProof(args)
+	case "register":
+		runRegister(args)
 	case "revoke-since":
 		runRevokeSince(args)
 	case "pubkey":
@@ -72,6 +74,8 @@ Usage:
 Commands:
   create       Create a new DID (--controller for a controlled asset such as a vehicle,
                --org for an org with a #dimo_org commit key and --org-host)
+  register     Register an org DID on the org host its #dimo_org_host names and publish
+               the key the host makes (finishes a create --org-host that failed)
   resolve      Resolve a DID to its document
   update       Update a DID's service endpoints, #dimo_org key or #dimo_org_host
   rotate       Rotate a DID's keys

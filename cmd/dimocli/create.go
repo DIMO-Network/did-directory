@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -241,38 +243,72 @@ func executeCreate(ctx context.Context, c *client.Client, opts createOptions, si
 	if !plan.Register {
 		return derivedDID, nil
 	}
-
-	// The DID now names the host, which register checks: sign in as the org,
-	// register, and publish the key the host made.
-	finish := fmt.Sprintf("register it on %s and publish the key it returns with: dimocli update --did %s --org-key <key>", host.Endpoint, derivedDID)
-	orgDIDKey, err := registerOnHost(ctx, opts.Dauth, host.Endpoint, derivedDID, signer)
-	if err != nil {
-		return derivedDID, fmt.Errorf("%s was created, but registering it on its org host failed: %w; to finish, %s", derivedDID, err, finish)
+	// The DID now names the host, which register checks.
+	if err := finishRegistration(ctx, c, opts.Dauth, derivedDID, op, resp.CID, signer, out); err != nil {
+		return derivedDID, fmt.Errorf("%s was created, but %w", derivedDID, err)
 	}
-	upd, err := buildUpdate(op, resp.CID, updateOptions{OrgKey: orgDIDKey})
-	if err != nil {
-		return derivedDID, err
-	}
-	published, err := signOpWith(ctx, signer, upd.Op)
-	if err != nil {
-		return derivedDID, fmt.Errorf("%s is registered on %s with key %s, but signing the update that publishes it failed: %w; to finish, run dimocli update --did %s --org-key %s",
-			derivedDID, host.Endpoint, orgDIDKey, err, derivedDID, orgDIDKey)
-	}
-	updated, err := c.Submit(ctx, derivedDID, published)
-	if err != nil {
-		return derivedDID, fmt.Errorf("%s is registered on %s with key %s, but publishing it failed: %w; to finish, run dimocli update --did %s --org-key %s",
-			derivedDID, host.Endpoint, orgDIDKey, err, derivedDID, orgDIDKey)
-	}
-	fmt.Fprintf(out, "Registered on %s\n", host.Endpoint)
-	fmt.Fprintf(out, "Org commit key (#%s, made by the host): %s\n", OrgKeyID, orgDIDKey)
-	fmt.Fprintf(out, "CID: %s\n", updated.CID)
 	return derivedDID, nil
 }
 
-// registerOnHost signs in to dauth as the org, for host with scope approve,
-// and registers the org there with no key of its own: the host makes the
-// #dimo_org key (in KMS, or sealed under its master key) and returns its
-// did:key. The token is bound to a fresh P-256 key, whatever the root is.
+// finishRegistration puts org, whose latest operation is current (at CID
+// prevCID), on the host its #dimo_org_host names, and publishes the
+// #dimo_org key the host holds unless current already does. It is what create
+// --org-host runs after the genesis and what dimocli register runs to finish
+// a run that failed, so every failure says to run dimocli register.
+func finishRegistration(ctx context.Context, c *client.Client, dauth, org string, current *did.Operation, prevCID string, signer opSigner, out io.Writer) error {
+	finish := "to finish, run: dimocli register --did " + org + " (with the same key flags)"
+	host, ok := current.Services[OrgHostServiceID]
+	if !ok || host.Endpoint == "" {
+		return fmt.Errorf("%s names no org host; publish one with dimocli update --did %s --org-host <url>", org, org)
+	}
+	key, err := registerOnHost(ctx, dauth, host.Endpoint, org, signer)
+	if err != nil {
+		return fmt.Errorf("registering it on %s failed: %w; %s", host.Endpoint, err, finish)
+	}
+	if current.VerificationMethods[OrgKeyID] == key {
+		fmt.Fprintf(out, "Registered on %s; %s already publishes its key (#%s): %s\n", host.Endpoint, org, OrgKeyID, key)
+		return nil
+	}
+	upd, err := buildUpdate(current, prevCID, updateOptions{OrgKey: key})
+	if err != nil {
+		return err
+	}
+	published, err := signOpWith(ctx, signer, upd.Op)
+	if err != nil {
+		return fmt.Errorf("it is registered on %s with key %s, but signing the update that publishes the key failed: %w; %s", host.Endpoint, key, err, finish)
+	}
+	updated, err := c.Submit(ctx, org, published)
+	if err != nil {
+		return fmt.Errorf("it is registered on %s with key %s, but publishing the key failed: %w; %s", host.Endpoint, key, err, finish)
+	}
+	fmt.Fprintf(out, "Registered on %s\n", host.Endpoint)
+	fmt.Fprintf(out, "Org commit key (#%s, made by the host): %s\n", OrgKeyID, key)
+	fmt.Fprintf(out, "CID: %s\n", updated.CID)
+	return nil
+}
+
+// maxRegisterRetryWait caps how long a 503's Retry-After is honoured.
+const maxRegisterRetryWait = 30 * time.Second
+
+// retryWait sleeps d or until ctx ends; tests replace it.
+var retryWait = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// registerOnHost signs in to dauth as the org, for host with scopes read and
+// approve, and registers the org there with no key of its own: the host makes
+// the #dimo_org key (in KMS, or sealed under its master key) and returns its
+// did:key. A 503 (a register the host asks to retry) is retried once after its
+// Retry-After. A 409, an org already registered by an earlier run, reads the
+// key back with GET /orgs/:org. The token is bound to a fresh P-256 key,
+// whatever the root is, and every request carries a fresh proof from it.
 func registerOnHost(ctx context.Context, dauth, host, org string, signer opSigner) (string, error) {
 	dpopKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -280,22 +316,63 @@ func registerOnHost(ctx context.Context, dauth, host, org string, signer opSigne
 	}
 	t, err := signin.SignIn(ctx, signin.Request{
 		Dauth: dauth, DID: org, Signer: signer.Sign, DPoPKey: dpopKey, KeyFragment: "signing",
-		Audience: []string{host}, Scope: identity.ScopeApprove,
+		Audience: []string{host}, Scope: identity.ScopeRead + " " + identity.ScopeApprove,
 	})
 	if err != nil {
 		return "", fmt.Errorf("sign in to %s for %s: %w", dauth, host, err)
 	}
 	url := host + "/orgs/" + org
-	proof, err := dpopProof(dpopKey, http.MethodPost, url, t.Token, time.Now())
+	call := func(method string, body []byte) (int, http.Header, []byte, error) {
+		proof, err := dpopProof(dpopKey, method, url, t.Token, time.Now())
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		req.Header.Set("Authorization", dpop.TokenType+" "+t.Token)
+		req.Header.Set(dpop.HeaderName, proof)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return resp.StatusCode, resp.Header, data, err
+	}
+
+	status, header, data, err := call(http.MethodPost, []byte("{}"))
+	if err == nil && status == http.StatusServiceUnavailable {
+		wait := time.Second
+		if n, perr := strconv.Atoi(header.Get("Retry-After")); perr == nil && n > 0 {
+			wait = time.Duration(n) * time.Second
+		}
+		if wait > maxRegisterRetryWait {
+			wait = maxRegisterRetryWait
+		}
+		if err := retryWait(ctx, wait); err != nil {
+			return "", err
+		}
+		status, _, data, err = call(http.MethodPost, []byte("{}"))
+	}
+	if err == nil && status == http.StatusConflict {
+		status, _, data, err = call(http.MethodGet, nil)
+	}
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("register on %s: %w", host, err)
+	}
+	if status != http.StatusCreated && status != http.StatusOK {
+		return "", fmt.Errorf("register on %s: %d %s: %s", host, status, http.StatusText(status), strings.TrimSpace(string(data)))
 	}
 	var reg struct {
 		DID string `json:"did"`
 		Key string `json:"key"`
 	}
-	headers := map[string]string{"Authorization": dpop.TokenType + " " + t.Token, dpop.HeaderName: proof}
-	if err := sendJSON(http.MethodPost, url, headers, map[string]any{}, &reg); err != nil {
+	if err := json.Unmarshal(data, &reg); err != nil {
 		return "", fmt.Errorf("register on %s: %w", host, err)
 	}
 	if reg.DID != org {
@@ -305,4 +382,45 @@ func registerOnHost(ctx context.Context, dauth, host, org string, signer opSigne
 		return "", fmt.Errorf("register on %s returned a key that is not a did:key: %w", host, err)
 	}
 	return reg.Key, nil
+}
+
+// executeRegister finishes putting an existing org DID on the org host its
+// #dimo_org_host names: it registers there (or finds it registered) and
+// publishes the host's key unless the DID already does. It is safe to run
+// again.
+func executeRegister(ctx context.Context, c *client.Client, tk *turnkeyFlags, didStr, dauth string, out io.Writer) error {
+	prevCID, current, err := getLatestCIDAndOp(ctx, c, didStr)
+	if err != nil {
+		return fmt.Errorf("getting latest state: %w", err)
+	}
+	if current.IsControlled() {
+		return errors.New("a controlled DID cannot be an org: it has no verification methods")
+	}
+	signer, err := resolveSigner(ctx, tk, didStr, current, purposeUpdate)
+	if err != nil {
+		return err
+	}
+	return finishRegistration(ctx, c, dauth, didStr, current, prevCID, signer, out)
+}
+
+// runRegister is dimocli register: the resume path of create --org-host.
+func runRegister(args []string) {
+	fs := flag.NewFlagSet("register", flag.ExitOnError)
+	server := fs.String("server", defaultServer(), "directory server URL")
+	didStr := fs.String("did", "", "org DID to register on the host its #dimo_org_host names (required)")
+	dauth := fs.String("dauth", defaultDauth(), "dauth base URL, where the org signs in to register")
+	tk := bindTurnkeyFlags(fs)
+	fs.Parse(args)
+	if *didStr == "" {
+		fmt.Fprintln(os.Stderr, "Error: --did is required")
+		os.Exit(1)
+	}
+	if err := tk.validate(); err != nil {
+		fatal(err)
+	}
+	c := client.New(*server)
+	c.SetVerbose(isVerbose())
+	if err := executeRegister(context.Background(), c, tk, *didStr, *dauth, os.Stdout); err != nil {
+		fatal(err)
+	}
 }
