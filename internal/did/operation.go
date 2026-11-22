@@ -142,22 +142,28 @@ func ValidateCreate(op *Operation) error {
 	if op.EffectiveAt != nil || op.RevokeSince != nil {
 		return errors.New("genesis operation must not set effectiveAt or revokeSince")
 	}
+	return validateState(op)
+}
+
+// validateState checks an operation that carries DID state: its shape, then
+// that every rotation key and verification method decodes. A key that does
+// not decode would freeze the DID (no later op could verify) or make it
+// unresolvable, so it is refused on every type that sets state, not only on
+// the genesis.
+func validateState(op *Operation) error {
 	if err := validateStateShape(op); err != nil {
 		return err
 	}
-
-	// Validate all keys are valid did:key format.
 	for i, rk := range op.RotationKeys {
 		if _, err := dimocrypto.DecodeDIDKey(rk); err != nil {
 			return fmt.Errorf("invalid rotation key [%d]: %w", i, err)
 		}
 	}
-	for id, vk := range op.VerificationMethods {
-		if _, err := dimocrypto.DecodeDIDKey(vk); err != nil {
+	for _, id := range slices.Sorted(maps.Keys(op.VerificationMethods)) {
+		if _, err := dimocrypto.DecodeDIDKey(op.VerificationMethods[id]); err != nil {
 			return fmt.Errorf("invalid verification method %q: %w", id, err)
 		}
 	}
-
 	return nil
 }
 
@@ -202,8 +208,9 @@ func validateStateShape(op *Operation) error {
 	return nil
 }
 
-// ValidateUpdate checks that an update operation is well-formed on its own.
-// Use ValidateTransition to check it against the current state.
+// ValidateUpdate checks that an update operation is well-formed on its own,
+// including, for every type that carries state, that its keys decode. Use
+// ValidateTransition to check it against the current state.
 func ValidateUpdate(op *Operation) error {
 	if err := validateLimits(op); err != nil {
 		return err
@@ -223,7 +230,7 @@ func ValidateUpdate(op *Operation) error {
 		if len(op.RotationKeys) == 0 {
 			return errors.New("update operation must have at least one rotation key")
 		}
-		return validateStateShape(op)
+		return validateState(op)
 	case OpTypeTransfer:
 		if len(op.RotationKeys) == 0 {
 			return errors.New("transfer must set the new controller's rotation keys")
@@ -237,7 +244,7 @@ func ValidateUpdate(op *Operation) error {
 		if _, err := parseTimestamp(op.EffectiveAt, "effectiveAt"); err != nil {
 			return err
 		}
-		return validateStateShape(op)
+		return validateState(op)
 	case OpTypeRevokeSince:
 		if len(op.RotationKeys) == 0 {
 			return errors.New("revoke_since must keep at least one rotation key")
@@ -256,7 +263,7 @@ func ValidateUpdate(op *Operation) error {
 		if !since.Before(issued) {
 			return errors.New("revokeSince must be before effectiveAt")
 		}
-		return validateStateShape(op)
+		return validateState(op)
 	case OpTypeTombstone:
 		if op.RevokeSince != nil {
 			return errors.New("tombstone must not set revokeSince")

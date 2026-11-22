@@ -132,3 +132,37 @@ func TestValidateUpdate_LimitsBeforeDecoding(t *testing.T) {
 		})
 	}
 }
+
+// R3-F4: an update that carries state has its keys decoded as a genesis
+// does, so a typo'd rotation key cannot freeze the DID and a typo'd
+// verification method cannot make it unresolvable.
+func TestValidateUpdate_DecodesKeysOfStateCarryingTypes(t *testing.T) {
+	_, good := generateTestKey(t)
+	for _, typ := range []string{OpTypeCreate, OpTypeTransfer, OpTypeRevokeSince} {
+		t.Run(typ, func(t *testing.T) {
+			op := updateOfType(t, typ)
+			op.RotationKeys = []string{good, "did:key:zNotAKey"}
+			if typ == OpTypeCreate {
+				op.VerificationMethods = map[string]string{"signing": good}
+			}
+			err := ValidateUpdate(op)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid rotation key [1]")
+
+			op.RotationKeys = []string{good}
+			assert.NoError(t, ValidateUpdate(op))
+		})
+	}
+
+	op := updateOfType(t, OpTypeCreate)
+	op.RotationKeys = []string{good}
+	op.VerificationMethods = map[string]string{"signing": good, "phone": "did:key:zNotAKey"}
+	err := ValidateUpdate(op)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid verification method "phone"`)
+
+	// A tombstone carries no state: nothing after it is ever verified.
+	tomb := updateOfType(t, OpTypeTombstone)
+	tomb.RotationKeys = []string{"did:key:zNotAKey"}
+	assert.NoError(t, ValidateUpdate(tomb))
+}

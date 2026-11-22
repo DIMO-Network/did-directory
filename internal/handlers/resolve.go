@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"errors"
+
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/internal/store"
 	"github.com/DIMO-Network/did-directory/pkg/control"
@@ -45,8 +47,16 @@ func (h *ResolveHandler) HandleResolve(c *fiber.Ctx) error {
 	state := resolveControlState(didParam, records)
 
 	doc, err := did.GenerateDocument(didParam, &latest.Operation, state)
-	if err != nil {
+	if errors.Is(err, did.ErrDeactivated) {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+	if err != nil {
+		// The head does not make a document (a key that does not decode, in a
+		// row stored before updates were checked). The DID is unusable, not
+		// deactivated, and callers must not read it as a tombstone.
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
 			"error": err.Error(),
 		})
 	}
@@ -72,6 +82,11 @@ func (h *ResolveHandler) HandleData(c *fiber.Ctx) error {
 	}
 
 	latest := records[len(records)-1]
+	if latest.Operation.IsTombstone() {
+		return c.Status(fiber.StatusGone).JSON(fiber.Map{
+			"error": "DID " + didParam + " has been deactivated",
+		})
+	}
 
 	state := resolveControlState(didParam, records)
 
