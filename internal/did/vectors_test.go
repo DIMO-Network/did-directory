@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/stretchr/testify/assert"
@@ -24,7 +25,7 @@ func TestVectorsUpToDate(t *testing.T) {
 	got, err := GenerateVectors()
 	require.NoError(t, err)
 	want := readVectorFile(t, "../../testdata/vectors/did-ops.json")
-	require.Len(t, want.Cases, 8)
+	require.Len(t, want.Cases, 10)
 	assert.Equal(t, want, got)
 }
 
@@ -68,4 +69,25 @@ func TestEscapingVectorCoverage(t *testing.T) {
 		}
 	}
 	require.True(t, found, "genesis-services-escaping case missing")
+}
+
+func TestOrgVectorsPassValidation(t *testing.T) {
+	f := readVectorFile(t, "../../testdata/vectors/did-ops.json")
+	ops := map[string]*Operation{}
+	for _, c := range f.Cases {
+		if c.Name != "org-genesis" && c.Name != "org-update-add-dimo-org" {
+			continue
+		}
+		u := c.Unsigned
+		ops[c.Name] = &Operation{Type: u.Type, RotationKeys: u.RotationKeys, VerificationMethods: u.VerificationMethods,
+			AlsoKnownAs: u.AlsoKnownAs, Services: u.Services, Prev: u.Prev, Sig: c.Sig}
+	}
+	require.Len(t, ops, 2)
+	genesis, update := ops["org-genesis"], ops["org-update-add-dimo-org"]
+	require.NoError(t, ValidateCreate(genesis))
+	require.NoError(t, ValidateUpdate(update))
+	assert.Equal(t, []string{genesis.RotationKeys[0]}, update.RotationKeys)
+	assert.Equal(t, "https://org-host.example.com", update.Services["dimo_org_host"].Endpoint)
+	assert.Contains(t, update.VerificationMethods, "dimo_org")
+	require.NoError(t, ValidateTransition(genesis, ResolveControlState("did:dimo:org", []Operation{*genesis}), update, time.Now()))
 }

@@ -20,6 +20,8 @@ const (
 	vectorWalletKeyHex = "1111111111111111111111111111111111111111111111111111111111111111" // secp256k1
 	vectorPhoneKeyHex  = "2222222222222222222222222222222222222222222222222222222222222222" // P-256
 	vectorCLIKeyHex    = "3333333333333333333333333333333333333333333333333333333333333333" // secp256k1
+	vectorOrgRootHex   = "4444444444444444444444444444444444444444444444444444444444444444" // secp256k1, org root
+	vectorOrgKeyHex    = "5555555555555555555555555555555555555555555555555555555555555555" // P-256, #dimo_org
 )
 
 // Vector is one golden DID operation with every encoding of it.
@@ -70,13 +72,32 @@ func GenerateVectors() (VectorFile, error) {
 		return VectorFile{}, fmt.Errorf("phone did:key: %w", err)
 	}
 
+	orgRootBytes, err := hex.DecodeString(vectorOrgRootHex)
+	if err != nil {
+		return VectorFile{}, fmt.Errorf("org root key: %w", err)
+	}
+	orgRoot := secp256k1.PrivKeyFromBytes(orgRootBytes)
+	orgKeyBytes, err := hex.DecodeString(vectorOrgKeyHex)
+	if err != nil {
+		return VectorFile{}, fmt.Errorf("org key: %w", err)
+	}
+	orgKey, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), orgKeyBytes)
+	if err != nil {
+		return VectorFile{}, fmt.Errorf("org key: %w", err)
+	}
+	orgRootDID := dimocrypto.FromSecp256k1(orgRoot.PubKey()).DIDKey()
+	orgKeyDID, err := dimocrypto.EncodeDIDKey(&orgKey.PublicKey)
+	if err != nil {
+		return VectorFile{}, fmt.Errorf("org key did:key: %w", err)
+	}
+
 	// EIP-55 checksummed: the person-DID policy (spec §5) requires checksummed aliases.
 	alias := []string{"did:ethr:137:0xAB12cd34Ef56aB12Cd34Ef56ab12Cd34Ef56aB12"}
 	noServices := func() map[string]Service { return map[string]Service{} }
 
 	var cases []Vector
 	cids := map[string]string{}
-	add := func(name string, op *Operation) error {
+	add := func(name string, op *Operation, signer *secp256k1.PrivateKey, signerDID, signerHex string) error {
 		unsigned := op.ToUnsigned()
 		payload, err := json.Marshal(unsigned)
 		if err != nil {
@@ -96,7 +117,7 @@ func GenerateVectors() (VectorFile, error) {
 				return fmt.Errorf("%s: did: %w", name, err)
 			}
 		}
-		sig := signK1(wallet, payload)
+		sig := signK1(signer, payload)
 		cids[name] = cid
 		cases = append(cases, Vector{
 			Name:                name,
@@ -105,8 +126,8 @@ func GenerateVectors() (VectorFile, error) {
 			CBORHex:             hex.EncodeToString(cbor),
 			DID:                 didStr,
 			CID:                 cid,
-			SignerDIDKey:        walletDID,
-			SignerPrivateKeyHex: vectorWalletKeyHex,
+			SignerDIDKey:        signerDID,
+			SignerPrivateKeyHex: signerHex,
 			Sig:                 sig,
 		})
 		return nil
@@ -165,14 +186,42 @@ func GenerateVectors() (VectorFile, error) {
 				AlsoKnownAs: []string{}, Services: noServices(), Prev: prev("update-remove-device")}
 		}},
 	}
-	for _, s := range steps {
-		op := s.op()
-		if prevErr != nil {
-			return VectorFile{}, prevErr
+	orgSteps := []struct {
+		name string
+		op   func() *Operation
+	}{
+		{name: "org-genesis", op: func() *Operation {
+			return &Operation{Type: OpTypeCreate, RotationKeys: []string{orgRootDID},
+				VerificationMethods: map[string]string{"signing": orgRootDID}, AlsoKnownAs: []string{},
+				Services: map[string]Service{"dimo_org_host": {Type: "DimoOrgHost", Endpoint: "https://org-host.example.com"}}}
+		}},
+		{name: "org-update-add-dimo-org", op: func() *Operation {
+			return &Operation{Type: OpTypeCreate, RotationKeys: []string{orgRootDID},
+				VerificationMethods: map[string]string{"signing": orgRootDID, "dimo_org": orgKeyDID}, AlsoKnownAs: []string{},
+				Services: map[string]Service{"dimo_org_host": {Type: "DimoOrgHost", Endpoint: "https://org-host.example.com"}},
+				Prev:     prev("org-genesis")}
+		}},
+	}
+	run := func(list []struct {
+		name string
+		op   func() *Operation
+	}, signer *secp256k1.PrivateKey, signerDID, signerHex string) error {
+		for _, s := range list {
+			op := s.op()
+			if prevErr != nil {
+				return prevErr
+			}
+			if err := add(s.name, op, signer, signerDID, signerHex); err != nil {
+				return err
+			}
 		}
-		if err := add(s.name, op); err != nil {
-			return VectorFile{}, err
-		}
+		return nil
+	}
+	if err := run(steps, wallet, walletDID, vectorWalletKeyHex); err != nil {
+		return VectorFile{}, err
+	}
+	if err := run(orgSteps, orgRoot, orgRootDID, vectorOrgRootHex); err != nil {
+		return VectorFile{}, err
 	}
 	return VectorFile{Version: 1, Cases: cases}, nil
 }
