@@ -75,14 +75,33 @@ type JWKSAuthenticator struct {
 	audience string
 	fetch    func(ctx context.Context) ([]byte, error)
 	proofs   *dpop.Verifier
+	// now is the clock the refresh schedule runs on; nil means time.Now.
+	now func() time.Time
 
-	mu        sync.RWMutex
-	keys      map[string]*rsa.PublicKey
-	fetchedAt time.Time
+	mu   sync.Mutex
+	keys map[string]*rsa.PublicKey
+	// attemptedAt is when the key set was last fetched or tried: a failed
+	// fetch counts, so a dauth outage costs one fetch per interval, not one per
+	// request.
+	attemptedAt time.Time
+	// refreshing is closed when the fetch in flight ends; nil when none is.
+	// refreshingAll says it was started because the whole set was due, so even
+	// requests whose kid is known wait for it.
+	refreshing    chan struct{}
+	refreshingAll bool
 }
 
-// jwksRefreshInterval bounds how often an unknown key id triggers a refetch.
-const jwksRefreshInterval = time.Minute
+// The key set is fetched again every jwksTTL whatever the requests name, so a
+// key dauth has removed stops verifying within that time (dauth serves its
+// JWKS with max-age 300), and on a kid it does not hold at most once every
+// jwksRefreshInterval, so a new key is picked up promptly. Each fetch has
+// jwksFetchTimeout.
+const (
+	jwksTTL             = 5 * time.Minute
+	jwksRefreshInterval = time.Minute
+)
+
+var jwksFetchTimeout = 5 * time.Second
 
 // NewJWKSAuthenticator builds an authenticator over a static key set. issuer
 // is the iss claim a token must carry and audience a value its aud must
@@ -95,18 +114,20 @@ func NewJWKSAuthenticator(jwksJSON []byte, issuer, audience string) (*JWKSAuthen
 	if err != nil {
 		return nil, err
 	}
-	return &JWKSAuthenticator{issuer: issuer, audience: normalHostURL(audience), proofs: dpop.NewVerifier(), keys: keys, fetchedAt: time.Now()}, nil
+	return &JWKSAuthenticator{issuer: issuer, audience: normalHostURL(audience), proofs: dpop.NewVerifier(), keys: keys, attemptedAt: time.Now()}, nil
 }
 
-// NewJWKSAuthenticatorFromURL fetches the key set from url now and again
-// whenever a token names a key id it does not hold, at most once a minute.
+// NewJWKSAuthenticatorFromURL fetches the key set from url now, again every
+// five minutes so removed keys drop, and on a key id it does not hold at most
+// once a minute. Every fetch gives up after five seconds.
 func NewJWKSAuthenticatorFromURL(ctx context.Context, url, issuer, audience string) (*JWKSAuthenticator, error) {
+	client := &http.Client{Timeout: jwksFetchTimeout}
 	fetch := func(ctx context.Context) ([]byte, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return nil, err
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -166,27 +187,68 @@ func parseJWKS(data []byte) (map[string]*rsa.PublicKey, error) {
 	return keys, nil
 }
 
+func (a *JWKSAuthenticator) clock() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
+}
+
+// key returns the key kid names. When the set is due for a fetch, the request
+// that notices starts one, single-flight, and the request waits for it if its
+// kid is unknown or the whole set was due; a request whose kid is known waits
+// for no fetch an unknown kid started. A failed fetch keeps the keys there
+// were.
 func (a *JWKSAuthenticator) key(ctx context.Context, kid string) (*rsa.PublicKey, bool) {
-	a.mu.RLock()
+	a.mu.Lock()
 	k, ok := a.keys[kid]
-	stale := time.Since(a.fetchedAt) > jwksRefreshInterval
-	a.mu.RUnlock()
-	if ok || a.fetch == nil || !stale {
+	if a.fetch == nil {
+		a.mu.Unlock()
 		return k, ok
 	}
-	body, err := a.fetch(ctx)
-	if err != nil {
-		return nil, false
+	if a.refreshing == nil {
+		now := a.clock()
+		since := now.Sub(a.attemptedAt)
+		all := since >= jwksTTL
+		if all || (!ok && since >= jwksRefreshInterval) {
+			a.refreshing, a.refreshingAll, a.attemptedAt = make(chan struct{}), all, now
+			go a.refresh(a.refreshing)
+		}
 	}
-	keys, err := parseJWKS(body)
-	if err != nil {
+	wait := a.refreshing
+	if wait == nil || (ok && !a.refreshingAll) {
+		a.mu.Unlock()
+		return k, ok
+	}
+	a.mu.Unlock()
+	select {
+	case <-wait:
+	case <-ctx.Done():
 		return nil, false
 	}
 	a.mu.Lock()
-	a.keys, a.fetchedAt = keys, time.Now()
+	defer a.mu.Unlock()
 	k, ok = a.keys[kid]
-	a.mu.Unlock()
 	return k, ok
+}
+
+// refresh fetches the key set under its own deadline, detached from the
+// request that started it, and replaces the keys only on success.
+func (a *JWKSAuthenticator) refresh(done chan struct{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), jwksFetchTimeout)
+	defer cancel()
+	body, err := a.fetch(ctx)
+	var keys map[string]*rsa.PublicKey
+	if err == nil {
+		keys, err = parseJWKS(body)
+	}
+	a.mu.Lock()
+	if err == nil {
+		a.keys = keys
+	}
+	a.refreshing, a.refreshingAll = nil, false
+	a.mu.Unlock()
+	close(done)
 }
 
 // Authenticate implements Authenticator.
