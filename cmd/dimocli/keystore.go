@@ -151,3 +151,19 @@ func LoadOpening(did string) (*control.Opening, error) {
 	}
 	return &o, nil
 }
+
+func dpopKeyFilePath(did string) string {
+	name := strings.TrimPrefix(did, "did:dimo:")
+	return filepath.Join(keystoreDir(), name+".dpop.json")
+}
+
+// SaveDPoPKey stores the P-256 key a Turnkey-rooted DID's tokens are bound to.
+// It signs DPoP proofs only; the DID's own key stays in Turnkey.
+func SaveDPoPKey(did string, key *ecdsa.PrivateKey) error {
+	return writeKey(dpopKeyFilePath(did), did, key)
+}
+
+// LoadDPoPKey reads the key SaveDPoPKey stored.
+func LoadDPoPKey(did string) (*ecdsa.PrivateKey, error) {
+	return readKey(dpopKeyFilePath(did))
+}

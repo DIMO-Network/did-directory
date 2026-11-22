@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/signin"
 )
 
@@ -25,34 +28,75 @@ import (
 func runSignin(args []string) {
 	fs := flag.NewFlagSet("signin", flag.ExitOnError)
 	dauth := fs.String("dauth", defaultDauth(), "dauth base URL")
-	didFlag := fs.String("did", "", "DID to sign in as (its key must be in the keystore)")
+	didFlag := fs.String("did", "", "DID to sign in as (its key is in the keystore, or in Turnkey with the --turnkey flags)")
 	key := fs.String("key", "signing", "verification method fragment to sign with")
 	audience := fs.String("audience", "", "audience to request for the token (comma-separated)")
 	scope := fs.String("scope", "read", `what the token may do, space-separated: "read", "write", "approve"`)
+	server := fs.String("server", defaultServer(), "directory server URL, to find the Turnkey account behind the DID's key")
+	tk := bindTurnkeyFlags(fs)
 	fs.Parse(args)
 
 	if *didFlag == "" {
 		fmt.Fprintln(os.Stderr, "Error: --did is required")
 		os.Exit(1)
 	}
-	priv, err := LoadKey(*didFlag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	if err := tk.validate(); err != nil {
+		fatal(err)
 	}
 	var aud []string
 	if *audience != "" {
 		aud = strings.Split(*audience, ",")
 	}
-	token, expiresIn, err := signIn(*dauth, *didFlag, priv, *key, aud, *scope)
+	c := client.New(*server)
+	c.SetVerbose(isVerbose())
+	token, expiresIn, err := executeSignin(context.Background(), *dauth, *didFlag, *key, aud, *scope, tk, c)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 	if isVerbose() {
 		fmt.Fprintf(os.Stderr, "Signed in as %s (expires in %ds)\n", *didFlag, expiresIn)
 	}
 	fmt.Println(token)
+}
+
+// executeSignin signs in as didStr. With Turnkey flags the DID's key is a
+// Turnkey account (secp256k1): the challenge is signed through it, and the
+// token is bound to a fresh P-256 DPoP key stored as <did>.dpop.json once the
+// sign-in succeeds. Otherwise the keystore key does both, as before.
+func executeSignin(ctx context.Context, dauth, didStr, key string, aud []string, scope string, tk *turnkeyFlags, c *client.Client) (string, int, error) {
+	if !tk.enabled() {
+		priv, err := LoadKey(didStr)
+		if err != nil {
+			return "", 0, err
+		}
+		return signIn(dauth, didStr, priv, key, aud, scope)
+	}
+	_, current, err := getLatestCIDAndOp(ctx, c, didStr)
+	if err != nil {
+		return "", 0, fmt.Errorf("getting latest state: %w", err)
+	}
+	vm, ok := current.VerificationMethods[key]
+	if !ok {
+		return "", 0, fmt.Errorf("%s has no #%s verification method", didStr, key)
+	}
+	signer, err := tk.existingSigner(ctx, vm)
+	if err != nil {
+		return "", 0, err
+	}
+	dpopKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", 0, err
+	}
+	t, err := signin.SignIn(ctx, signin.Request{
+		Dauth: dauth, DID: didStr, Signer: signer.Sign, DPoPKey: dpopKey, KeyFragment: key, Audience: aud, Scope: scope,
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	if err := SaveDPoPKey(didStr, dpopKey); err != nil {
+		return "", 0, fmt.Errorf("save DPoP key: %w", err)
+	}
+	return t.Token, t.ExpiresIn, nil
 }
 
 // signIn runs dauth's challenge and token round trip for did with priv, the
