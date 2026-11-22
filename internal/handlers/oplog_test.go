@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -219,4 +220,89 @@ func TestSubmit_UnsignedUpdateReadsOnlyTheHead(t *testing.T) {
 	status, body = f.post("/"+o.did, raw)
 	assert.Equal(t, http.StatusConflict, status, string(body))
 	assert.Zero(t, st.log.Load())
+}
+
+// racingStore lands an operation from another writer the first time GetLog
+// runs after inject is set: between handleUpdate's read of the head and its
+// read of the log.
+type racingStore struct {
+	store.Store
+	mu     sync.Mutex
+	inject func() error
+	err    error
+}
+
+func (s *racingStore) GetLog(ctx context.Context, d string) ([]store.OperationRecord, error) {
+	s.mu.Lock()
+	inject := s.inject
+	s.inject = nil
+	s.mu.Unlock()
+	if inject != nil {
+		if err := inject(); err != nil {
+			s.mu.Lock()
+			s.err = err
+			s.mu.Unlock()
+		}
+	}
+	return s.Store.GetLog(ctx, d)
+}
+
+// The signature is checked against the head's rotation keys. If another
+// writer rotates them (K1 to K2) between that check and the append, an
+// operation K1 signed against the old head must not land after the rotation.
+func TestSubmit_HeadMovedBetweenReadsIs409(t *testing.T) {
+	st := &racingStore{Store: store.NewMemoryStore()}
+	f := newFixtureWith(t, st, 0)
+	o := f.ownedDID() // K1 is the rotation key
+	genesis := o.head
+
+	k2, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	dk2, err := dimocrypto.EncodeDIDKey(&k2.PublicKey)
+	require.NoError(t, err)
+	rotation := &did.Operation{Type: did.OpTypeCreate, RotationKeys: []string{dk2},
+		VerificationMethods: map[string]string{"signing": dk2}, AlsoKnownAs: []string{}, Services: map[string]did.Service{}, Prev: &genesis}
+	data, err := json.Marshal(rotation.ToUnsigned())
+	require.NoError(t, err)
+	rotation.Sig, err = dimocrypto.SignOperation(o.key, data)
+	require.NoError(t, err)
+	rotationCID, err := did.ComputeCID(rotation)
+	require.NoError(t, err)
+	st.inject = func() error {
+		return st.Store.AppendAfter(context.Background(), o.did, genesis, rotationCID, rotation)
+	}
+
+	// K1 signs it and its prev is the genesis: both pass against the head as
+	// handleUpdate first reads it.
+	status, body := o.submit(f, plainUpdate(o, "at://stale"))
+	require.NoError(t, st.err)
+	assert.Equal(t, http.StatusConflict, status, string(body))
+
+	log, err := st.Store.GetLog(context.Background(), o.did)
+	require.NoError(t, err)
+	require.Len(t, log, 2, "only the rotation landed")
+	assert.Equal(t, rotationCID, log[1].CID)
+}
+
+// R3-F2 follow-up: a full log is refused from a count, without reading the
+// log, so a replayed signed update costs one row and a COUNT each time.
+func TestSubmit_FullLogRefusedWithoutReadingIt(t *testing.T) {
+	st := &countingStore{Store: store.NewMemoryStore()}
+	f := newFixtureWith(t, st, 2)
+	o := f.ownedDID()
+	status, body := o.submit(f, plainUpdate(o, "at://one"))
+	require.Equal(t, http.StatusOK, status, string(body))
+
+	raw := o.signed(f, plainUpdate(o, "at://two"))
+	for range 3 {
+		st.reset()
+		status, body := f.post("/"+o.did, raw)
+		assert.Equal(t, http.StatusUnprocessableEntity, status, string(body))
+		assert.Contains(t, string(body), "operation log is full")
+		assert.Zero(t, st.log.Load(), "the full log was read")
+	}
+
+	// The tombstone exemption still holds.
+	status, body = o.submit(f, &did.Operation{Type: did.OpTypeTombstone})
+	assert.Equal(t, http.StatusOK, status, string(body))
 }

@@ -94,8 +94,8 @@ func (f *fixture) ownedDID() *owned {
 	return &owned{did: didStr, head: out["cid"], key: key, dk: dk}
 }
 
-// submit signs op with the DID's key, chains it to the head and posts it.
-func (o *owned) submit(f *fixture, op *did.Operation) (int, []byte) {
+// signed chains op to the head, signs it with the DID's key and encodes it.
+func (o *owned) signed(f *fixture, op *did.Operation) []byte {
 	f.t.Helper()
 	op.Prev = &o.head
 	data, err := json.Marshal(op.ToUnsigned())
@@ -104,7 +104,13 @@ func (o *owned) submit(f *fixture, op *did.Operation) (int, []byte) {
 	require.NoError(f.t, err)
 	raw, err := json.Marshal(op)
 	require.NoError(f.t, err)
-	status, body := f.post("/"+o.did, raw)
+	return raw
+}
+
+// submit signs op with the DID's key, chains it to the head and posts it.
+func (o *owned) submit(f *fixture, op *did.Operation) (int, []byte) {
+	f.t.Helper()
+	status, body := f.post("/"+o.did, o.signed(f, op))
 	if status == http.StatusOK {
 		var out map[string]string
 		require.NoError(f.t, json.Unmarshal(body, &out))

@@ -15,10 +15,13 @@ import (
 // and GET /:did/control for control era history.
 //
 // Each reads the DID's head first and the whole log only when the answer needs
-// the era history: a controlled DID's. An uncontrolled DID (a person or an
-// org, which dauth resolves at every sign-in) and a tombstone are answered from
-// one row. The store keeps no era summary, so a controlled DID still reads its
-// whole log; MAX_OPERATIONS_PER_DID and did.MaxOperationBytes bound it.
+// the era history. An uncontrolled, live DID (a person or an org, which dauth
+// resolves at every sign-in) is answered from one row on all three paths, and
+// resolve and /data answer a tombstone 410 from one row. /control on a
+// tombstone reads the log, since the tombstone may close a controlled DID's
+// last era, and answers 200 with deactivated set. The store keeps no era
+// summary, so a controlled DID still reads its whole log;
+// MAX_OPERATIONS_PER_DID and did.MaxOperationBytes bound it.
 type ResolveHandler struct {
 	store store.Store
 	log   zerolog.Logger

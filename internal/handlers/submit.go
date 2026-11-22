@@ -171,7 +171,28 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 		})
 	}
 
-	// The full log resolves the control eras and counts the operations.
+	// MAX_OPERATIONS_PER_DID, on a count, so a full log is refused without
+	// being read. A tombstone is still accepted on a full log, so a DID can
+	// always be deactivated: it is terminal, so the log ends at most one past
+	// the cap. The count is exact for the append below, which lands only while
+	// head is still the head; an operation that joined since head was read only
+	// raises it, and that append fails anyway.
+	if !op.IsTombstone() {
+		n, err := h.store.Count(c.Context(), didParam)
+		if err != nil {
+			h.log.Error().Err(err).Str("did", didParam).Msg("Failed to count operations")
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "internal error",
+			})
+		}
+		if n >= h.maxOps {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+				"error": fmt.Sprintf("operation log is full: a DID holds at most %d operations", h.maxOps),
+			})
+		}
+	}
+
+	// The full log resolves the control eras.
 	records, err := h.store.GetLog(c.Context(), didParam)
 	if err != nil {
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get operation log")
@@ -187,20 +208,12 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 
 	current := records[len(records)-1]
 	if current.CID != head.CID {
-		// Another writer appended between the two reads.
+		// Another writer appended between the two reads. The signature was
+		// checked against head's rotation keys, which may no longer be the
+		// DID's: the op must not land after the new head.
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"error":    "prev CID does not match current head",
 			"expected": current.CID,
-		})
-	}
-
-	// MAX_OPERATIONS_PER_DID. A tombstone is still accepted on a full log, so
-	// a DID can always be deactivated: it is terminal, so the log ends at most
-	// one past the cap. The count is race-free, since the append below only
-	// lands while current is still the head.
-	if !op.IsTombstone() && len(records) >= h.maxOps {
-		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
-			"error": fmt.Sprintf("operation log is full: a DID holds at most %d operations", h.maxOps),
 		})
 	}
 
@@ -226,13 +239,15 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 	}
 
 	// Store the operation, but only if the head is still the one validated
-	// against. Everything above — the prev check, the signature, the transition —
-	// was decided from `current`, and a concurrent writer may have moved on since.
-	if err := h.store.AppendAfter(c.Context(), didParam, current.CID, cid, op); err != nil {
+	// against. Everything above — the prev check, the signature against its
+	// rotation keys, the count, the transition — was decided from head (which
+	// is op.Prev), and a concurrent writer may have moved on since. The store
+	// enforces that, so it does not rest on the check above alone.
+	if err := h.store.AppendAfter(c.Context(), didParam, head.CID, cid, op); err != nil {
 		if store.IsHeadChanged(err) {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 				"error":    "prev CID does not match current head",
-				"expected": current.CID,
+				"expected": head.CID,
 			})
 		}
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to store update operation")
