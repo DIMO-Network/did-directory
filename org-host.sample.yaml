@@ -7,11 +7,38 @@ MASTER_KEY: ""
 # Where new orgs' #dimo_org keys live: local (sealed under MASTER_KEY) or kms.
 # Orgs already registered keep the backend their row names, so switching to kms
 # keeps MASTER_KEY needed until no local org remains. kms uses the AWS default
-# credential chain (IRSA in the cluster) and needs kms:CreateKey,
-# kms:CreateAlias, kms:TagResource, kms:Sign, kms:GetPublicKey,
-# kms:DescribeKey, kms:ListResourceTags and kms:ScheduleKeyDeletion.
+# credential chain (IRSA in the cluster). Each new key gets the account's
+# default key policy, which defers to IAM, so the role's IAM policy is the
+# whole boundary. Least privilege for the role, every key tagged org=<org DID>:
+#
+#   {"Version": "2012-10-17", "Statement": [
+#     {"Sid": "CreateOrgKeys", "Effect": "Allow",
+#      "Action": ["kms:CreateKey", "kms:TagResource"],
+#      "Resource": "*",
+#      "Condition": {"StringLike": {"aws:RequestTag/org": "did:dimo:*"}}},
+#     {"Sid": "AliasOrgKeys", "Effect": "Allow",
+#      "Action": "kms:CreateAlias",
+#      "Resource": ["arn:aws:kms:*:*:alias/dimo-org/*", "arn:aws:kms:*:*:key/*"]},
+#     {"Sid": "UseOrgKeys", "Effect": "Allow",
+#      "Action": ["kms:Sign", "kms:GetPublicKey", "kms:DescribeKey",
+#                 "kms:ListResourceTags", "kms:ScheduleKeyDeletion"],
+#      "Resource": "arn:aws:kms:*:*:key/*",
+#      "Condition": {"StringLike": {"aws:ResourceTag/org": "did:dimo:*"}}}]}
+#
+# CreateAlias needs the permission on the alias and on the key. It carries no
+# tag condition because it runs right after CreateKey and tag-based
+# authorization in KMS is eventually consistent (AWS documents up to five
+# minutes for tag changes); the alias ARN bounds it, and an aliased key is
+# still unusable without the org tag. A register the tag condition refuses in
+# that window is safe to retry: the alias finds the key the first attempt made.
+# Narrow the alias ARN to KMS_ALIAS_PREFIX, and the region and account
+# wildcards to yours.
 ORG_SIGNER: "local"
 KMS_REGION: ""
+# Give each environment its own prefix, for example alias/dimo-org/prod/ and
+# alias/dimo-org/dev/: an alias is derived from the org DID alone, so dev and
+# prod in one account would otherwise share aliases, and an org on both hosts
+# would get one key.
 KMS_ALIAS_PREFIX: "alias/dimo-org/"
 # Identity tokens (RS256, sub = member DID) are verified against this key set.
 IDENTITY_JWKS_URL: "http://localhost:8080/signin/keys"

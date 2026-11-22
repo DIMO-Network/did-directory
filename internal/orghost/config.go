@@ -24,6 +24,8 @@ type Settings struct {
 	// KMSRegion is the AWS region of the KMS keys; empty uses the SDK default.
 	KMSRegion string `yaml:"KMS_REGION"`
 	// KMSAliasPrefix prefixes each org key's alias; it must start with "alias/".
+	// Give each environment its own (alias/dimo-org/prod/): the rest of the
+	// alias is derived from the org DID alone.
 	KMSAliasPrefix string `yaml:"KMS_ALIAS_PREFIX"`
 	// IdentityJWKSURL is where the identity token issuer publishes its signing
 	// keys; IdentityJWKS is the same key set given inline, for development.
