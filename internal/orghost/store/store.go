@@ -24,6 +24,9 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrOrgExists is returned by CreateOrg for an org already on this host.
 	ErrOrgExists = errors.New("org already exists")
+	// ErrOrgKey is returned by CreateOrg for an org without exactly one of a
+	// sealed key and a KMS key.
+	ErrOrgKey = errors.New("an org needs exactly one of a sealed key and a KMS key")
 	// ErrHeadChanged is returned by AppendAfter when another writer moved the
 	// org's log head between the caller reading it and the append.
 	ErrHeadChanged = errors.New("repository head changed")
@@ -46,6 +49,14 @@ type Org struct {
 	// and KeyRef is set.
 	KeyRef    string
 	CreatedAt time.Time
+}
+
+// checkKey is the rule every store applies on CreateOrg: exactly one key.
+func (o *Org) checkKey() error {
+	if (len(o.KeyEnc) > 0) == (o.KeyRef != "") {
+		return ErrOrgKey
+	}
+	return nil
 }
 
 // Head is the position of an org's log: its last commit, or the zero Head for

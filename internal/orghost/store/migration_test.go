@@ -73,6 +73,11 @@ func TestPostgres_MigratesAPreKMSOrgsTable(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, has, "the legacy row is a local org")
 
+		// R4-F11: the migrated table refuses a row with no key, whoever writes it.
+		_, err = admin.Exec(ctx, `INSERT INTO `+schema+`.orgs (did) VALUES ($1)`, fmt.Sprintf("did:dimo:nokey%d", i))
+		require.Error(t, err, "start %d", i)
+		assert.Contains(t, err.Error(), "orgs_one_signing_key")
+
 		// The rest of the schema landed beside the migrated table, and a
 		// commit for the legacy org goes in against it.
 		head, err := s.Head(ctx, "did:dimo:legacy")
@@ -92,4 +97,8 @@ func TestPostgres_MigratesAPreKMSOrgsTable(t *testing.T) {
 	var tables int
 	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = $1`, schema).Scan(&tables))
 	assert.Equal(t, 6, tables, "orgs, commits, heads, parties, pending, dpop_proofs")
+	var checks int
+	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
+		WHERE n.nspname = $1 AND c.conname = 'orgs_one_signing_key'`, schema).Scan(&checks))
+	assert.Equal(t, 1, checks, "added once, across two starts")
 }

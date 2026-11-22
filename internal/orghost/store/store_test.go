@@ -702,3 +702,33 @@ func TestStore_AnyKMSKeyRef(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, ref)
 }
+
+// R4-F11: a row holds exactly one of a sealed key and a KMS key. One with
+// neither would be served and fail every write; one with both would sign with
+// whichever the router tried first.
+func TestStore_OrgNeedsExactlyOneKey(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			for label, o := range map[string]Org{
+				"neither":   {},
+				"empty key": {KeyEnc: []byte{}},
+				"both":      {KeyEnc: []byte("sealed"), KeyRef: "arn:aws:kms:us-east-1:111122223333:key/both"},
+			} {
+				o.DID = fmt.Sprintf("did:dimo:nokey%d-%d", time.Now().UnixNano(), orgCounter.Add(1))
+				assert.ErrorIs(t, s.CreateOrg(ctx, o), ErrOrgKey, label)
+				_, err := s.GetOrg(ctx, o.DID)
+				assert.True(t, IsNotFound(err), label)
+			}
+		})
+	}
+	pg, ok := stores(t)["postgres"]
+	if !ok {
+		return
+	}
+	// The database holds the line too, for writers other than CreateOrg.
+	_, err := pg.(*PostgresStore).pool.Exec(context.Background(), `INSERT INTO orgs (did) VALUES ($1)`,
+		fmt.Sprintf("did:dimo:raw%d", time.Now().UnixNano()))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "orgs_one_signing_key")
+}

@@ -42,6 +42,9 @@ func NewMemoryStore() *MemoryStore {
 }
 
 func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {
+	if err := org.checkKey(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	did := strings.Clone(org.DID)

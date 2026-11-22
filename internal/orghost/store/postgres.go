@@ -51,6 +51,17 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		ALTER TABLE orgs ALTER COLUMN signing_key_enc DROP NOT NULL;
 		-- The register daily cap counts the orgs created in the last day.
 		CREATE INDEX IF NOT EXISTS orgs_created_at_idx ON orgs (created_at);
+		-- Exactly one of the sealed key and the KMS key (R4-F11). Postgres has no
+		-- ADD CONSTRAINT IF NOT EXISTS, so it is added once to a table that
+		-- predates it; a start over rows that break it fails, naming it.
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint
+					WHERE conname = 'orgs_one_signing_key' AND conrelid = 'orgs'::regclass) THEN
+				ALTER TABLE orgs ADD CONSTRAINT orgs_one_signing_key
+					CHECK ((signing_key_enc IS NULL) <> (signing_key_ref IS NULL));
+			END IF;
+		END $$;
 		CREATE TABLE IF NOT EXISTS commits (
 			org          TEXT NOT NULL REFERENCES orgs(did),
 			seq          BIGINT NOT NULL,
@@ -150,12 +161,23 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 }
 
 func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
+	if err := org.checkKey(); err != nil {
+		return err
+	}
 	if org.CreatedAt.IsZero() {
 		org.CreatedAt = time.Now().UTC()
 	}
+	var keyEnc []byte // NULL, not an empty bytea, for a KMS org
+	if len(org.KeyEnc) > 0 {
+		keyEnc = org.KeyEnc
+	}
 	tag, err := s.pool.Exec(ctx,
 		`INSERT INTO orgs (did, signing_key_enc, signing_key_ref, created_at) VALUES ($1, $2, NULLIF($3, ''), $4) ON CONFLICT (did) DO NOTHING`,
-		org.DID, org.KeyEnc, org.KeyRef, org.CreatedAt)
+		org.DID, keyEnc, org.KeyRef, org.CreatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23514" && pgErr.ConstraintName == "orgs_one_signing_key" {
+		return ErrOrgKey
+	}
 	if err != nil {
 		return fmt.Errorf("insert org: %w", err)
 	}
