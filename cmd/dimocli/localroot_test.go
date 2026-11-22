@@ -111,4 +111,24 @@ func TestSignin_LocalSecp256k1Root(t *testing.T) {
 	require.NoError(t, err)
 	_, err = LoadDPoPKey(orgDID)
 	assert.NoError(t, err, "the DPoP key is kept for dimocli dpop")
+
+	// A second sign-in (another scope) binds to the same key, so the first
+	// token still takes proofs from dimocli dpop.
+	second, _, err := executeSignin(context.Background(), dauth, orgDID, "signing", nil, "read write", &turnkeyFlags{}, nil)
+	require.NoError(t, err)
+	for _, tok := range []string{token, second} {
+		proof, err := makeDPoPProof(orgDID, tok, "GET", "https://org.test/x", time.Now())
+		require.NoError(t, err)
+		_, err = dpop.NewVerifier().Verify(proof, "GET", "https://org.test/x", tok)
+		require.NoError(t, err)
+		claims, err := jwtClaims(tok)
+		require.NoError(t, err)
+		var c struct{ Cnf struct{ Jkt string } }
+		require.NoError(t, json.Unmarshal(claims, &c))
+		k, err := LoadDPoPKey(orgDID)
+		require.NoError(t, err)
+		jwk, err := publicJWK(&k.PublicKey)
+		require.NoError(t, err)
+		assert.Equal(t, c.Cnf.Jkt, jwkThumbprint(jwk), "every token is bound to the stored key")
+	}
 }

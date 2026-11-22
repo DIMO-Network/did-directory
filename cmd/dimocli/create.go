@@ -3,17 +3,25 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/pkg/client"
 	"github.com/DIMO-Network/did-directory/pkg/control"
+	"github.com/DIMO-Network/did-directory/pkg/dpop"
+	"github.com/DIMO-Network/did-directory/pkg/identity"
+	"github.com/DIMO-Network/did-directory/pkg/signin"
 )
 
 // createOptions is everything runCreate reads from its flags.
@@ -21,11 +29,14 @@ type createOptions struct {
 	Services   map[string]did.Service
 	Aliases    []string
 	Controller string
-	// Org marks an org DID: it carries a #dimo_org commit signing key, generated
-	// here unless OrgKey names one the org host already holds.
+	// Org marks an org DID: it carries a #dimo_org commit signing key. With
+	// OrgHost the host makes that key when the org registers there; OrgKey
+	// names one the host already holds; with neither the CLI generates one.
 	Org     bool
 	OrgKey  string
 	OrgHost string
+	// Dauth is where the new org signs in to register on OrgHost.
+	Dauth string
 }
 
 // createPlan is a genesis operation ready to sign, plus the private material
@@ -34,8 +45,12 @@ type createPlan struct {
 	Op *did.UnsignedOperation
 	// Opening is the control opening of a controlled DID.
 	Opening *control.Opening
-	// OrgKey is the generated #dimo_org private key, nil when --org-key was given.
+	// OrgKey is the generated #dimo_org private key, nil when --org-key was
+	// given or the host makes the key.
 	OrgKey *ecdsa.PrivateKey
+	// Register says the org registers on its host once the genesis lands, and
+	// the #dimo_org key the host returns is published then.
+	Register bool
 }
 
 // buildCreate turns the options into an unsigned genesis operation whose
@@ -49,8 +64,9 @@ func buildCreate(opts createOptions, rotationKey string) (*createPlan, error) {
 	if services == nil {
 		services = map[string]did.Service{}
 	}
-	if opts.OrgHost != "" {
-		services = withOrgHost(services, opts.OrgHost)
+	host := strings.TrimRight(opts.OrgHost, "/")
+	if host != "" {
+		services = withOrgHost(services, host)
 	}
 
 	plan := &createPlan{Op: &did.UnsignedOperation{
@@ -75,7 +91,14 @@ func buildCreate(opts createOptions, rotationKey string) (*createPlan, error) {
 	}
 
 	plan.Op.VerificationMethods = map[string]string{"signing": rotationKey}
-	if opts.Org || opts.OrgKey != "" || opts.OrgHost != "" {
+	if host != "" && opts.OrgKey == "" {
+		// The host makes the key at register: under ORG_SIGNER=kms it never
+		// takes one, so a key generated here would be one nobody serving the org
+		// holds (R7-F8).
+		plan.Register = true
+		return plan, nil
+	}
+	if opts.Org || opts.OrgKey != "" {
 		didKey, priv, err := resolveOrgKey(orgKeyChoice{Given: opts.OrgKey, Generate: true})
 		if err != nil {
 			return nil, err
@@ -92,9 +115,10 @@ func runCreate(args []string) {
 	service := fs.String("service", "", "service endpoints as id=type:endpoint (comma-separated)")
 	alias := fs.String("alias", "", "also-known-as aliases (comma-separated)")
 	controller := fs.String("controller", "", "controller of record DID; creates a controlled asset DID (e.g., a vehicle) with no signing key")
-	org := fs.Bool("org", false, "create an org DID with a #dimo_org repository commit signing key")
+	org := fs.Bool("org", false, "create an org DID with a #dimo_org repository commit signing key (generated here unless --org-host or --org-key)")
 	orgKey := fs.String("org-key", "", "did:key to publish as #dimo_org when the org host already holds the private half (implies --org)")
-	orgHost := fs.String("org-host", "", "org host URL, published as the #dimo_org_host service entry (implies --org)")
+	orgHost := fs.String("org-host", "", "org host URL, published as the #dimo_org_host service entry; without --org-key the new org then signs in to --dauth, registers there, and publishes the #dimo_org key the host makes (implies --org)")
+	dauth := fs.String("dauth", defaultDauth(), "dauth base URL, where a new org signs in to register on --org-host")
 	tk := bindTurnkeyFlags(fs)
 	fs.Func("turnkey-index", "create the Turnkey account at m/44'/60'/0'/0/<i> rather than after the wallet's highest, which takes a listing of the wallet", func(v string) error {
 		i, err := strconv.ParseUint(v, 10, 31)
@@ -120,6 +144,7 @@ func runCreate(args []string) {
 		Org:        *org,
 		OrgKey:     *orgKey,
 		OrgHost:    *orgHost,
+		Dauth:      *dauth,
 	}
 	if err := parseServices(*service, opts.Services); err != nil {
 		fatal(err)
@@ -209,8 +234,75 @@ func executeCreate(ctx context.Context, c *client.Client, opts createOptions, si
 			fmt.Fprintf(out, "Org key stored at: %s\n", orgKeyFilePath(derivedDID))
 		}
 	}
-	if host, ok := plan.Op.Services[OrgHostServiceID]; ok {
+	host, ok := plan.Op.Services[OrgHostServiceID]
+	if ok {
 		fmt.Fprintf(out, "Org host (#%s): %s\n", OrgHostServiceID, host.Endpoint)
 	}
+	if !plan.Register {
+		return derivedDID, nil
+	}
+
+	// The DID now names the host, which register checks: sign in as the org,
+	// register, and publish the key the host made.
+	finish := fmt.Sprintf("register it on %s and publish the key it returns with: dimocli update --did %s --org-key <key>", host.Endpoint, derivedDID)
+	orgDIDKey, err := registerOnHost(ctx, opts.Dauth, host.Endpoint, derivedDID, signer)
+	if err != nil {
+		return derivedDID, fmt.Errorf("%s was created, but registering it on its org host failed: %w; to finish, %s", derivedDID, err, finish)
+	}
+	upd, err := buildUpdate(op, resp.CID, updateOptions{OrgKey: orgDIDKey})
+	if err != nil {
+		return derivedDID, err
+	}
+	published, err := signOpWith(ctx, signer, upd.Op)
+	if err != nil {
+		return derivedDID, fmt.Errorf("%s is registered on %s with key %s, but signing the update that publishes it failed: %w; to finish, run dimocli update --did %s --org-key %s",
+			derivedDID, host.Endpoint, orgDIDKey, err, derivedDID, orgDIDKey)
+	}
+	updated, err := c.Submit(ctx, derivedDID, published)
+	if err != nil {
+		return derivedDID, fmt.Errorf("%s is registered on %s with key %s, but publishing it failed: %w; to finish, run dimocli update --did %s --org-key %s",
+			derivedDID, host.Endpoint, orgDIDKey, err, derivedDID, orgDIDKey)
+	}
+	fmt.Fprintf(out, "Registered on %s\n", host.Endpoint)
+	fmt.Fprintf(out, "Org commit key (#%s, made by the host): %s\n", OrgKeyID, orgDIDKey)
+	fmt.Fprintf(out, "CID: %s\n", updated.CID)
 	return derivedDID, nil
+}
+
+// registerOnHost signs in to dauth as the org, for host with scope approve,
+// and registers the org there with no key of its own: the host makes the
+// #dimo_org key (in KMS, or sealed under its master key) and returns its
+// did:key. The token is bound to a fresh P-256 key, whatever the root is.
+func registerOnHost(ctx context.Context, dauth, host, org string, signer opSigner) (string, error) {
+	dpopKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	t, err := signin.SignIn(ctx, signin.Request{
+		Dauth: dauth, DID: org, Signer: signer.Sign, DPoPKey: dpopKey, KeyFragment: "signing",
+		Audience: []string{host}, Scope: identity.ScopeApprove,
+	})
+	if err != nil {
+		return "", fmt.Errorf("sign in to %s for %s: %w", dauth, host, err)
+	}
+	url := host + "/orgs/" + org
+	proof, err := dpopProof(dpopKey, http.MethodPost, url, t.Token, time.Now())
+	if err != nil {
+		return "", err
+	}
+	var reg struct {
+		DID string `json:"did"`
+		Key string `json:"key"`
+	}
+	headers := map[string]string{"Authorization": dpop.TokenType + " " + t.Token, dpop.HeaderName: proof}
+	if err := sendJSON(http.MethodPost, url, headers, map[string]any{}, &reg); err != nil {
+		return "", fmt.Errorf("register on %s: %w", host, err)
+	}
+	if reg.DID != org {
+		return "", fmt.Errorf("register on %s answered for %q, not %s", host, reg.DID, org)
+	}
+	if _, err := dimocrypto.DecodeDIDKey(reg.Key); err != nil {
+		return "", fmt.Errorf("register on %s returned a key that is not a did:key: %w", host, err)
+	}
+	return reg.Key, nil
 }

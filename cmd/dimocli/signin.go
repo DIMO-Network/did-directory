@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,10 +25,10 @@ import (
 // operations) and prints the identity token, which is what the org host and
 // dauth's /exchange take. Every request that presents the token carries a
 // proof from its DPoP key (see `dimocli dpop`). For a key in the local
-// keystore, that key is the DPoP key too. For a key in Turnkey (the --turnkey
-// flags), the challenge is signed through Turnkey and the token is bound to a
-// fresh P-256 key, stored as <did>.dpop.json; the onboarding credential is
-// refused.
+// keystore, a P-256 key is the DPoP key too. For a key in Turnkey (the
+// --turnkey flags) or a secp256k1 keystore root, the challenge is signed with
+// it and the token is bound to a P-256 key stored as <did>.dpop.json, made on
+// the first sign-in; the onboarding credential is refused.
 func runSignin(args []string) {
 	fs := flag.NewFlagSet("signin", flag.ExitOnError)
 	dauth := fs.String("dauth", defaultDauth(), "dauth base URL")
@@ -64,8 +65,9 @@ func runSignin(args []string) {
 
 // executeSignin signs in as didStr. With Turnkey flags the DID's key is a
 // Turnkey account (secp256k1): the challenge is signed through it, and the
-// token is bound to a fresh P-256 DPoP key stored as <did>.dpop.json once the
-// sign-in succeeds. Otherwise the keystore key does both, as before.
+// token is bound to the P-256 DPoP key stored as <did>.dpop.json (made on the
+// first sign-in). A keystore secp256k1 root (a local org's) goes the same way;
+// a keystore P-256 key does both, as before.
 func executeSignin(ctx context.Context, dauth, didStr, key string, aud []string, scope string, tk *turnkeyFlags, c *client.Client) (string, int, error) {
 	if !tk.enabled() {
 		local, err := loadSigner(didStr)
@@ -97,13 +99,20 @@ func executeSignin(ctx context.Context, dauth, didStr, key string, aud []string,
 	return signInBound(ctx, dauth, didStr, key, aud, scope, signer.Sign)
 }
 
-// signInBound signs in as didStr with sign signing the challenge, binds the
-// token to a fresh P-256 DPoP key, and stores that key as <did>.dpop.json once
-// the sign-in succeeds, for dimocli dpop.
+// signInBound signs in as didStr with sign signing the challenge, and binds
+// the token to the P-256 DPoP key stored as <did>.dpop.json, making and
+// storing one on the first sign-in. Every token is bound to the same key, so
+// dimocli dpop proves any of them, as it does for a keystore P-256 root.
 func signInBound(ctx context.Context, dauth, didStr, key string, aud []string, scope string, sign func(context.Context, []byte) (string, error)) (string, int, error) {
-	dpopKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return "", 0, err
+	dpopKey, err := LoadDPoPKey(didStr)
+	fresh := errors.Is(err, os.ErrNotExist)
+	switch {
+	case fresh:
+		if dpopKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
+			return "", 0, err
+		}
+	case err != nil:
+		return "", 0, fmt.Errorf("DPoP key: %w", err)
 	}
 	t, err := signin.SignIn(ctx, signin.Request{
 		Dauth: dauth, DID: didStr, Signer: sign, DPoPKey: dpopKey, KeyFragment: key, Audience: aud, Scope: scope,
@@ -111,8 +120,10 @@ func signInBound(ctx context.Context, dauth, didStr, key string, aud []string, s
 	if err != nil {
 		return "", 0, err
 	}
-	if err := SaveDPoPKey(didStr, dpopKey); err != nil {
-		return "", 0, fmt.Errorf("save DPoP key: %w", err)
+	if fresh {
+		if err := SaveDPoPKey(didStr, dpopKey); err != nil {
+			return "", 0, fmt.Errorf("save DPoP key: %w", err)
+		}
 	}
 	return t.Token, t.ExpiresIn, nil
 }

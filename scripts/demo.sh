@@ -500,19 +500,19 @@ info "An org DID carries two keys: #signing, which its service uses to sign in,"
 info "and #dimo_org, the key the org host signs every commit of its repository"
 info "with. The document also names the host (#dimo_org_host)."
 
-RENTAL_CO=$(create --org --org-host "$ORG_HOST_URL" --alias "rentalco.example")
+step "RentalCo's DID names the host; the CLI signs in as RentalCo and registers its repository..."
+info "dimocli create publishes the DID with #dimo_org_host, signs in to dauth with"
+info "the new #signing key, and registers on the host, which makes the #dimo_org"
+info "key and seals it at rest. The CLI then publishes the key the host returned."
+info "From here on only the host signs commits."
+RENTAL_CO=$(create --org --org-host "$ORG_HOST_URL" --dauth "$DAUTH_URL" --alias "rentalco.example")
 created "RentalCo" "$RENTAL_CO"
 "$DIMOCLI" resolve -server "$DIRECTORY_URL" "$RENTAL_CO" | jq '{verificationMethod, service}' | show
-
-step "RentalCo signs in to dauth with its #signing key and registers its repository..."
-info "The CLI generated the #dimo_org key; the host takes the private half and"
-info "seals it at rest. From here on only the host signs commits."
 RENTAL_CO_TOKEN=$(signin "$RENTAL_CO")
-RENTAL_CO_ORG_KEY=$(jq -r .privateKeyBase64 "$KEYS/${RENTAL_CO#did:dimo:}.org.json")
-host POST "/orgs/$RENTAL_CO" "$(signin "$RENTAL_CO" approve)" "$(jq -cn --arg k "$RENTAL_CO_ORG_KEY" '{privateKey: $k}')"
-expect 201 "repository registered"
+host GET "/orgs/$RENTAL_CO" "$RENTAL_CO_TOKEN"
+expect 200 "repository registered"
 HOST_KEY=$(echo "$BODY" | jq -r .key)
-if [ "$HOST_KEY" = "$("$DIMOCLI" pubkey --org "$RENTAL_CO")" ]; then
+if [ "$HOST_KEY" = "$(curl -s "$DIRECTORY_URL/$RENTAL_CO/log/audit" | jq -r '.[-1].operation.verificationMethods.dimo_org')" ]; then
     success "the host's commit key is the #dimo_org the directory publishes: $HOST_KEY"
 else
     die "the host's key does not match #dimo_org"
@@ -618,7 +618,7 @@ header "Step 3: Three partners"
 
 INSURER=$(create --alias "claims.insurer.example")
 FINANCIAL_CO=$(create --alias "financialco.example")
-FLEET_CO=$(create --org --org-host "$ORG_HOST_URL" --alias "fleetco.example")
+FLEET_CO=$(create --org --org-host "$ORG_HOST_URL" --dauth "$DAUTH_URL" --alias "fleetco.example")
 INTEGRATOR=$(create --alias "integrator.example")
 created "Insurer" "$INSURER"
 created "FinancialCo" "$FINANCIAL_CO"
@@ -672,10 +672,10 @@ approve "$RENTAL_CO" "$(echo "$BODY" | jq -r .pending)" "$CAROL" "Carol approves
 FLEET_CO_URI="at://$RENTAL_CO/network.dimo.delegation/fleetco"
 
 echo ""
-step "FleetCo registers its own repository and redelegates telemetry to its integrator..."
+step "FleetCo, registered on the host when it was created, redelegates telemetry to its integrator..."
 FLEET_CO_TOKEN=$(signin "$FLEET_CO")
-host POST "/orgs/$FLEET_CO" "$(signin "$FLEET_CO" approve)" "$(jq -cn --arg k "$(jq -r .privateKeyBase64 "$KEYS/${FLEET_CO#did:dimo:}.org.json")" '{privateKey: $k}')"
-expect 201 "FleetCo's repository registered"
+host GET "/orgs/$FLEET_CO" "$FLEET_CO_TOKEN"
+expect 200 "FleetCo's repository registered"
 host PUT "/parties/$FLEET_CO" "$DIMO_TOKEN" '{"kind":"org","operator":true}'
 expect 200 "DIMO attests FleetCo"
 REC=$(grant "$FLEET_CO" "$INTEGRATOR" '{"inherit":true}' "telemetry:read" analytics "{\"dimo:basis\":[\"$FLEET_CO_URI\"]}")
