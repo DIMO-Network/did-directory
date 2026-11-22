@@ -100,6 +100,9 @@ func runCreate(args []string) {
 	if err := tk.validate(); err != nil {
 		fatal(err)
 	}
+	if err := tk.refuseUnlessCar(*controller != ""); err != nil {
+		fatal(err)
+	}
 
 	opts := createOptions{
 		Services:   map[string]did.Service{},

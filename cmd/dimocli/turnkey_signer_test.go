@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
@@ -334,7 +335,8 @@ func TestBuildRotateToTurnkey_OnlyRotationKeysAndSigningChange(t *testing.T) {
 
 func TestResolveSigner_OnboardingCredentialRefusedForTransfersAndRevocations(t *testing.T) {
 	f := newFakeTurnkey(t, 0)
-	cur := &did.Operation{RotationKeys: []string{f.didKeyAt(t, "m/44'/60'/0'/0/0")}}
+	car := carOp(t, f.didKeyAt(t, "m/44'/60'/0'/0/0"))
+	cur := &car
 
 	_, err := resolveSigner(context.Background(), tkFlags(f, true), "did:dimo:v", cur, purposeTransfer)
 	require.Error(t, err)
@@ -349,6 +351,14 @@ func TestResolveSigner_OnboardingCredentialRefusedForTransfersAndRevocations(t *
 	sg, err = resolveSigner(context.Background(), tkFlags(f, true), "did:dimo:v", cur, purposeUpdate)
 	require.NoError(t, err)
 	assert.Equal(t, cur.RotationKeys[0], sg.DIDKey())
+
+	// An org's update is not the onboarding credential's to sign.
+	org := orgOp(cur.RotationKeys[0])
+	_, err = resolveSigner(context.Background(), tkFlags(f, true), "did:dimo:org", &org, purposeUpdate)
+	require.Error(t, err)
+	assert.Equal(t, errCarsOnly, err.Error())
+	_, err = resolveSigner(context.Background(), tkFlags(f, false), "did:dimo:org", &org, purposeUpdate)
+	require.NoError(t, err, "the admin credential still signs it")
 }
 
 func TestTurnkeyFlags_Validate(t *testing.T) {
@@ -623,4 +633,118 @@ func TestEthAddress_KnownVector(t *testing.T) {
 	one.SetInt(1)
 	k := secp256k1.NewPrivateKey(&one)
 	assert.Equal(t, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf", ethAddress(k.PubKey()))
+}
+
+// --- the onboarding credential only ever signs car DIDs ---
+
+// countingServer answers 404 to everything and counts the requests.
+func countingServer(t *testing.T) (url string, calls *atomic.Int64) {
+	t.Helper()
+	calls = &atomic.Int64{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, calls
+}
+
+// opDirectory serves didStr whose latest operation is current, and records
+// what is submitted.
+func opDirectory(t *testing.T, didStr string, current did.Operation) (url string, ops *[]*did.Operation) {
+	t.Helper()
+	var mu sync.Mutex
+	ops = &[]*did.Operation{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/log/audit"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"cid": "bafyprev", "operation": current}})
+		case r.Method == http.MethodPost:
+			var op did.Operation
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&op))
+			mu.Lock()
+			*ops = append(*ops, &op)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"did":"` + didStr + `","cid":"bafynew"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, ops
+}
+
+const errCarsOnly = "the onboarding credential can only sign car DIDs"
+
+func onboardingArgs(t *testing.T, baseURL string) []string {
+	t.Helper()
+	keyPath, _ := writeAPIKey(t)
+	return []string{"--turnkey-org", "o", "--turnkey-wallet", "w", "--turnkey-api-key", keyPath, "--turnkey-base-url", baseURL}
+}
+
+func TestCreate_OnboardingCredentialOnlyCreatesCars(t *testing.T) {
+	tkURL, calls := countingServer(t)
+	dirURL, ops := opDirectory(t, "did:dimo:x", did.Operation{})
+	tk := onboardingArgs(t, tkURL)
+	for _, args := range [][]string{
+		{"create", "--org"},
+		{"create", "--org-host", "https://h.example"},
+		{"create", "--alias", "person.example"},
+	} {
+		args = append(append(args, tk...), "--server", dirURL)
+		stderr, code := runDimocli(t, args...)
+		assert.Equal(t, 1, code, args[1])
+		assert.Contains(t, stderr, errCarsOnly, args[1])
+	}
+	assert.Zero(t, calls.Load(), "refused before any Turnkey call")
+	assert.Empty(t, *ops)
+}
+
+// orgOp is an org DID's operation: no control commitment, a #signing key.
+func orgOp(rotationKey string) did.Operation {
+	return did.Operation{Type: did.OpTypeCreate, RotationKeys: []string{rotationKey},
+		VerificationMethods: map[string]string{"signing": rotationKey}}
+}
+
+// carOp is a car DID's operation: controlled, no verification methods.
+func carOp(t *testing.T, rotationKey string) did.Operation {
+	t.Helper()
+	_, commitment, err := newCommitment("did:dimo:fleet", 0)
+	require.NoError(t, err)
+	return did.Operation{Type: did.OpTypeCreate, RotationKeys: []string{rotationKey}, ControlCommitment: &commitment}
+}
+
+func TestRotateAndUpdate_OnboardingCredentialRefusesNonCarDIDs(t *testing.T) {
+	tkURL, calls := countingServer(t)
+	dirURL, ops := opDirectory(t, "did:dimo:org", orgOp(newSecpDIDKey(t)))
+	tk := onboardingArgs(t, tkURL)
+	for _, args := range [][]string{
+		{"rotate", "--did", "did:dimo:org"},
+		{"rotate", "--did", "did:dimo:org", "--to-turnkey"},
+		{"update", "--did", "did:dimo:org", "--alias", "at://org.example"},
+	} {
+		args = append(append(args, tk...), "--server", dirURL)
+		stderr, code := runDimocli(t, args...)
+		assert.Equal(t, 1, code, strings.Join(args[:3], " "))
+		assert.Contains(t, stderr, errCarsOnly, strings.Join(args[:3], " "))
+	}
+	assert.Zero(t, calls.Load(), "refused before any Turnkey call")
+	assert.Empty(t, *ops)
+}
+
+func TestRotateAndUpdate_OnboardingCredentialSignsCarDIDs(t *testing.T) {
+	for _, cmd := range [][]string{
+		{"rotate", "--did", "did:dimo:car"},
+		{"update", "--did", "did:dimo:car", "--alias", "vin-1.example"},
+	} {
+		f := newFakeTurnkey(t, 0)
+		srv := turnkeyHTTPStub(t, f, "ACTIVITY_STATUS_COMPLETED")
+		old := f.didKeyAt(t, "m/44'/60'/0'/0/0")
+		dirURL, ops := opDirectory(t, "did:dimo:car", carOp(t, old))
+		args := append(append(cmd, onboardingArgs(t, srv.URL)...), "--server", dirURL)
+		stderr, code := runDimocli(t, args...)
+		require.Equal(t, 0, code, stderr)
+		require.Len(t, *ops, 1, cmd[0])
+		verifyOp(t, old, (*ops)[0])
+	}
 }

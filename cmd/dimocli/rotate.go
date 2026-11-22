@@ -39,6 +39,11 @@ func runRotate(args []string) {
 		fmt.Fprintf(os.Stderr, "Error getting latest state: %v\n", err)
 		os.Exit(1)
 	}
+	// Before either key is touched: --to-turnkey would otherwise put an org's
+	// root in the fleet wallet.
+	if err := tk.refuseUnlessCar(currentOp.IsControlled()); err != nil {
+		fatal(err)
+	}
 
 	// Sign with the OLD key: from the keystore when moving into Turnkey, else
 	// wherever the flags say it lives.

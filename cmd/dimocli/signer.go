@@ -64,13 +64,15 @@ const errOnboardingSignin = "the onboarding credential can't sign in as an org"
 
 const errOnboardingRefused = "the onboarding credential can't sign transfers or revocations"
 
+const errOnboardingCarsOnly = "the onboarding credential can only sign car DIDs"
+
 // turnkeyFlags are the flags that select Turnkey over the file keystore.
 type turnkeyFlags struct {
 	Org    string
 	Wallet string
 	// APIKey is the batch-scoped onboarding user's credential: it can create
-	// accounts and sign in the fleet wallet, and dimocli never lets it sign a
-	// transfer or a revocation (decision 13).
+	// accounts and sign in the fleet wallet, and dimocli lets it sign only car
+	// (controlled) DIDs, and never a transfer or a revocation (decision 13).
 	APIKey string
 	// AdminAPIKey is an unrestricted credential for the same sub-org.
 	AdminAPIKey string
@@ -84,7 +86,7 @@ func bindTurnkeyFlags(fs *flag.FlagSet) *turnkeyFlags {
 	t := &turnkeyFlags{}
 	fs.StringVar(&t.Org, "turnkey-org", "", "Turnkey sub-organization id holding the key")
 	fs.StringVar(&t.Wallet, "turnkey-wallet", "", "Turnkey wallet id: new keys are its next account")
-	fs.StringVar(&t.APIKey, "turnkey-api-key", "", "path to the batch-scoped onboarding user's API key JSON {publicKey, privateKey}; it can't sign transfers or revocations")
+	fs.StringVar(&t.APIKey, "turnkey-api-key", "", "path to the batch-scoped onboarding user's API key JSON {publicKey, privateKey}; it signs car DIDs only, and no transfers or revocations")
 	fs.StringVar(&t.AdminAPIKey, "turnkey-admin-api-key", "", "path to an unrestricted Turnkey API key JSON {publicKey, privateKey}")
 	fs.StringVar(&t.BaseURL, "turnkey-base-url", defaultTurnkeyBaseURL, "Turnkey API base URL")
 	return t
@@ -124,6 +126,15 @@ func (t *turnkeyFlags) refuseOnboarding(msg string) error {
 
 // refuseSensitive is the transfer and revocation guard.
 func (t *turnkeyFlags) refuseSensitive() error { return t.refuseOnboarding(errOnboardingRefused) }
+
+// refuseUnlessCar is the create, rotate and update guard: the onboarding
+// credential signs car (controlled) DIDs only, never an org's or a person's.
+func (t *turnkeyFlags) refuseUnlessCar(isCar bool) error {
+	if isCar {
+		return nil
+	}
+	return t.refuseOnboarding(errOnboardingCarsOnly)
+}
 
 func (t *turnkeyFlags) client() (turnkeyAPI, error) {
 	if t.api != nil {
@@ -195,6 +206,9 @@ func resolveSigner(ctx context.Context, tk *turnkeyFlags, didStr string, current
 		if err := tk.refuseSensitive(); err != nil {
 			return nil, err
 		}
+	}
+	if err := tk.refuseUnlessCar(current.IsControlled()); err != nil {
+		return nil, err
 	}
 	if len(current.RotationKeys) == 0 {
 		return nil, errors.New("the DID has no rotation key")
