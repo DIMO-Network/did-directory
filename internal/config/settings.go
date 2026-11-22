@@ -18,6 +18,9 @@ type Settings struct {
 	ExportPageSize      int    `yaml:"EXPORT_PAGE_SIZE"`
 }
 
+// DefaultMaxOperationsPerDID is MAX_OPERATIONS_PER_DID when it is not set.
+const DefaultMaxOperationsPerDID = 1000
+
 // LoadConfig reads a YAML settings file and returns the parsed Settings.
 // Environment variables override YAML values when set.
 func LoadConfig(path string) (*Settings, error) {
@@ -25,7 +28,7 @@ func LoadConfig(path string) (*Settings, error) {
 		Port:                8080,
 		MonitoringPort:      8888,
 		LogLevel:            "info",
-		MaxOperationsPerDID: 1000,
+		MaxOperationsPerDID: DefaultMaxOperationsPerDID,
 		ExportPageSize:      100,
 	}
 

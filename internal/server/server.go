@@ -73,7 +73,7 @@ func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 	})
 
 	// Initialize handlers.
-	submitHandler := handlers.NewSubmitHandler(st, log)
+	submitHandler := handlers.NewSubmitHandler(st, cfg.MaxOperationsPerDID, log)
 	resolveHandler := handlers.NewResolveHandler(st, log)
 	auditHandler := handlers.NewAuditHandler(st, log)
 	exportHandler := handlers.NewExportHandler(st, cfg.ExportPageSize, log)

@@ -56,7 +56,15 @@ const (
 	// MaxDIDKeyBytes bounds each did:key string, rotation key or verification
 	// method. A did:key of either supported curve is 57 bytes.
 	MaxDIDKeyBytes = didkey.MaxLength
+	// MaxOperationBytes bounds an operation's stored (JSON) encoding, so no
+	// log row is large and a whole log is at most MAX_OPERATIONS_PER_DID times
+	// this.
+	MaxOperationBytes = 16 << 10
 )
+
+// ErrOperationTooLarge is wrapped by ValidateCreate's and ValidateUpdate's
+// error for an operation whose encoding exceeds MaxOperationBytes.
+var ErrOperationTooLarge = errors.New("operation too large")
 
 // Service represents a DID service endpoint.
 type Service struct {
@@ -167,8 +175,8 @@ func validateState(op *Operation) error {
 	return nil
 }
 
-// validateLimits checks the key counts and the length of every did:key. It
-// decodes nothing, so it runs first.
+// validateLimits checks the key counts, the length of every did:key and the
+// operation's encoded size. It decodes nothing, so it runs first.
 func validateLimits(op *Operation) error {
 	if n := len(op.RotationKeys); n > MaxRotationKeys {
 		return fmt.Errorf("at most %d rotation keys, got %d", MaxRotationKeys, n)
@@ -185,6 +193,14 @@ func validateLimits(op *Operation) error {
 		if len(op.VerificationMethods[id]) > MaxDIDKeyBytes {
 			return fmt.Errorf("verification method %q is longer than %d bytes", id, MaxDIDKeyBytes)
 		}
+	}
+	// The encoding the store keeps.
+	encoded, err := json.Marshal(op)
+	if err != nil {
+		return fmt.Errorf("encode operation: %w", err)
+	}
+	if len(encoded) > MaxOperationBytes {
+		return fmt.Errorf("%w: %d bytes encoded, at most %d", ErrOperationTooLarge, len(encoded), MaxOperationBytes)
 	}
 	return nil
 }

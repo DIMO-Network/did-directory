@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/DIMO-Network/did-directory/internal/config"
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/internal/store"
 	"github.com/gofiber/fiber/v2"
@@ -13,16 +15,35 @@ import (
 
 // SubmitHandler handles POST /:did for submitting new operations.
 type SubmitHandler struct {
-	store store.Store
-	log   zerolog.Logger
+	store  store.Store
+	maxOps int
+	log    zerolog.Logger
 }
 
-// NewSubmitHandler creates a new SubmitHandler.
-func NewSubmitHandler(s store.Store, log zerolog.Logger) *SubmitHandler {
-	return &SubmitHandler{
-		store: s,
-		log:   log.With().Str("handler", "submit").Logger(),
+// NewSubmitHandler creates a new SubmitHandler. maxOps is the most operations
+// one DID's log may hold (MAX_OPERATIONS_PER_DID); zero or less means
+// config.DefaultMaxOperationsPerDID.
+func NewSubmitHandler(s store.Store, maxOps int, log zerolog.Logger) *SubmitHandler {
+	if maxOps <= 0 {
+		maxOps = config.DefaultMaxOperationsPerDID
 	}
+	return &SubmitHandler{
+		store:  s,
+		maxOps: maxOps,
+		log:    log.With().Str("handler", "submit").Logger(),
+	}
+}
+
+// invalid answers an operation that failed validation: 413 when it is over
+// the size cap, 400 otherwise.
+func invalid(c *fiber.Ctx, kind string, err error) error {
+	status := fiber.StatusBadRequest
+	if errors.Is(err, did.ErrOperationTooLarge) {
+		status = fiber.StatusRequestEntityTooLarge
+	}
+	return c.Status(status).JSON(fiber.Map{
+		"error": fmt.Sprintf("invalid %s operation: %v", kind, err),
+	})
 }
 
 // Handle processes a submitted DID operation (create or update).
@@ -58,9 +79,7 @@ func (h *SubmitHandler) Handle(c *fiber.Ctx) error {
 
 func (h *SubmitHandler) handleCreate(c *fiber.Ctx, didParam string, op *did.Operation) error {
 	if err := did.ValidateCreate(op); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fmt.Sprintf("invalid create operation: %v", err),
-		})
+		return invalid(c, "create", err)
 	}
 
 	// Derive the DID from the genesis operation and verify it matches the URL.
@@ -117,12 +136,42 @@ func (h *SubmitHandler) handleCreate(c *fiber.Ctx, didParam string, op *did.Oper
 
 func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Operation) error {
 	if err := did.ValidateUpdate(op); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fmt.Sprintf("invalid update operation: %v", err),
+		return invalid(c, "update", err)
+	}
+
+	// The head alone decides every check an unauthenticated caller can reach:
+	// deactivation, prev and the signature. The whole log is read only for an
+	// operation the DID's current rotation key signed.
+	head, err := h.store.GetLatest(c.Context(), didParam)
+	if err != nil {
+		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get the operation log head")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "internal error",
 		})
 	}
 
-	// Get the full operation log to resolve current state and control eras.
+	if head.Operation.IsTombstone() {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "invalid transition: DID has been deactivated",
+		})
+	}
+
+	// The prev field must reference the CID of the current latest operation.
+	if op.Prev == nil || *op.Prev != head.CID {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error":    "prev CID does not match current head",
+			"expected": head.CID,
+		})
+	}
+
+	// Verify signature against the current rotation keys.
+	if err := did.VerifyOperationSignature(op, head.Operation.RotationKeys); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": fmt.Sprintf("invalid signature: %v", err),
+		})
+	}
+
+	// The full log resolves the control eras and counts the operations.
 	records, err := h.store.GetLog(c.Context(), didParam)
 	if err != nil {
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get operation log")
@@ -137,25 +186,21 @@ func (h *SubmitHandler) handleUpdate(c *fiber.Ctx, didParam string, op *did.Oper
 	}
 
 	current := records[len(records)-1]
-
-	if current.Operation.IsTombstone() {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "invalid transition: DID has been deactivated",
-		})
-	}
-
-	// The prev field must reference the CID of the current latest operation.
-	if op.Prev == nil || *op.Prev != current.CID {
+	if current.CID != head.CID {
+		// Another writer appended between the two reads.
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 			"error":    "prev CID does not match current head",
 			"expected": current.CID,
 		})
 	}
 
-	// Verify signature against the current rotation keys.
-	if err := did.VerifyOperationSignature(op, current.Operation.RotationKeys); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": fmt.Sprintf("invalid signature: %v", err),
+	// MAX_OPERATIONS_PER_DID. A tombstone is still accepted on a full log, so
+	// a DID can always be deactivated: it is terminal, so the log ends at most
+	// one past the cap. The count is race-free, since the append below only
+	// lands while current is still the head.
+	if !op.IsTombstone() && len(records) >= h.maxOps {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": fmt.Sprintf("operation log is full: a DID holds at most %d operations", h.maxOps),
 		})
 	}
 

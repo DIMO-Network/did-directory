@@ -180,3 +180,38 @@ func TestSubmit_OversizedBodyIs413OnTheWire(t *testing.T) {
 		})
 	}
 }
+
+// R3-F2, the reviewer's probe through the server: MAX_OPERATIONS_PER_DID=3
+// took 11 operations. The cap set in config now holds.
+func TestServer_MaxOperationsPerDIDFromConfig(t *testing.T) {
+	app := New(&config.Settings{ExportPageSize: 100, MaxOperationsPerDID: 3}, store.NewMemoryStore(), zerolog.Nop())
+	f := &flow{t: t, app: app}
+	key, dk := f.key()
+	gen := f.sign(key, &did.Operation{Type: did.OpTypeCreate, RotationKeys: []string{dk},
+		VerificationMethods: map[string]string{"signing": dk}, AlsoKnownAs: []string{}, Services: map[string]did.Service{}})
+	id, err := did.DeriveFromGenesis(gen)
+	require.NoError(t, err)
+	status, out := f.submit(id, gen)
+	require.Equal(t, http.StatusOK, status, out)
+	prev := out["cid"].(string)
+
+	accepted := 1
+	for i := range 10 {
+		p := prev
+		op := f.sign(key, &did.Operation{Type: did.OpTypeCreate, RotationKeys: []string{dk},
+			VerificationMethods: map[string]string{"signing": dk}, AlsoKnownAs: []string{fmt.Sprintf("at://%d", i)},
+			Services: map[string]did.Service{}, Prev: &p})
+		status, out := f.submit(id, op)
+		if status != http.StatusOK {
+			assert.Equal(t, http.StatusUnprocessableEntity, status, out)
+			continue
+		}
+		accepted++
+		prev = out["cid"].(string)
+	}
+	assert.Equal(t, 3, accepted)
+
+	var entries []map[string]any
+	require.Equal(t, http.StatusOK, f.get("/"+id+"/log/audit", &entries))
+	assert.Len(t, entries, 3)
+}

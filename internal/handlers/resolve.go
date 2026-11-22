@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 
 	"github.com/DIMO-Network/did-directory/internal/did"
@@ -12,6 +13,12 @@ import (
 
 // ResolveHandler handles GET /:did for DID resolution, GET /:did/data for raw state,
 // and GET /:did/control for control era history.
+//
+// Each reads the DID's head first and the whole log only when the answer needs
+// the era history: a controlled DID's. An uncontrolled DID (a person or an
+// org, which dauth resolves at every sign-in) and a tombstone are answered from
+// one row. The store keeps no era summary, so a controlled DID still reads its
+// whole log; MAX_OPERATIONS_PER_DID and did.MaxOperationBytes bound it.
 type ResolveHandler struct {
 	store store.Store
 	log   zerolog.Logger
@@ -29,22 +36,23 @@ func NewResolveHandler(s store.Store, log zerolog.Logger) *ResolveHandler {
 func (h *ResolveHandler) HandleResolve(c *fiber.Ctx) error {
 	didParam := c.Params("did")
 
-	records, err := h.store.GetLog(c.Context(), didParam)
+	head, err := h.store.GetLatest(c.Context(), didParam)
+	if store.IsNotFound(err) {
+		return notFound(c)
+	}
 	if err != nil {
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to resolve DID")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "internal error",
-		})
+		return internalError(c)
 	}
-	if len(records) == 0 {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "DID not found",
-		})
+	if head.Operation.IsTombstone() {
+		return gone(c, didParam)
 	}
 
-	latest := records[len(records)-1]
-
-	state := resolveControlState(didParam, records)
+	latest, state, err := h.withState(c.Context(), didParam, head)
+	if err != nil {
+		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to resolve DID")
+		return internalError(c)
+	}
 
 	doc, err := did.GenerateDocument(didParam, &latest.Operation, state)
 	if errors.Is(err, did.ErrDeactivated) {
@@ -68,27 +76,27 @@ func (h *ResolveHandler) HandleResolve(c *fiber.Ctx) error {
 func (h *ResolveHandler) HandleData(c *fiber.Ctx) error {
 	didParam := c.Params("did")
 
-	records, err := h.store.GetLog(c.Context(), didParam)
+	head, err := h.store.GetLatest(c.Context(), didParam)
+	if store.IsNotFound(err) {
+		return notFound(c)
+	}
 	if err != nil {
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get DID data")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "internal error",
-		})
+		return internalError(c)
 	}
-	if len(records) == 0 {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "DID not found",
-		})
+	if head.Operation.IsTombstone() {
+		return gone(c, didParam)
 	}
 
-	latest := records[len(records)-1]
+	latest, state, err := h.withState(c.Context(), didParam, head)
+	if err != nil {
+		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get DID data")
+		return internalError(c)
+	}
 	if latest.Operation.IsTombstone() {
-		return c.Status(fiber.StatusGone).JSON(fiber.Map{
-			"error": "DID " + didParam + " has been deactivated",
-		})
+		// Deactivated between the two reads.
+		return gone(c, didParam)
 	}
-
-	state := resolveControlState(didParam, records)
 
 	return c.JSON(fiber.Map{
 		"did":                 latest.DID,
@@ -108,20 +116,60 @@ func (h *ResolveHandler) HandleData(c *fiber.Ctx) error {
 func (h *ResolveHandler) HandleControl(c *fiber.Ctx) error {
 	didParam := c.Params("did")
 
-	records, err := h.store.GetLog(c.Context(), didParam)
+	head, err := h.store.GetLatest(c.Context(), didParam)
+	if store.IsNotFound(err) {
+		return notFound(c)
+	}
 	if err != nil {
 		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get DID control state")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "internal error",
-		})
-	}
-	if len(records) == 0 {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "DID not found",
-		})
+		return internalError(c)
 	}
 
-	return c.JSON(resolveControlState(didParam, records))
+	_, state, err := h.withState(c.Context(), didParam, head)
+	if err != nil {
+		h.log.Error().Err(err).Str("did", didParam).Msg("Failed to get DID control state")
+		return internalError(c)
+	}
+	return c.JSON(state)
+}
+
+// withState returns the control state that goes with head, and the head it
+// was resolved with. An uncontrolled, live head needs no log: only a genesis
+// with a commitment opens an era, and ValidateTransition never lets an update
+// add a commitment to an uncontrolled DID, so it has no eras. Any other head
+// (controlled, or a tombstone, which may close a controlled DID's last era)
+// needs the era history, which only the whole log holds; the log's own head
+// is returned with it so that the two agree.
+func (h *ResolveHandler) withState(ctx context.Context, didStr string, head *store.OperationRecord) (*store.OperationRecord, *control.State, error) {
+	if !head.Operation.IsTombstone() && !head.Operation.IsControlled() {
+		return head, &control.State{DID: didStr, Eras: []control.Era{}}, nil
+	}
+	records, err := h.store.GetLog(ctx, didStr)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil, errors.New("operation log is empty after its head was read")
+	}
+	return &records[len(records)-1], resolveControlState(didStr, records), nil
+}
+
+func notFound(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+		"error": "DID not found",
+	})
+}
+
+func gone(c *fiber.Ctx, didStr string) error {
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"error": "DID " + didStr + " has been deactivated",
+	})
+}
+
+func internalError(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+		"error": "internal error",
+	})
 }
 
 func resolveControlState(didStr string, records []store.OperationRecord) *control.State {

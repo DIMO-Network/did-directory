@@ -1,6 +1,7 @@
 package did
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -165,4 +166,31 @@ func TestValidateUpdate_DecodesKeysOfStateCarryingTypes(t *testing.T) {
 	tomb := updateOfType(t, OpTypeTombstone)
 	tomb.RotationKeys = []string{"did:key:zNotAKey"}
 	assert.NoError(t, ValidateUpdate(tomb))
+}
+
+// R3-F2: the stored encoding of an operation is at most 16 KiB, on a genesis
+// and on every update type. The boundary is exact.
+func TestValidate_OperationSize(t *testing.T) {
+	_, dk := generateTestKey(t)
+	sized := func(n int) *Operation {
+		op := &Operation{Type: OpTypeCreate, RotationKeys: []string{dk}, VerificationMethods: map[string]string{"signing": dk},
+			AlsoKnownAs: []string{""}, Services: map[string]Service{}, Sig: strings.Repeat("s", 86)}
+		base, err := json.Marshal(op)
+		require.NoError(t, err)
+		op.AlsoKnownAs[0] = strings.Repeat("a", n-len(base))
+		enc, err := json.Marshal(op)
+		require.NoError(t, err)
+		require.Len(t, enc, n)
+		return op
+	}
+	assert.NoError(t, ValidateCreate(sized(MaxOperationBytes)))
+	err := ValidateCreate(sized(MaxOperationBytes + 1))
+	require.ErrorIs(t, err, ErrOperationTooLarge)
+	assert.Contains(t, err.Error(), "16385 bytes encoded, at most 16384")
+
+	for _, typ := range []string{OpTypeCreate, OpTypeTransfer, OpTypeRevokeSince, OpTypeTombstone} {
+		op := updateOfType(t, typ)
+		op.AlsoKnownAs = []string{strings.Repeat("a", MaxOperationBytes)}
+		assert.ErrorIs(t, ValidateUpdate(op), ErrOperationTooLarge, typ)
+	}
 }
