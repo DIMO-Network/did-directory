@@ -18,7 +18,7 @@ import (
 type probeKMS struct {
 	*fakeKMS
 	describeErr, pubErr error
-	describes            []string
+	describes           []string
 }
 
 func (p *probeKMS) DescribeKey(ctx context.Context, in *kms.DescribeKeyInput, o ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
