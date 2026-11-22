@@ -106,3 +106,22 @@ func TestLoadSettings_DPoPProofsPerSubject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 50, s.DPoPMaxProofsPerSubject)
 }
+
+// Fix round 1, item 5: a URL that only normalises to the host URL is refused
+// too, as the trailing slash is: the audience dauth issues is the URL as
+// written, so it must be written in the one form every compare uses.
+func TestSettings_ValidateRefusesNonNormalURLs(t *testing.T) {
+	for _, raw := range []string{"https://orghost.test:443", "http://orghost.test:80", "HTTPS://orghost.test", "https://OrgHost.test"} {
+		for name, s := range map[string]Settings{
+			"audience":   {IdentityAudience: raw},
+			"public URL": {IdentityAudience: "https://orghost.test", PublicURL: raw},
+		} {
+			err := s.Validate()
+			require.Error(t, err, "%s %s", name, raw)
+			assert.Contains(t, err.Error(), "normal form", "%s %s", name, raw)
+		}
+	}
+	for _, raw := range []string{"https://orghost.test", "http://localhost:8081", "https://api.example/Org-Host", "https://orghost.test:8443"} {
+		assert.NoError(t, (&Settings{IdentityAudience: raw}).Validate(), raw)
+	}
+}

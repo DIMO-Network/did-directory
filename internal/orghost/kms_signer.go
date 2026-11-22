@@ -352,7 +352,9 @@ const probeAlias = "startup-probe"
 // an alias that does not exist: NotFound (or AccessDenied, which KMS may answer
 // for a key that is not there) means the call reached KMS and was
 // authenticated; anything else, such as missing or invalid credentials or an
-// unreachable endpoint, fails.
+// unreachable endpoint, fails. That second form proves the credentials only:
+// not the role's permissions to create keys, aliases or sign, nor that the
+// region is the intended one. The first register is that check.
 func (s *KMSSigner) Probe(ctx context.Context, ref string) error {
 	if ref != "" {
 		if _, err := s.fetchPublicKey(ctx, ref); err != nil {

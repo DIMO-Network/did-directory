@@ -167,7 +167,9 @@ func splitList(v string) []string {
 // and PUBLIC_URL must be plain http(s) URLs, with no userinfo, query or
 // fragment, and must not end in "/": dauth issues audiences without one and
 // accounts publishes the host URL without one, so a slash here would refuse
-// every token or every register while looking right.
+// every token or every register while looking right. Each must also already
+// be in its normal form (parseHostURL): the audience a client asks dauth for
+// is the URL as written, so there is only one way to write it.
 func (s *Settings) Validate() error {
 	for _, u := range []struct{ name, value string }{
 		{"IDENTITY_AUDIENCE", s.IdentityAudience},
@@ -179,8 +181,12 @@ func (s *Settings) Validate() error {
 		if strings.HasSuffix(u.value, "/") {
 			return fmt.Errorf("%s must not end in \"/\": %q", u.name, u.value)
 		}
-		if _, err := parseHostURL(u.value); err != nil {
+		n, err := parseHostURL(u.value)
+		if err != nil {
 			return fmt.Errorf("%s: %w", u.name, err)
+		}
+		if n != u.value {
+			return fmt.Errorf("%s must be written in its normal form %q (lower-case scheme and host, no default port): %q", u.name, n, u.value)
 		}
 	}
 	return nil
