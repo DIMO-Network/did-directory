@@ -1,6 +1,9 @@
 package orghost
 
 import (
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -126,14 +129,14 @@ func LoadSettings(path string) (*Settings, error) {
 	return s, nil
 }
 
-// HostURL is the URL an org's #dimo_org_host must equal: PublicURL, else
-// IdentityAudience, without a trailing slash.
+// HostURL is the URL an org's #dimo_org_host must name: PublicURL, else
+// IdentityAudience, normalised (parseHostURL).
 func (s *Settings) HostURL() string {
 	u := s.PublicURL
 	if u == "" {
 		u = s.IdentityAudience
 	}
-	return strings.TrimRight(u, "/")
+	return normalHostURL(u)
 }
 
 func splitList(v string) []string {
@@ -144,4 +147,80 @@ func splitList(v string) []string {
 		}
 	}
 	return out
+}
+
+// Validate checks the URLs the host is named by (contract 5). IDENTITY_AUDIENCE
+// and PUBLIC_URL must be plain http(s) URLs, with no userinfo, query or
+// fragment, and must not end in "/": dauth issues audiences without one and
+// accounts publishes the host URL without one, so a slash here would refuse
+// every token or every register while looking right.
+func (s *Settings) Validate() error {
+	for _, u := range []struct{ name, value string }{
+		{"IDENTITY_AUDIENCE", s.IdentityAudience},
+		{"PUBLIC_URL", s.PublicURL},
+	} {
+		if u.value == "" {
+			continue
+		}
+		if strings.HasSuffix(u.value, "/") {
+			return fmt.Errorf("%s must not end in \"/\": %q", u.name, u.value)
+		}
+		if _, err := parseHostURL(u.value); err != nil {
+			return fmt.Errorf("%s: %w", u.name, err)
+		}
+	}
+	return nil
+}
+
+// parseHostURL normalises a URL naming this host: scheme and host lowercased,
+// the default port dropped, the path kept as written without a trailing
+// slash. It refuses anything but an absolute http(s) URL with a host and no
+// userinfo, query or fragment.
+func parseHostURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("not a URL: %q", raw)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch {
+	case scheme != "http" && scheme != "https":
+		return "", fmt.Errorf("must be an http or https URL: %q", raw)
+	case u.Host == "" || u.Opaque != "":
+		return "", fmt.Errorf("must name a host: %q", raw)
+	case u.User != nil:
+		return "", fmt.Errorf("must not carry userinfo: %q", raw)
+	case u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "?"):
+		return "", fmt.Errorf("must not carry a query: %q", raw)
+	case u.Fragment != "" || strings.Contains(raw, "#"):
+		return "", fmt.Errorf("must not carry a fragment: %q", raw)
+	}
+	host, port := strings.ToLower(u.Hostname()), u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	switch {
+	case port != "":
+		host = net.JoinHostPort(host, port)
+	case strings.Contains(host, ":"):
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/"), nil
+}
+
+// normalHostURL is parseHostURL for a value that may not parse: such a value
+// is kept as given, less any trailing slash, so it still compares only to
+// itself.
+func normalHostURL(raw string) string {
+	if n, err := parseHostURL(raw); err == nil {
+		return n
+	}
+	return strings.TrimRight(raw, "/")
+}
+
+// sameHostURL reports whether a URL someone else wrote (a DID's
+// #dimo_org_host, a token's aud) names the host whose normalised URL is want.
+// One that does not parse as a plain host URL names nothing.
+func sameHostURL(got, want string) bool {
+	n, err := parseHostURL(got)
+	return err == nil && want != "" && n == want
 }

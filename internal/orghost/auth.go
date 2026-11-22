@@ -95,7 +95,7 @@ func NewJWKSAuthenticator(jwksJSON []byte, issuer, audience string) (*JWKSAuthen
 	if err != nil {
 		return nil, err
 	}
-	return &JWKSAuthenticator{issuer: issuer, audience: audience, proofs: dpop.NewVerifier(), keys: keys, fetchedAt: time.Now()}, nil
+	return &JWKSAuthenticator{issuer: issuer, audience: normalHostURL(audience), proofs: dpop.NewVerifier(), keys: keys, fetchedAt: time.Now()}, nil
 }
 
 // NewJWKSAuthenticatorFromURL fetches the key set from url now and again
@@ -268,7 +268,7 @@ func (a *JWKSAuthenticator) Authenticate(ctx context.Context, cred Credentials) 
 	if cred.Proof == "" {
 		return Identity{}, fmt.Errorf("%w: a DPoP proof header is required", ErrUnauthenticated)
 	}
-	jkt, err := a.proofs.Verify(cred.Proof, cred.Method, strings.TrimRight(a.audience, "/")+cred.Path, raw)
+	jkt, err := a.proofs.Verify(cred.Proof, cred.Method, a.audience+cred.Path, raw)
 	if err != nil {
 		// Every proof failure wraps dpop.ErrInvalid; anything else, such as
 		// dpop.ErrReplayCacheFull, is this host's capacity, not the caller's
@@ -285,16 +285,18 @@ func (a *JWKSAuthenticator) Authenticate(ctx context.Context, cred Credentials) 
 }
 
 // audienceContains reports whether a JWT aud claim, a string or an array of
-// strings, names want.
+// strings, names want, this host's normalised URL. Each value is compared
+// after the same normalisation (sameHostURL), so the host is one URL wherever
+// it is named.
 func audienceContains(raw json.RawMessage, want string) bool {
 	var one string
 	if json.Unmarshal(raw, &one) == nil {
-		return one == want
+		return one == want || sameHostURL(one, want)
 	}
 	var many []string
 	if json.Unmarshal(raw, &many) == nil {
 		for _, a := range many {
-			if a == want {
+			if a == want || sameHostURL(a, want) {
 				return true
 			}
 		}

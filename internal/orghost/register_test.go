@@ -35,8 +35,13 @@ func TestRegister_HostMismatchIs403AndNoKMSCall(t *testing.T) {
 	h, api := kmsHost(t)
 	for _, endpoint := range []string{
 		"https://other-host.test",
-		hostAudience + "/", // compared exactly
 		"http://orghost.test",
+		"https://orghost.test:8443",
+		"https://orghost.test/elsewhere",
+		"https://ops@orghost.test",
+		"https://orghost.test?x=1",
+		"https://orghost.test#frag",
+		"orghost.test",
 		"",
 	} {
 		org := newOrgDID()
@@ -289,4 +294,22 @@ func TestRegister_DailyCap(t *testing.T) {
 	// A day on, the window is empty again.
 	h.clock = now.Add(25 * time.Hour)
 	assert.Equal(t, http.StatusCreated, h.registerResp(org).StatusCode)
+}
+
+// R4-F6: the DID's #dimo_org_host is compared to this host's URL after the same
+// normalisation: scheme and host case, the default port and a trailing slash
+// make no difference.
+func TestRegister_EndpointComparedNormalised(t *testing.T) {
+	for _, endpoint := range []string{
+		"HTTPS://OrgHost.Test",
+		"https://orghost.test:443",
+		"https://orghost.test/",
+	} {
+		h, api := kmsHost(t)
+		org := newOrgDID()
+		h.directory.publishHost(org, endpoint)
+		status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
+		assert.Equal(t, http.StatusCreated, status, "%s: %v", endpoint, body)
+		assert.Len(t, api.created, 1, endpoint)
+	}
 }

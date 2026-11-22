@@ -86,6 +86,9 @@ func main() {
 	if cfg.IdentityIssuer == "" || cfg.IdentityAudience == "" {
 		log.Fatal().Msg("IDENTITY_ISSUER and IDENTITY_AUDIENCE are required: a token for another service must not write here")
 	}
+	if err := cfg.Validate(); err != nil {
+		log.Fatal().Err(err).Msg("Bad host URL")
+	}
 	var auth orghost.Authenticator
 	switch {
 	case cfg.IdentityJWKSURL != "":

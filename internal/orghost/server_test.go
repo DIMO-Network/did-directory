@@ -724,6 +724,18 @@ func TestJWKSAuthenticator(t *testing.T) {
 	_, err = auth.Authenticate(ctx, cred(iss.token(t, with("aud", []string{"dq", hostAudience})), iss.holder))
 	require.NoError(t, err)
 
+	// R4-F6: aud is compared after the normalisation the host URL gets.
+	for _, aud := range []string{"HTTPS://OrgHost.Test", "https://orghost.test:443", "https://orghost.test/"} {
+		_, err = auth.Authenticate(ctx, cred(iss.token(t, with("aud", aud)), iss.holder))
+		assert.NoError(t, err, aud)
+	}
+	// An authenticator configured with another spelling of the same URL
+	// verifies the same tokens, and builds htu from the normalised form.
+	spelled, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test", "HTTPS://OrgHost.Test:443")
+	require.NoError(t, err)
+	_, err = spelled.Authenticate(ctx, cred(iss.token(t, good), iss.holder))
+	assert.NoError(t, err)
+
 	_, err = NewJWKSAuthenticator(iss.jwks(), "https://auth.test", "")
 	require.Error(t, err, "an authenticator without an audience accepts every relying party's tokens")
 
@@ -746,6 +758,9 @@ func TestJWKSAuthenticator(t *testing.T) {
 		"wrong issuer":   tokenCase(with("iss", "https://evil.test")),
 		"no audience":    tokenCase(with("aud", nil)),
 		"other audience": tokenCase(with("aud", "dimo")),
+		"other host":     tokenCase(with("aud", "https://orghost.test.evil")),
+		"other port":     tokenCase(with("aud", "https://orghost.test:8443")),
+		"other path":     tokenCase(with("aud", "https://orghost.test/x")),
 		"audience list":  tokenCase(with("aud", []string{"dimo", "dq"})),
 		"sub not a DID":  tokenCase(with("sub", "0xabc")),
 		"no scope":       tokenCase(with("scope", nil)),

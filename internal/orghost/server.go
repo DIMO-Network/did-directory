@@ -62,8 +62,8 @@ type Options struct {
 	// checks that the org's DID names this host.
 	Documents DocumentSource
 	// PublicURL is this host's own URL, which an org's DID must publish as its
-	// #dimo_org_host to register here. A trailing slash is dropped; the
-	// endpoint is then compared exactly.
+	// #dimo_org_host to register here. Both are normalised (scheme and host
+	// case, default port, trailing slash) before they are compared.
 	PublicURL string
 	// RegisterPerMinute bounds registers host-wide in any rolling minute, since
 	// each one can make a billable KMS key; zero means no limit.
@@ -111,7 +111,7 @@ func New(o Options) *fiber.App {
 	s := &Server{
 		repo: o.Repo, auth: o.Auth,
 		resolver:  &Resolver{Store: o.Repo.Store, Control: o.Control, Now: o.Repo.now, ControlCacheTTL: o.ControlCacheTTL},
-		documents: o.Documents, publicURL: strings.TrimRight(o.PublicURL, "/"),
+		documents: o.Documents, publicURL: normalHostURL(o.PublicURL),
 		registers: &rateLimiter{limit: o.RegisterPerMinute},
 		perCaller: &callerLimiter{limit: o.RegisterPerCallerPerMinute},
 		maxPerDay: o.RegisterMaxPerDay,

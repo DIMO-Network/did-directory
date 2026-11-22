@@ -53,14 +53,18 @@ KMS_ALIAS_PREFIX: "alias/dimo-org/"
 IDENTITY_JWKS_URL: "http://localhost:8080/signin/keys"
 IDENTITY_ISSUER: "http://localhost:8080/signin"
 # Tokens must name this host in aud: its public URL, which members request
-# from dauth when they sign in to write here.
+# from dauth when they sign in to write here. It is also the base of every
+# DPoP proof's htu. The host refuses to start if it ends in "/" (dauth issues
+# audiences without one) or carries userinfo, a query or a fragment.
 IDENTITY_AUDIENCE: "http://localhost:8081"
 # This host's public URL. POST /orgs/{org} registers an org only when the org's
-# DID, resolved through DIRECTORY_URL, publishes exactly this URL as its
-# #dimo_org_host service endpoint; anything else is 403. A trailing slash here
-# is dropped, and the DID's endpoint must then match it character for
-# character. Empty means IDENTITY_AUDIENCE, which is the same URL unless tokens
-# name the host by another one.
+# DID, resolved through DIRECTORY_URL, publishes this URL as its
+# #dimo_org_host service endpoint; anything else is 403. Both sides are
+# normalised before the compare (scheme and host lowercased, default port and
+# a trailing slash dropped, the path kept as written), so it must equal
+# accounts' V2_ORG_HOST_URL up to that. The host refuses to start if it ends in
+# "/". Empty means IDENTITY_AUDIENCE, which is the same URL unless tokens name
+# the host by another one.
 PUBLIC_URL: ""
 # Registers allowed host-wide in any rolling minute (each can make a billable
 # KMS key); past it, 429 with Retry-After. A register is charged only once it

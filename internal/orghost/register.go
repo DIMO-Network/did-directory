@@ -26,7 +26,10 @@ type DocumentSource interface {
 const errNotThisHost = "the org's DID does not name this host as #dimo_org_host"
 
 // namesThisHost reports whether org's DID document publishes a
-// #dimo_org_host service whose endpoint is exactly publicURL. A DID the
+// #dimo_org_host service whose endpoint names publicURL, this host's
+// normalised URL: compared after the same normalisation (sameHostURL), so
+// scheme and host case, a default port or a trailing slash make no
+// difference, and userinfo, a query or a fragment never match. A DID the
 // directory does not hold, or holds deactivated, names no host. An error means
 // the directory could not be asked.
 func namesThisHost(ctx context.Context, docs DocumentSource, org, publicURL string) (bool, error) {
@@ -39,7 +42,7 @@ func namesThisHost(ctx context.Context, docs DocumentSource, org, publicURL stri
 	}
 	for _, s := range doc.Service {
 		if s.ID == "#"+OrgHostServiceID || s.ID == org+"#"+OrgHostServiceID {
-			return publicURL != "" && s.ServiceEndpoint == publicURL, nil
+			return sameHostURL(s.ServiceEndpoint, publicURL), nil
 		}
 	}
 	return false, nil
