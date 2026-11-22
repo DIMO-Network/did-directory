@@ -14,12 +14,15 @@ import (
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/pkg/didkey"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"golang.org/x/crypto/sha3"
 )
 
 // turnkeyAPI is the part of Turnkey dimocli uses. Tests fake it.
 type turnkeyAPI interface {
 	// ListWalletAccounts returns the wallet's accounts with their public keys.
 	ListWalletAccounts(ctx context.Context, org, walletID string) ([]walletAccount, error)
+	// GetWalletAccount returns the account with the Ethereum address.
+	GetWalletAccount(ctx context.Context, org, walletID, address string) (walletAccount, error)
 	// CreateWalletAccount adds a secp256k1 Ethereum-format account at path
 	// (CREATE_WALLET_ACCOUNTS).
 	CreateWalletAccount(ctx context.Context, org, walletID, path string) error
@@ -31,6 +34,7 @@ type turnkeyAPI interface {
 
 // walletAccount is one HD wallet account.
 type walletAccount struct {
+	ID        string // walletAccountId, the pagination cursor
 	Address   string
 	Path      string
 	PublicKey string // hex, compressed or uncompressed secp256k1
@@ -163,4 +167,35 @@ func createNextAccount(ctx context.Context, api turnkeyAPI, org, walletID string
 		}
 	}
 	return walletAccount{}, fmt.Errorf("account %s not found in wallet after creating it", path)
+}
+
+// ethAddress is the EIP-55 checksummed Ethereum address of pub, the address
+// Turnkey gives the account.
+func ethAddress(pub *secp256k1.PublicKey) string {
+	h := sha3.NewLegacyKeccak256()
+	h.Write(pub.SerializeUncompressed()[1:])
+	addr := hex.EncodeToString(h.Sum(nil)[12:])
+	h = sha3.NewLegacyKeccak256()
+	h.Write([]byte(addr))
+	sum := hex.EncodeToString(h.Sum(nil))
+	out := []byte(addr)
+	for i, c := range out {
+		if c >= 'a' && c <= 'f' && sum[i] >= '8' {
+			out[i] = c - 'a' + 'A'
+		}
+	}
+	return "0x" + string(out)
+}
+
+// addressOfDIDKey is the Ethereum address of a secp256k1 did:key.
+func addressOfDIDKey(didKey string) (string, error) {
+	pub, err := didkey.Decode(didKey)
+	if err != nil {
+		return "", err
+	}
+	k, err := secp256k1.ParsePubKey(pub.Compressed())
+	if err != nil {
+		return "", fmt.Errorf("%s is not a secp256k1 did:key", didKey)
+	}
+	return ethAddress(k), nil
 }

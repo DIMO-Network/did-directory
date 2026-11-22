@@ -160,16 +160,20 @@ func (t *turnkeyFlags) existingSigner(ctx context.Context, didKey string) (*turn
 	if err != nil {
 		return nil, err
 	}
-	accts, err := api.ListWalletAccounts(ctx, t.Org, t.Wallet)
+	// Look the account up by its address: a fleet wallet holds thousands of
+	// accounts, and listing them is paginated.
+	addr, err := addressOfDIDKey(didKey)
 	if err != nil {
 		return nil, err
 	}
-	for _, a := range accts {
-		if k, err := accountDIDKey(a); err == nil && k == didKey {
-			return newTurnkeySigner(api, t.Org, a)
-		}
+	acct, err := api.GetWalletAccount(ctx, t.Org, t.Wallet, addr)
+	if err != nil {
+		return nil, fmt.Errorf("no account in Turnkey wallet %s holds %s: %w", t.Wallet, didKey, err)
 	}
-	return nil, fmt.Errorf("no account in Turnkey wallet %s holds %s", t.Wallet, didKey)
+	if k, err := accountDIDKey(acct); err != nil || k != didKey {
+		return nil, fmt.Errorf("no account in Turnkey wallet %s holds %s", t.Wallet, didKey)
+	}
+	return newTurnkeySigner(api, t.Org, acct)
 }
 
 // resolveSigner returns the signer for an existing DID's current rotation key:

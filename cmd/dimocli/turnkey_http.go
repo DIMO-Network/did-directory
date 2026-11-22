@@ -184,23 +184,59 @@ func (c *turnkeyHTTPClient) submit(ctx context.Context, path, org, actType strin
 	}
 }
 
+type tkAccount struct {
+	ID        string `json:"walletAccountId"`
+	Address   string `json:"address"`
+	Path      string `json:"path"`
+	PublicKey string `json:"publicKey"`
+}
+
+func (a tkAccount) account() walletAccount {
+	return walletAccount{ID: a.ID, Address: a.Address, Path: a.Path, PublicKey: a.PublicKey}
+}
+
+const accountsPageSize = 100
+
+// ListWalletAccounts follows Turnkey's cursor (limit 100, after the last
+// walletAccountId) until a short page comes back. The default page is 10.
 func (c *turnkeyHTTPClient) ListWalletAccounts(ctx context.Context, org, walletID string) ([]walletAccount, error) {
+	var out []walletAccount
+	after := ""
+	for {
+		po := map[string]string{"limit": strconv.Itoa(accountsPageSize)}
+		if after != "" {
+			po["after"] = after
+		}
+		var res struct {
+			Accounts []tkAccount `json:"accounts"`
+		}
+		if err := c.post(ctx, "/public/v1/query/list_wallet_accounts", map[string]any{
+			"organizationId": org, "walletId": walletID, "paginationOptions": po,
+		}, &res); err != nil {
+			return nil, err
+		}
+		for _, a := range res.Accounts {
+			out = append(out, a.account())
+		}
+		if len(res.Accounts) < accountsPageSize {
+			return out, nil
+		}
+		after = res.Accounts[len(res.Accounts)-1].ID
+		if after == "" {
+			return nil, errors.New("turnkey returned a full page of accounts without ids to page on")
+		}
+	}
+}
+
+func (c *turnkeyHTTPClient) GetWalletAccount(ctx context.Context, org, walletID, address string) (walletAccount, error) {
 	var res struct {
-		Accounts []struct {
-			Address   string `json:"address"`
-			Path      string `json:"path"`
-			PublicKey string `json:"publicKey"`
-		} `json:"accounts"`
+		Account tkAccount `json:"account"`
 	}
-	if err := c.post(ctx, "/public/v1/query/list_wallet_accounts",
-		map[string]string{"organizationId": org, "walletId": walletID}, &res); err != nil {
-		return nil, err
+	if err := c.post(ctx, "/public/v1/query/get_wallet_account",
+		map[string]string{"organizationId": org, "walletId": walletID, "address": address}, &res); err != nil {
+		return walletAccount{}, err
 	}
-	out := make([]walletAccount, 0, len(res.Accounts))
-	for _, a := range res.Accounts {
-		out = append(out, walletAccount{Address: a.Address, Path: a.Path, PublicKey: a.PublicKey})
-	}
-	return out, nil
+	return res.Account.account(), nil
 }
 
 func (c *turnkeyHTTPClient) CreateWalletAccount(ctx context.Context, org, walletID, path string) error {

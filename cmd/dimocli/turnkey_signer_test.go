@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,7 @@ type fakeTurnkey struct {
 	keys     map[string]*secp256k1.PrivateKey // by address
 	created  []string                         // paths created through the API
 	signed   int
+	gets     int
 	// consensus makes every signing activity wait for approval.
 	consensus *ErrConsensusNeeded
 	// trim returns r and s with leading zero bytes stripped, as Turnkey does.
@@ -59,9 +61,10 @@ func (f *fakeTurnkey) add(t *testing.T, index int) walletAccount {
 	priv, err := secp256k1.GeneratePrivateKey()
 	require.NoError(t, err)
 	pub := priv.PubKey().SerializeCompressed()
-	h := sha256.Sum256(pub)
+	addr := ethAddress(priv.PubKey())
 	a := walletAccount{
-		Address:   "0x" + hex.EncodeToString(h[:20]),
+		ID:        "wa-" + addr,
+		Address:   addr,
 		Path:      fmt.Sprintf("m/44'/60'/0'/0/%d", index),
 		PublicKey: hex.EncodeToString(pub),
 	}
@@ -76,6 +79,18 @@ func (f *fakeTurnkey) ListWalletAccounts(_ context.Context, _, _ string) ([]wall
 	return append([]walletAccount(nil), f.accounts...), nil
 }
 
+func (f *fakeTurnkey) GetWalletAccount(_ context.Context, _, _, address string) (walletAccount, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gets++
+	for _, a := range f.accounts {
+		if a.Address == address {
+			return a, nil
+		}
+	}
+	return walletAccount{}, errors.New("no such account")
+}
+
 func (f *fakeTurnkey) CreateWalletAccount(_ context.Context, _, _, path string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -84,8 +99,8 @@ func (f *fakeTurnkey) CreateWalletAccount(_ context.Context, _, _, path string) 
 	_, _ = fmt.Sscanf(path, "m/44'/60'/0'/0/%d", &idx)
 	priv, _ := secp256k1.GeneratePrivateKey()
 	pub := priv.PubKey().SerializeCompressed()
-	h := sha256.Sum256(pub)
-	a := walletAccount{Address: "0x" + hex.EncodeToString(h[:20]), Path: path, PublicKey: hex.EncodeToString(pub)}
+	addr := ethAddress(priv.PubKey())
+	a := walletAccount{ID: "wa-" + addr, Address: addr, Path: path, PublicKey: hex.EncodeToString(pub)}
 	f.keys[a.Address] = priv
 	f.accounts = append(f.accounts, a)
 	return nil
@@ -398,11 +413,36 @@ func turnkeyHTTPStub(t *testing.T, f *fakeTurnkey, signStatus string) *httptest.
 		switch r.URL.Path {
 		case "/public/v1/query/list_wallet_accounts":
 			accts, _ := f.ListWalletAccounts(ctx, "", "")
+			// Turnkey pages: 10 by default, up to 100, after a walletAccountId cursor.
+			limit, after := 10, ""
+			if po, ok := body["paginationOptions"].(map[string]any); ok {
+				if l, ok := po["limit"].(string); ok {
+					limit, _ = strconv.Atoi(l)
+				}
+				after, _ = po["after"].(string)
+			}
+			assert.LessOrEqual(t, limit, 100)
+			start := 0
+			if after != "" {
+				for i, a := range accts {
+					if a.ID == after {
+						start = i + 1
+					}
+				}
+			}
+			end := min(start+limit, len(accts))
 			var out []map[string]string
-			for _, a := range accts {
-				out = append(out, map[string]string{"address": a.Address, "path": a.Path, "publicKey": a.PublicKey})
+			for _, a := range accts[start:end] {
+				out = append(out, map[string]string{"walletAccountId": a.ID, "address": a.Address, "path": a.Path, "publicKey": a.PublicKey})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": out})
+		case "/public/v1/query/get_wallet_account":
+			a, err := f.GetWalletAccount(ctx, "", "", body["address"].(string))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": map[string]string{"walletAccountId": a.ID, "address": a.Address, "path": a.Path, "publicKey": a.PublicKey}})
 		case "/public/v1/submit/create_wallet_accounts":
 			params := body["parameters"].(map[string]any)
 			acct := params["accounts"].([]any)[0].(map[string]any)
@@ -496,4 +536,50 @@ func TestTransferAndRevokeSince_RefuseTheOnboardingCredential(t *testing.T) {
 		assert.Equal(t, 1, code, cmd[0])
 		assert.Contains(t, stderr, "the onboarding credential can't sign transfers or revocations", cmd[0])
 	}
+}
+
+// A wallet past Turnkey's default page of 10: the next index must count them
+// all, and an account on page 3 must still be found.
+func TestHTTPClient_WalletWithTwentyFiveAccounts(t *testing.T) {
+	idx := make([]int, 25)
+	for i := range idx {
+		idx[i] = i
+	}
+	f := newFakeTurnkey(t, idx...)
+	srv := turnkeyHTTPStub(t, f, "ACTIVITY_STATUS_COMPLETED")
+	keyPath, _ := writeAPIKey(t)
+	tf := &turnkeyFlags{Org: "o", Wallet: "w", AdminAPIKey: keyPath, BaseURL: srv.URL}
+
+	sg, err := tf.newSigner(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"m/44'/60'/0'/0/25"}, f.created, "index 25, not 10")
+	assert.Equal(t, f.didKeyAt(t, "m/44'/60'/0'/0/25"), sg.DIDKey())
+
+	want := f.didKeyAt(t, "m/44'/60'/0'/0/23")
+	got, err := tf.existingSigner(context.Background(), want)
+	require.NoError(t, err)
+	assert.Equal(t, want, got.DIDKey())
+	data := []byte(`{"n":1}`)
+	sig, err := got.Sign(context.Background(), data)
+	require.NoError(t, err)
+	pub, _ := didkey.Decode(got.DIDKey())
+	require.NoError(t, pub.Verify(data, sig))
+
+	_, err = tf.existingSigner(context.Background(), newSecpDIDKey(t))
+	require.Error(t, err)
+}
+
+func newSecpDIDKey(t *testing.T) string {
+	t.Helper()
+	k, err := secp256k1.GeneratePrivateKey()
+	require.NoError(t, err)
+	return didkey.FromSecp256k1(k.PubKey()).DIDKey()
+}
+
+func TestEthAddress_KnownVector(t *testing.T) {
+	// The address of private key 1.
+	var one secp256k1.ModNScalar
+	one.SetInt(1)
+	k := secp256k1.NewPrivateKey(&one)
+	assert.Equal(t, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf", ethAddress(k.PubKey()))
 }
