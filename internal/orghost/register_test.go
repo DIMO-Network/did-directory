@@ -3,6 +3,11 @@ package orghost
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
@@ -312,4 +317,26 @@ func TestRegister_EndpointComparedNormalised(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, status, "%s: %v", endpoint, body)
 		assert.Len(t, api.created, 1, endpoint)
 	}
+}
+
+// A key the KMS signer will refuse is refused before any budget is charged,
+// like every other register that will not make a key.
+func TestRegister_KMSPrivateKeySpendsNoBudget(t *testing.T) {
+	h, api := kmsHost(t, func(o *Options) {
+		o.RegisterPerMinute = 1
+		o.RegisterPerCallerPerMinute = 1
+	})
+	h.clock = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	org := newOrgDID()
+	h.publish(org)
+	for range 5 {
+		status, body := h.do(http.MethodPost, "/orgs/"+org, org, map[string]string{"privateKey": base64.StdEncoding.EncodeToString(der)})
+		require.Equal(t, http.StatusBadRequest, status, body)
+	}
+	assert.Equal(t, http.StatusCreated, h.registerResp(org).StatusCode, "the budget is whole")
+	assert.Len(t, api.created, 1)
 }

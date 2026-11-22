@@ -84,6 +84,9 @@ func (s *KMSSigner) registerStep(ctx context.Context) (context.Context, context.
 	return context.WithTimeout(ctx, s.registerTimeout)
 }
 
+// AcceptsKeys is false: a KMS key is born in KMS.
+func (s *KMSSigner) AcceptsKeys() bool { return false }
+
 // Register creates org's key in KMS and the org in the store, and returns the
 // did:key to publish as #dimo_org. A key the caller brings is refused.
 func (s *KMSSigner) Register(ctx context.Context, org string, key *ecdsa.PrivateKey) (string, error) {

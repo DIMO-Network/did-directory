@@ -39,6 +39,19 @@ func NewRoutingSigner(st store.Store, local *LocalSigner, kms *KMSSigner, regist
 	return &routingSigner{store: st, local: local, kms: kms, registerWith: registerWith, routes: map[string]repo.Signer{}}
 }
 
+// keyTaker is a Registrar that can say, before any work, whether it takes a
+// key the caller brings.
+type keyTaker interface {
+	AcceptsKeys() bool
+}
+
+// AcceptsKeys reports whether new orgs register with a backend that takes a
+// brought key.
+func (r *routingSigner) AcceptsKeys() bool {
+	t, ok := r.registerWith.(keyTaker)
+	return !ok || t.AcceptsKeys()
+}
+
 // Register implements Registrar.
 func (r *routingSigner) Register(ctx context.Context, org string, key *ecdsa.PrivateKey) (string, error) {
 	if r.registerWith == nil {

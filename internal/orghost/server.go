@@ -255,6 +255,9 @@ func (s *Server) register(c *fiber.Ctx) error {
 	if bad != "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": bad})
 	}
+	if t, ok := s.repo.Signer.(keyTaker); ok && key != nil && !t.AcceptsKeys() {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "privateKey is not accepted with the KMS signer"})
+	}
 	if s.documents == nil {
 		s.log.Error().Str("org", org).Msg("register: no DID document source configured")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})

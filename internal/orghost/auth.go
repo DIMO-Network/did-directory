@@ -368,16 +368,17 @@ func (a *JWKSAuthenticator) Authenticate(ctx context.Context, cred Credentials) 
 	if claims.Cnf == nil || claims.Cnf.JKT == "" {
 		return Identity{}, fmt.Errorf("%w: token is not bound to a key (cnf.jkt)", ErrUnauthenticated)
 	}
-	// The proof is checked last: it is single-use, and a request refused for
-	// its token should not spend it.
+	// The proof is checked last, and recorded only once everything else
+	// passed: it is single-use, and a request refused for its token or its
+	// key should not spend it.
 	if cred.Proof == "" {
 		return Identity{}, fmt.Errorf("%w: a DPoP proof header is required", ErrUnauthenticated)
 	}
 	jkt, err := a.proofs.Verify(cred.Proof, cred.Method, a.audience+cred.Path, raw)
 	if err != nil {
-		// Every proof failure wraps dpop.ErrInvalid; anything else, such as
-		// dpop.ErrReplayCacheFull, is this host's capacity, not the caller's
-		// credentials.
+		// Every proof failure wraps dpop.ErrInvalid; anything else is this
+		// host's trouble, not the caller's credentials. (Replays are caught by
+		// remember below, which owns the proof store.)
 		if !errors.Is(err, dpop.ErrInvalid) {
 			return Identity{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
