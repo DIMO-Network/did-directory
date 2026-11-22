@@ -10,6 +10,7 @@ import (
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/pkg/control"
+	"github.com/DIMO-Network/did-directory/pkg/didkey"
 )
 
 // Operation types.
@@ -42,6 +43,28 @@ const (
 // differ from the directory's clock. It prevents backdating a transfer to strip
 // grantees of history they were entitled to.
 const MaxClockSkew = 5 * time.Minute
+
+// Limits on a submitted operation. The directory takes operations from anyone,
+// and ValidateCreate and ValidateUpdate check these before any key is decoded
+// or any signature tried, so an anonymous request cannot buy CPU with a long
+// key list or a long key.
+const (
+	// MaxRotationKeys bounds rotationKeys.
+	MaxRotationKeys = 5
+	// MaxVerificationMethods bounds verificationMethods.
+	MaxVerificationMethods = 32
+	// MaxDIDKeyBytes bounds each did:key string, rotation key or verification
+	// method. A did:key of either supported curve is 57 bytes.
+	MaxDIDKeyBytes = didkey.MaxLength
+	// MaxOperationBytes bounds an operation's stored (JSON) encoding, so no
+	// log row is large and a whole log is at most MAX_OPERATIONS_PER_DID times
+	// this.
+	MaxOperationBytes = 16 << 10
+)
+
+// ErrOperationTooLarge is wrapped by ValidateCreate's and ValidateUpdate's
+// error for an operation whose encoding exceeds MaxOperationBytes.
+var ErrOperationTooLarge = errors.New("operation too large")
 
 // Service represents a DID service endpoint.
 type Service struct {
@@ -109,6 +132,9 @@ func (o *Operation) IsControlled() bool {
 
 // ValidateCreate checks that a genesis operation has all required fields.
 func ValidateCreate(op *Operation) error {
+	if err := validateLimits(op); err != nil {
+		return err
+	}
 	if op.Type != OpTypeCreate {
 		return errors.New("genesis operation must have type plc_operation")
 	}
@@ -124,22 +150,58 @@ func ValidateCreate(op *Operation) error {
 	if op.EffectiveAt != nil || op.RevokeSince != nil {
 		return errors.New("genesis operation must not set effectiveAt or revokeSince")
 	}
+	return validateState(op)
+}
+
+// validateState checks an operation that carries DID state: its shape, then
+// that every rotation key and verification method decodes. A key that does
+// not decode would freeze the DID (no later op could verify) or make it
+// unresolvable, so it is refused on every type that sets state, not only on
+// the genesis.
+func validateState(op *Operation) error {
 	if err := validateStateShape(op); err != nil {
 		return err
 	}
-
-	// Validate all keys are valid did:key format.
 	for i, rk := range op.RotationKeys {
 		if _, err := dimocrypto.DecodeDIDKey(rk); err != nil {
 			return fmt.Errorf("invalid rotation key [%d]: %w", i, err)
 		}
 	}
-	for id, vk := range op.VerificationMethods {
-		if _, err := dimocrypto.DecodeDIDKey(vk); err != nil {
+	for _, id := range slices.Sorted(maps.Keys(op.VerificationMethods)) {
+		if _, err := dimocrypto.DecodeDIDKey(op.VerificationMethods[id]); err != nil {
 			return fmt.Errorf("invalid verification method %q: %w", id, err)
 		}
 	}
+	return nil
+}
 
+// validateLimits checks the key counts, the length of every did:key and the
+// operation's encoded size. It decodes nothing, so it runs first.
+func validateLimits(op *Operation) error {
+	if n := len(op.RotationKeys); n > MaxRotationKeys {
+		return fmt.Errorf("at most %d rotation keys, got %d", MaxRotationKeys, n)
+	}
+	if n := len(op.VerificationMethods); n > MaxVerificationMethods {
+		return fmt.Errorf("at most %d verification methods, got %d", MaxVerificationMethods, n)
+	}
+	for i, rk := range op.RotationKeys {
+		if len(rk) > MaxDIDKeyBytes {
+			return fmt.Errorf("rotation key [%d] is longer than %d bytes", i, MaxDIDKeyBytes)
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(op.VerificationMethods)) {
+		if len(op.VerificationMethods[id]) > MaxDIDKeyBytes {
+			return fmt.Errorf("verification method %q is longer than %d bytes", id, MaxDIDKeyBytes)
+		}
+	}
+	// The encoding the store keeps.
+	encoded, err := json.Marshal(op)
+	if err != nil {
+		return fmt.Errorf("encode operation: %w", err)
+	}
+	if len(encoded) > MaxOperationBytes {
+		return fmt.Errorf("%w: %d bytes encoded, at most %d", ErrOperationTooLarge, len(encoded), MaxOperationBytes)
+	}
 	return nil
 }
 
@@ -162,9 +224,13 @@ func validateStateShape(op *Operation) error {
 	return nil
 }
 
-// ValidateUpdate checks that an update operation is well-formed on its own.
-// Use ValidateTransition to check it against the current state.
+// ValidateUpdate checks that an update operation is well-formed on its own,
+// including, for every type that carries state, that its keys decode. Use
+// ValidateTransition to check it against the current state.
 func ValidateUpdate(op *Operation) error {
+	if err := validateLimits(op); err != nil {
+		return err
+	}
 	if op.Prev == nil {
 		return errors.New("update operation must reference a previous CID")
 	}
@@ -180,7 +246,7 @@ func ValidateUpdate(op *Operation) error {
 		if len(op.RotationKeys) == 0 {
 			return errors.New("update operation must have at least one rotation key")
 		}
-		return validateStateShape(op)
+		return validateState(op)
 	case OpTypeTransfer:
 		if len(op.RotationKeys) == 0 {
 			return errors.New("transfer must set the new controller's rotation keys")
@@ -194,7 +260,7 @@ func ValidateUpdate(op *Operation) error {
 		if _, err := parseTimestamp(op.EffectiveAt, "effectiveAt"); err != nil {
 			return err
 		}
-		return validateStateShape(op)
+		return validateState(op)
 	case OpTypeRevokeSince:
 		if len(op.RotationKeys) == 0 {
 			return errors.New("revoke_since must keep at least one rotation key")
@@ -213,7 +279,7 @@ func ValidateUpdate(op *Operation) error {
 		if !since.Before(issued) {
 			return errors.New("revokeSince must be before effectiveAt")
 		}
-		return validateStateShape(op)
+		return validateState(op)
 	case OpTypeTombstone:
 		if op.RevokeSince != nil {
 			return errors.New("tombstone must not set revokeSince")

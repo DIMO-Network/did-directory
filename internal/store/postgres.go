@@ -159,6 +159,15 @@ func (s *PostgresStore) GetLog(ctx context.Context, didStr string) ([]OperationR
 	return records, rows.Err()
 }
 
+// Count runs on the did index; no operation is read or decoded.
+func (s *PostgresStore) Count(ctx context.Context, didStr string) (int, error) {
+	var n int64
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM operations WHERE did = $1`, didStr).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count operations: %w", err)
+	}
+	return int(n), nil
+}
+
 func (s *PostgresStore) Exists(ctx context.Context, didStr string) (bool, error) {
 	query := `SELECT EXISTS(SELECT 1 FROM operations WHERE did = $1)`
 	var exists bool
@@ -298,6 +307,12 @@ func (s *MemoryStore) GetLog(_ context.Context, didStr string) ([]OperationRecor
 		records = append(records, s.records[idx])
 	}
 	return records, nil
+}
+
+func (s *MemoryStore) Count(_ context.Context, didStr string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.byDID[didStr]), nil
 }
 
 func (s *MemoryStore) Exists(_ context.Context, didStr string) (bool, error) {

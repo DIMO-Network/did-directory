@@ -15,11 +15,17 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// maxBodyBytes bounds a request body. A DID operation is far smaller, and
+// Fiber's 4 MiB default let one anonymous POST cost seconds of CPU. A larger
+// body is answered 413 before any handler reads it.
+const maxBodyBytes = 64 << 10
+
 // New creates and configures the Fiber HTTP server.
 func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 	app := fiber.New(fiber.Config{
 		AppName:               "did-directory",
 		DisableStartupMessage: true,
+		BodyLimit:             maxBodyBytes,
 	})
 
 	// Middleware.
@@ -67,7 +73,7 @@ func New(cfg *config.Settings, st store.Store, log zerolog.Logger) *fiber.App {
 	})
 
 	// Initialize handlers.
-	submitHandler := handlers.NewSubmitHandler(st, log)
+	submitHandler := handlers.NewSubmitHandler(st, cfg.MaxOperationsPerDID, log)
 	resolveHandler := handlers.NewResolveHandler(st, log)
 	auditHandler := handlers.NewAuditHandler(st, log)
 	exportHandler := handlers.NewExportHandler(st, cfg.ExportPageSize, log)
