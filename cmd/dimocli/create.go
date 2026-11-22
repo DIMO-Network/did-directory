@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -93,14 +94,11 @@ func runCreate(args []string) {
 	org := fs.Bool("org", false, "create an org DID with a #dimo_org repository commit signing key")
 	orgKey := fs.String("org-key", "", "did:key to publish as #dimo_org when the org host already holds the private half (implies --org)")
 	orgHost := fs.String("org-host", "", "org host URL, published as the #dimo_org_host service entry (implies --org)")
+	tk := bindTurnkeyFlags(fs)
 	fs.Parse(args)
 
-	// Generate a P-256 private key. For a controlled DID this is the per-vehicle
-	// custody key held by the controller; it only authorizes DID operations.
-	privKey, didKey, err := newKey()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	if err := tk.validate(); err != nil {
+		fatal(err)
 	}
 
 	opts := createOptions{
@@ -111,69 +109,93 @@ func runCreate(args []string) {
 		OrgHost:    *orgHost,
 	}
 	if err := parseServices(*service, opts.Services); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 	if *alias != "" {
 		opts.Aliases = strings.Split(*alias, ",")
 	}
 
-	plan, err := buildCreate(opts, didKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	// The rotation key: the next account of the Turnkey wallet (the org root
+	// for --org, the custody key for --controller), else a new P-256 key that
+	// goes to the keystore. A controlled DID's key only authorizes DID operations.
+	ctx := context.Background()
+	var signer opSigner
+	if tk.enabled() {
+		sg, err := tk.newSigner(ctx)
+		if err != nil {
+			fatal(err)
+		}
+		signer = sg
+	} else {
+		sg, err := newFileSignerNew()
+		if err != nil {
+			fatal(err)
+		}
+		signer = sg
 	}
 
-	op, err := signOp(privKey, plan.Op)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Derive the DID.
-	derivedDID, err := did.DeriveFromGenesis(op)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error deriving DID: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Submit to directory.
 	c := client.New(*server)
 	c.SetVerbose(isVerbose())
-	resp, err := c.Submit(context.Background(), derivedDID, op)
+	if _, err := executeCreate(ctx, c, opts, signer, os.Stdout); err != nil {
+		fatal(err)
+	}
+}
+
+// executeCreate builds, signs and submits the genesis operation, then keeps
+// what the CLI has to keep: the keystore key when signer is a fileSigner
+// (a Turnkey key is never copied out of Turnkey), the control opening, and a
+// generated #dimo_org key. It returns the new DID.
+func executeCreate(ctx context.Context, c *client.Client, opts createOptions, signer opSigner, out io.Writer) (string, error) {
+	plan, err := buildCreate(opts, signer.DIDKey())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error submitting operation: %v\n", err)
-		os.Exit(1)
+		return "", err
+	}
+	op, err := signOpWith(ctx, signer, plan.Op)
+	if err != nil {
+		return "", err
 	}
 
-	// Save key to keystore.
-	if err := SaveKey(derivedDID, privKey); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to save key: %v\n", err)
+	derivedDID, err := did.DeriveFromGenesis(op)
+	if err != nil {
+		return "", fmt.Errorf("deriving DID: %w", err)
 	}
 
-	fmt.Printf("DID created: %s\n", resp.DID)
-	fmt.Printf("CID: %s\n", resp.CID)
-	fmt.Printf("Key stored at: %s\n", keyFilePath(derivedDID))
+	resp, err := c.Submit(ctx, derivedDID, op)
+	if err != nil {
+		return "", fmt.Errorf("submitting operation: %w", err)
+	}
+
+	fmt.Fprintf(out, "DID created: %s\n", resp.DID)
+	fmt.Fprintf(out, "CID: %s\n", resp.CID)
+	if fsg, ok := signer.(*fileSigner); ok {
+		if err := SaveKey(derivedDID, fsg.key); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save key: %v\n", err)
+		}
+		fmt.Fprintf(out, "Key stored at: %s\n", keyFilePath(derivedDID))
+	} else {
+		fmt.Fprintf(out, "Key held in Turnkey: %s\n", signer.DIDKey())
+	}
 
 	if plan.Opening != nil {
 		if err := SaveOpening(derivedDID, *plan.Opening); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to save control opening: %v\n", err)
 		}
-		fmt.Printf("Controller of record: %s (era 0, not published)\n", plan.Opening.Controller)
-		fmt.Printf("Control commitment: %s\n", *plan.Op.ControlCommitment)
-		fmt.Printf("Control opening stored at: %s\n", openingFilePath(derivedDID))
+		fmt.Fprintf(out, "Controller of record: %s (era 0, not published)\n", plan.Opening.Controller)
+		fmt.Fprintf(out, "Control commitment: %s\n", *plan.Op.ControlCommitment)
+		fmt.Fprintf(out, "Control opening stored at: %s\n", openingFilePath(derivedDID))
 	}
 
 	if orgDIDKey, ok := plan.Op.VerificationMethods[OrgKeyID]; ok {
-		fmt.Printf("Org commit key (#%s): %s\n", OrgKeyID, orgDIDKey)
+		fmt.Fprintf(out, "Org commit key (#%s): %s\n", OrgKeyID, orgDIDKey)
 		if plan.OrgKey != nil {
 			if err := SaveOrgKey(derivedDID, plan.OrgKey); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to save org key: %v\n", err)
 			}
-			fmt.Printf("Org key stored at: %s\n", orgKeyFilePath(derivedDID))
+			fmt.Fprintf(out, "Org key stored at: %s\n", orgKeyFilePath(derivedDID))
 		}
 	}
 	if host, ok := plan.Op.Services[OrgHostServiceID]; ok {
-		fmt.Printf("Org host (#%s): %s\n", OrgHostServiceID, host.Endpoint)
+		fmt.Fprintf(out, "Org host (#%s): %s\n", OrgHostServiceID, host.Endpoint)
 	}
+	return derivedDID, nil
 }

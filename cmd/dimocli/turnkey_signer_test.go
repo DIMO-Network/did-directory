@@ -1,0 +1,499 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
+	"github.com/DIMO-Network/did-directory/internal/did"
+	"github.com/DIMO-Network/did-directory/pkg/client"
+	"github.com/DIMO-Network/did-directory/pkg/didkey"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	dcrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// fakeTurnkey is an in-memory wallet: it holds real secp256k1 keys so the
+// signatures it returns verify against the did:keys it reports.
+type fakeTurnkey struct {
+	mu       sync.Mutex
+	accounts []walletAccount
+	keys     map[string]*secp256k1.PrivateKey // by address
+	created  []string                         // paths created through the API
+	signed   int
+	// consensus makes every signing activity wait for approval.
+	consensus *ErrConsensusNeeded
+	// trim returns r and s with leading zero bytes stripped, as Turnkey does.
+	trim bool
+}
+
+func newFakeTurnkey(t *testing.T, indexes ...int) *fakeTurnkey {
+	t.Helper()
+	f := &fakeTurnkey{keys: map[string]*secp256k1.PrivateKey{}}
+	for _, i := range indexes {
+		f.add(t, i)
+	}
+	return f
+}
+
+func (f *fakeTurnkey) add(t *testing.T, index int) walletAccount {
+	t.Helper()
+	priv, err := secp256k1.GeneratePrivateKey()
+	require.NoError(t, err)
+	pub := priv.PubKey().SerializeCompressed()
+	h := sha256.Sum256(pub)
+	a := walletAccount{
+		Address:   "0x" + hex.EncodeToString(h[:20]),
+		Path:      fmt.Sprintf("m/44'/60'/0'/0/%d", index),
+		PublicKey: hex.EncodeToString(pub),
+	}
+	f.keys[a.Address] = priv
+	f.accounts = append(f.accounts, a)
+	return a
+}
+
+func (f *fakeTurnkey) ListWalletAccounts(_ context.Context, _, _ string) ([]walletAccount, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]walletAccount(nil), f.accounts...), nil
+}
+
+func (f *fakeTurnkey) CreateWalletAccount(_ context.Context, _, _, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.created = append(f.created, path)
+	idx := 0
+	_, _ = fmt.Sscanf(path, "m/44'/60'/0'/0/%d", &idx)
+	priv, _ := secp256k1.GeneratePrivateKey()
+	pub := priv.PubKey().SerializeCompressed()
+	h := sha256.Sum256(pub)
+	a := walletAccount{Address: "0x" + hex.EncodeToString(h[:20]), Path: path, PublicKey: hex.EncodeToString(pub)}
+	f.keys[a.Address] = priv
+	f.accounts = append(f.accounts, a)
+	return nil
+}
+
+func (f *fakeTurnkey) SignRawPayload(_ context.Context, _, signWith, payload string) (string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.consensus != nil {
+		return "", "", f.consensus
+	}
+	priv, ok := f.keys[signWith]
+	if !ok {
+		return "", "", errors.New("no such account")
+	}
+	f.signed++
+	h := sha256.Sum256([]byte(payload))
+	sig := dcrecdsa.Sign(priv, h[:])
+	r, s := sig.R(), sig.S()
+	rb, sb := r.Bytes(), s.Bytes()
+	rr, ss := rb[:], sb[:]
+	if f.trim {
+		rr, ss = bytes.TrimLeft(rr, "\x00"), bytes.TrimLeft(ss, "\x00")
+	}
+	return hex.EncodeToString(rr), hex.EncodeToString(ss), nil
+}
+
+func (f *fakeTurnkey) didKeyAt(t *testing.T, path string) string {
+	t.Helper()
+	for _, a := range f.accounts {
+		if a.Path == path {
+			k, err := accountDIDKey(a)
+			require.NoError(t, err)
+			return k
+		}
+	}
+	t.Fatalf("no account at %s", path)
+	return ""
+}
+
+func tkFlags(api turnkeyAPI, onboarding bool) *turnkeyFlags {
+	f := &turnkeyFlags{Org: "sub-org", Wallet: "wallet-1", api: api}
+	if onboarding {
+		f.APIKey = "unused"
+	} else {
+		f.AdminAPIKey = "unused"
+	}
+	return f
+}
+
+func verifyOp(t *testing.T, didKeyStr string, op *did.Operation) {
+	t.Helper()
+	unsigned := &did.UnsignedOperation{
+		Type: op.Type, RotationKeys: op.RotationKeys, VerificationMethods: op.VerificationMethods,
+		AlsoKnownAs: op.AlsoKnownAs, Services: op.Services, ControlCommitment: op.ControlCommitment,
+		EffectiveAt: op.EffectiveAt, RevokeSince: op.RevokeSince, Prev: op.Prev,
+	}
+	data, err := json.Marshal(unsigned)
+	require.NoError(t, err)
+	pub, err := dimocrypto.DecodeDIDKey(didKeyStr)
+	require.NoError(t, err)
+	require.NoError(t, pub.Verify(data, op.Sig))
+}
+
+func TestTurnkeySigner_PadsA31ByteR(t *testing.T) {
+	f := newFakeTurnkey(t, 0)
+	f.trim = true
+	sg, err := newTurnkeySigner(f, "sub-org", f.accounts[0])
+	require.NoError(t, err)
+
+	// Grind the payload until r (or s) has a leading zero byte.
+	for i := 0; i < 5000; i++ {
+		data := []byte(fmt.Sprintf(`{"n":%d}`, i))
+		h := sha256.Sum256(data)
+		sig := dcrecdsa.Sign(f.keys[f.accounts[0].Address], h[:])
+		rs, ss := sig.R(), sig.S()
+		r, s := rs.Bytes(), ss.Bytes()
+		if r[0] != 0 && s[0] != 0 {
+			continue
+		}
+		out, err := sg.Sign(context.Background(), data)
+		require.NoError(t, err)
+		raw, err := base64.RawURLEncoding.DecodeString(out)
+		require.NoError(t, err)
+		assert.Len(t, raw, 64, "r and s are each left-padded to 32 bytes")
+		pub, err := dimocrypto.DecodeDIDKey(sg.DIDKey())
+		require.NoError(t, err)
+		require.NoError(t, pub.Verify(data, out), "did-directory's own verifier accepts it")
+		return
+	}
+	t.Fatal("could not find a payload with a short r")
+}
+
+func TestRSToSig(t *testing.T) {
+	sig, err := rsToSig("ab", "1")
+	require.NoError(t, err)
+	raw, _ := base64.RawURLEncoding.DecodeString(sig)
+	require.Len(t, raw, 64)
+	assert.Equal(t, byte(0xab), raw[31])
+	assert.Equal(t, byte(0x01), raw[63])
+	_, err = rsToSig(strings.Repeat("a", 66), "1")
+	assert.Error(t, err)
+}
+
+func TestTurnkeySigner_ConsensusNeededIsReported(t *testing.T) {
+	f := newFakeTurnkey(t, 0)
+	f.consensus = &ErrConsensusNeeded{ActivityID: "act-9", Fingerprint: "fp-123"}
+	sg, err := newTurnkeySigner(f, "sub-org", f.accounts[0])
+	require.NoError(t, err)
+	_, err = sg.Sign(context.Background(), []byte(`{}`))
+	var cn *ErrConsensusNeeded
+	require.ErrorAs(t, err, &cn)
+	assert.Equal(t, "act-9", cn.ActivityID)
+	assert.Equal(t, "fp-123", cn.Fingerprint)
+	assert.Equal(t, "waiting for approval: fp-123 (activity act-9)", cn.Error())
+}
+
+func TestTurnkeyFlags_NewSignerTakesTheNextIndex(t *testing.T) {
+	f := newFakeTurnkey(t, 0, 1, 5)
+	sg, err := tkFlags(f, true).newSigner(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"m/44'/60'/0'/0/6"}, f.created)
+	assert.Equal(t, f.didKeyAt(t, "m/44'/60'/0'/0/6"), sg.DIDKey())
+	assert.True(t, strings.HasPrefix(sg.DIDKey(), "did:key:zQ3s"), "secp256k1 did:key")
+
+	empty := newFakeTurnkey(t)
+	_, err = tkFlags(empty, true).newSigner(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"m/44'/60'/0'/0/0"}, empty.created)
+}
+
+// directoryStub accepts every submission and records the operations.
+func directoryStub(t *testing.T) (*client.Client, *[]*did.Operation) {
+	t.Helper()
+	var ops []*did.Operation
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var op did.Operation
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&op))
+		ops = append(ops, &op)
+		_, _ = w.Write([]byte(`{"did":"` + strings.TrimPrefix(r.URL.Path, "/") + `","cid":"bafyfake"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return client.New(srv.URL), &ops
+}
+
+func TestCreateControlled_TurnkeyWritesNoPrivateKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	f := newFakeTurnkey(t, 0)
+	c, ops := directoryStub(t)
+
+	sg, err := tkFlags(f, true).newSigner(context.Background())
+	require.NoError(t, err)
+	var out bytes.Buffer
+	derived, err := executeCreate(context.Background(), c, createOptions{Controller: "did:dimo:avis"}, sg, &out)
+	require.NoError(t, err)
+
+	require.Len(t, *ops, 1)
+	op := (*ops)[0]
+	assert.Equal(t, []string{f.didKeyAt(t, "m/44'/60'/0'/0/1")}, op.RotationKeys, "the rotation key is the new account's did:key")
+	verifyOp(t, op.RotationKeys[0], op)
+	assert.Equal(t, 1, f.signed)
+
+	entries, err := os.ReadDir(filepath.Join(home, ".dimo", "keys"))
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	assert.Equal(t, []string{strings.TrimPrefix(derived, "did:dimo:") + ".control.json"}, names,
+		"only the control opening is saved")
+}
+
+func TestCreateOrg_TurnkeyRootIsTheNextAccount(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newFakeTurnkey(t)
+	c, ops := directoryStub(t)
+	sg, err := tkFlags(f, false).newSigner(context.Background())
+	require.NoError(t, err)
+	_, err = executeCreate(context.Background(), c, createOptions{Org: true}, sg, &bytes.Buffer{})
+	require.NoError(t, err)
+	op := (*ops)[0]
+	root := f.didKeyAt(t, "m/44'/60'/0'/0/0")
+	assert.Equal(t, []string{root}, op.RotationKeys)
+	assert.Equal(t, root, op.VerificationMethods["signing"])
+	assert.Contains(t, op.VerificationMethods, OrgKeyID)
+	verifyOp(t, root, op)
+}
+
+func TestFileSigner_CreateStillSavesTheKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	c, ops := directoryStub(t)
+	fsg, err := newFileSignerNew()
+	require.NoError(t, err)
+	derived, err := executeCreate(context.Background(), c, createOptions{Controller: "did:dimo:avis"}, fsg, &bytes.Buffer{})
+	require.NoError(t, err)
+	verifyOp(t, fsg.DIDKey(), (*ops)[0])
+	_, err = LoadKey(derived)
+	require.NoError(t, err)
+}
+
+func TestBuildRotateToTurnkey_OnlyRotationKeysAndSigningChange(t *testing.T) {
+	_, root, err := newKey()
+	require.NoError(t, err)
+	_, orgKey, err := newKey()
+	require.NoError(t, err)
+	_, tk, err := newKey()
+	require.NoError(t, err)
+	current := &did.Operation{
+		Type:                did.OpTypeCreate,
+		RotationKeys:        []string{root},
+		VerificationMethods: map[string]string{"signing": root, OrgKeyID: orgKey},
+		AlsoKnownAs:         []string{"at://avis"},
+		Services:            map[string]did.Service{OrgHostServiceID: {Type: OrgHostServiceType, Endpoint: "https://h"}},
+	}
+	op := buildRotateTo(current, "cid1", tk)
+	assert.Equal(t, []string{tk}, op.RotationKeys)
+	assert.Equal(t, map[string]string{"signing": tk, OrgKeyID: orgKey}, op.VerificationMethods)
+	assert.Equal(t, current.AlsoKnownAs, op.AlsoKnownAs)
+	assert.Equal(t, current.Services, op.Services)
+	assert.Equal(t, "cid1", *op.Prev)
+	assert.Equal(t, root, current.VerificationMethods["signing"], "current is not mutated")
+
+	// A #signing that is not the root stays put.
+	_, other, _ := newKey()
+	current.VerificationMethods["signing"] = other
+	op = buildRotateTo(current, "cid1", tk)
+	assert.Equal(t, other, op.VerificationMethods["signing"])
+}
+
+func TestResolveSigner_OnboardingCredentialRefusedForTransfersAndRevocations(t *testing.T) {
+	f := newFakeTurnkey(t, 0)
+	cur := &did.Operation{RotationKeys: []string{f.didKeyAt(t, "m/44'/60'/0'/0/0")}}
+
+	_, err := resolveSigner(context.Background(), tkFlags(f, true), "did:dimo:v", cur, purposeTransfer)
+	require.Error(t, err)
+	assert.Equal(t, "the onboarding credential can't sign transfers or revocations", err.Error())
+	_, err = resolveSigner(context.Background(), tkFlags(f, true), "did:dimo:v", cur, purposeRevoke)
+	require.Error(t, err)
+	assert.Equal(t, 0, f.signed)
+
+	sg, err := resolveSigner(context.Background(), tkFlags(f, false), "did:dimo:v", cur, purposeTransfer)
+	require.NoError(t, err)
+	assert.Equal(t, cur.RotationKeys[0], sg.DIDKey())
+	sg, err = resolveSigner(context.Background(), tkFlags(f, true), "did:dimo:v", cur, purposeUpdate)
+	require.NoError(t, err)
+	assert.Equal(t, cur.RotationKeys[0], sg.DIDKey())
+}
+
+func TestTurnkeyFlags_Validate(t *testing.T) {
+	assert.NoError(t, (&turnkeyFlags{}).validate(), "no turnkey flags is the file keystore")
+	assert.Error(t, (&turnkeyFlags{Org: "o"}).validate())
+	assert.Error(t, (&turnkeyFlags{Org: "o", Wallet: "w"}).validate(), "needs a credential")
+	assert.Error(t, (&turnkeyFlags{Org: "o", Wallet: "w", APIKey: "a", AdminAPIKey: "b"}).validate())
+	assert.NoError(t, (&turnkeyFlags{Org: "o", Wallet: "w", APIKey: "a"}).validate())
+}
+
+// --- the HTTP client and the stamp ---
+
+func writeAPIKey(t *testing.T) (path string, pub *ecdsa.PublicKey) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	raw, err := priv.Bytes()
+	require.NoError(t, err)
+	comp := elliptic.MarshalCompressed(elliptic.P256(), priv.X, priv.Y)
+	b, _ := json.Marshal(map[string]string{"publicKey": hex.EncodeToString(comp), "privateKey": hex.EncodeToString(raw)})
+	path = filepath.Join(t.TempDir(), "key.json")
+	require.NoError(t, os.WriteFile(path, b, 0o600))
+	return path, &priv.PublicKey
+}
+
+func TestStamp_IsAVerifiableP256SignatureOverTheBody(t *testing.T) {
+	path, pub := writeAPIKey(t)
+	key, err := loadTurnkeyAPIKey(path)
+	require.NoError(t, err)
+	body := []byte(`{"organizationId":"o"}`)
+	stamp, err := key.stamp(body)
+	require.NoError(t, err)
+
+	raw, err := base64.RawURLEncoding.DecodeString(stamp)
+	require.NoError(t, err)
+	var s struct{ PublicKey, Scheme, Signature string }
+	require.NoError(t, json.Unmarshal(raw, &s))
+	assert.Equal(t, "SIGNATURE_SCHEME_TK_API_P256", s.Scheme)
+	assert.Equal(t, hex.EncodeToString(elliptic.MarshalCompressed(elliptic.P256(), pub.X, pub.Y)), s.PublicKey)
+	sig, err := hex.DecodeString(s.Signature)
+	require.NoError(t, err)
+	h := sha256.Sum256(body)
+	assert.True(t, ecdsa.VerifyASN1(pub, h[:], sig), "DER ECDSA over SHA-256 of the exact body")
+}
+
+func TestLoadTurnkeyAPIKey_NeverEchoesKeyMaterial(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "k.json")
+	require.NoError(t, os.WriteFile(p, []byte(`{"publicKey":"02aa","privateKey":"SECRETSECRET"}`), 0o600))
+	_, err := loadTurnkeyAPIKey(p)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "SECRETSECRET")
+}
+
+// turnkeyHTTPStub speaks the three Turnkey endpoints dimocli uses.
+func turnkeyHTTPStub(t *testing.T, f *fakeTurnkey, signStatus string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NotEmpty(t, r.Header.Get("X-Stamp"), "every request is stamped")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		ctx := context.Background()
+		switch r.URL.Path {
+		case "/public/v1/query/list_wallet_accounts":
+			accts, _ := f.ListWalletAccounts(ctx, "", "")
+			var out []map[string]string
+			for _, a := range accts {
+				out = append(out, map[string]string{"address": a.Address, "path": a.Path, "publicKey": a.PublicKey})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": out})
+		case "/public/v1/submit/create_wallet_accounts":
+			params := body["parameters"].(map[string]any)
+			acct := params["accounts"].([]any)[0].(map[string]any)
+			assert.Equal(t, "CURVE_SECP256K1", acct["curve"])
+			assert.Equal(t, "ADDRESS_FORMAT_ETHEREUM", acct["addressFormat"])
+			assert.Equal(t, "ACTIVITY_TYPE_CREATE_WALLET_ACCOUNTS", body["type"])
+			_ = f.CreateWalletAccount(ctx, "", "", acct["path"].(string))
+			_ = json.NewEncoder(w).Encode(map[string]any{"activity": map[string]any{"id": "a1", "status": "ACTIVITY_STATUS_COMPLETED"}})
+		case "/public/v1/submit/sign_raw_payload":
+			params := body["parameters"].(map[string]any)
+			assert.Equal(t, "PAYLOAD_ENCODING_TEXT_UTF8", params["encoding"])
+			assert.Equal(t, "HASH_FUNCTION_SHA256", params["hashFunction"])
+			if signStatus != "ACTIVITY_STATUS_COMPLETED" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"activity": map[string]any{"id": "act1", "status": signStatus, "fingerprint": "fp123"}})
+				return
+			}
+			rr, ss, err := f.SignRawPayload(ctx, "", params["signWith"].(string), params["payload"].(string))
+			require.NoError(t, err)
+			_ = json.NewEncoder(w).Encode(map[string]any{"activity": map[string]any{
+				"id": "a2", "status": "ACTIVITY_STATUS_COMPLETED",
+				"result": map[string]any{"signRawPayloadResult": map[string]string{"r": rr, "s": ss}},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestHTTPClient_EndToEndAgainstAStub(t *testing.T) {
+	f := newFakeTurnkey(t, 0)
+	srv := turnkeyHTTPStub(t, f, "ACTIVITY_STATUS_COMPLETED")
+	keyPath, _ := writeAPIKey(t)
+	tf := &turnkeyFlags{Org: "o", Wallet: "w", APIKey: keyPath, BaseURL: srv.URL}
+	sg, err := tf.newSigner(context.Background())
+	require.NoError(t, err)
+	data := []byte(`{"type":"create"}`)
+	sig, err := sg.Sign(context.Background(), data)
+	require.NoError(t, err)
+	pub, err := didkey.Decode(sg.DIDKey())
+	require.NoError(t, err)
+	require.NoError(t, pub.Verify(data, sig))
+}
+
+// --- the commands, as a user runs them ---
+
+func TestDimocliMain(t *testing.T) {
+	args := os.Getenv("DIMOCLI_TEST_ARGS")
+	if args == "" {
+		t.Skip("subprocess helper")
+	}
+	os.Args = append([]string{"dimocli"}, strings.Split(args, "\x1f")...)
+	main()
+	os.Exit(0)
+}
+
+func runDimocli(t *testing.T, args ...string) (stderr string, code int) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDimocliMain$")
+	cmd.Env = append(os.Environ(), "DIMOCLI_TEST_ARGS="+strings.Join(args, "\x1f"), "HOME="+t.TempDir())
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	if ee := (&exec.ExitError{}); errors.As(err, &ee) {
+		return errb.String(), ee.ExitCode()
+	}
+	require.NoError(t, err)
+	return errb.String(), 0
+}
+
+func TestCreate_ConsensusNeededExitsThreeWithoutHanging(t *testing.T) {
+	f := newFakeTurnkey(t, 0)
+	srv := turnkeyHTTPStub(t, f, "ACTIVITY_STATUS_CONSENSUS_NEEDED")
+	keyPath, _ := writeAPIKey(t)
+	stderr, code := runDimocli(t, "create", "--controller", "did:dimo:avis",
+		"--turnkey-org", "o", "--turnkey-wallet", "w", "--turnkey-api-key", keyPath, "--turnkey-base-url", srv.URL,
+		"--server", "http://127.0.0.1:1")
+	assert.Equal(t, 3, code)
+	assert.Contains(t, stderr, "waiting for approval: fp123 (activity act1)")
+}
+
+func TestTransferAndRevokeSince_RefuseTheOnboardingCredential(t *testing.T) {
+	keyPath, _ := writeAPIKey(t)
+	tk := []string{"--turnkey-org", "o", "--turnkey-wallet", "w", "--turnkey-api-key", keyPath}
+	for _, cmd := range [][]string{
+		append([]string{"transfer", "--did", "did:dimo:v", "--to", "did:dimo:b"}, tk...),
+		append([]string{"revoke-since", "--did", "did:dimo:v", "--since", "2026-01-01T00:00:00Z"}, tk...),
+	} {
+		stderr, code := runDimocli(t, cmd...)
+		assert.Equal(t, 1, code, cmd[0])
+		assert.Contains(t, stderr, "the onboarding credential can't sign transfers or revocations", cmd[0])
+	}
+}

@@ -2,14 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"flag"
 	"fmt"
 	"os"
 
-	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/pkg/client"
 )
@@ -18,31 +14,19 @@ func runRotate(args []string) {
 	fs := flag.NewFlagSet("rotate", flag.ExitOnError)
 	server := fs.String("server", defaultServer(), "directory server URL")
 	didStr := fs.String("did", "", "DID to rotate keys for (required)")
+	toTurnkey := fs.Bool("to-turnkey", false, "move the root from the keystore into Turnkey: the wallet's next account becomes the rotation key and #signing")
+	tk := bindTurnkeyFlags(fs)
 	fs.Parse(args)
 
 	if *didStr == "" {
 		fmt.Fprintf(os.Stderr, "Error: --did is required\n")
 		os.Exit(1)
 	}
-
-	// Load the OLD private key.
-	oldKey, err := LoadKey(*didStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading key: %v\n", err)
-		os.Exit(1)
+	if err := tk.validate(); err != nil {
+		fatal(err)
 	}
-
-	// Generate a NEW P-256 private key.
-	newKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error generating new key: %v\n", err)
-		os.Exit(1)
-	}
-
-	newDIDKey, err := dimocrypto.EncodeDIDKey(&newKey.PublicKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encoding new did:key: %v\n", err)
-		os.Exit(1)
+	if *toTurnkey && !tk.enabled() {
+		fatal(fmt.Errorf("--to-turnkey needs --turnkey-org, --turnkey-wallet and a Turnkey credential"))
 	}
 
 	c := client.New(*server)
@@ -56,11 +40,31 @@ func runRotate(args []string) {
 		os.Exit(1)
 	}
 
-	// Sign with OLD key.
-	op, err := signOp(oldKey, buildRotate(currentOp, prevCID, newDIDKey))
+	// Sign with the OLD key: from the keystore when moving into Turnkey, else
+	// wherever the flags say it lives.
+	var oldSigner opSigner
+	if *toTurnkey {
+		oldSigner, err = resolveSigner(ctx, &turnkeyFlags{}, *didStr, currentOp, purposeUpdate)
+	} else {
+		oldSigner, err = resolveSigner(ctx, tk, *didStr, currentOp, purposeUpdate)
+	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
+	}
+
+	// The NEW key: Turnkey's next account, or a fresh P-256 key for the keystore.
+	newDIDKey, saveNew, err := newCustody(ctx, tk)
+	if err != nil {
+		fatal(err)
+	}
+
+	unsigned := buildRotate(currentOp, prevCID, newDIDKey)
+	if *toTurnkey {
+		unsigned = buildRotateTo(currentOp, prevCID, newDIDKey)
+	}
+	op, err := signOpWith(ctx, oldSigner, unsigned)
+	if err != nil {
+		fatal(err)
 	}
 
 	resp, err := c.Submit(ctx, *didStr, op)
@@ -69,13 +73,19 @@ func runRotate(args []string) {
 		os.Exit(1)
 	}
 
-	// Save the NEW key to keystore (overwriting old).
-	if err := SaveKey(*didStr, newKey); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to save new key: %v\n", err)
-	}
-
 	fmt.Printf("Keys rotated for: %s\n", resp.DID)
 	fmt.Printf("CID: %s\n", resp.CID)
+	if tk.enabled() {
+		fmt.Printf("New key held in Turnkey: %s\n", newDIDKey)
+		if *toTurnkey {
+			fmt.Printf("The old keystore key at %s no longer signs for this DID; remove it once you have confirmed the move.\n", keyFilePath(*didStr))
+		}
+		return
+	}
+	// Save the NEW key to keystore (overwriting old).
+	if err := saveNew(*didStr); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to save new key: %v\n", err)
+	}
 	fmt.Printf("New key stored at: %s\n", keyFilePath(*didStr))
 }
 
@@ -87,6 +97,29 @@ func buildRotate(current *did.Operation, prevCID, newDIDKey string) *did.Unsigne
 	var vms map[string]string
 	if !current.IsControlled() {
 		vms = make(map[string]string, len(current.VerificationMethods)+1)
+		for k, v := range current.VerificationMethods {
+			vms[k] = v
+		}
+		vms["signing"] = newDIDKey
+	}
+	return &did.UnsignedOperation{
+		Type:                did.OpTypeCreate,
+		RotationKeys:        []string{newDIDKey},
+		VerificationMethods: vms,
+		AlsoKnownAs:         current.AlsoKnownAs,
+		Services:            current.Services,
+		ControlCommitment:   current.ControlCommitment,
+		Prev:                &prevCID,
+	}
+}
+
+// buildRotateTo moves the root to newDIDKey (the Turnkey account): it replaces
+// rotationKeys, and #signing only when that is the old rotation key, as it is
+// for a dimocli org. Nothing else changes.
+func buildRotateTo(current *did.Operation, prevCID, newDIDKey string) *did.UnsignedOperation {
+	vms := current.VerificationMethods
+	if len(current.RotationKeys) > 0 && vms["signing"] == current.RotationKeys[0] {
+		vms = make(map[string]string, len(current.VerificationMethods))
 		for k, v := range current.VerificationMethods {
 			vms[k] = v
 		}

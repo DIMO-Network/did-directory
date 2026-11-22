@@ -19,20 +19,21 @@ func runTransfer(args []string) {
 	server := fs.String("server", defaultServer(), "directory server URL")
 	didStr := fs.String("did", "", "controlled DID to transfer (required)")
 	to := fs.String("to", "", "new controller of record DID (required)")
+	tk := bindTurnkeyFlags(fs)
 	fs.Parse(args)
 
+	if err := tk.validate(); err != nil {
+		fatal(err)
+	}
+	if err := tk.refuseSensitive(); err != nil {
+		fatal(err)
+	}
 	if *didStr == "" || *to == "" {
 		fmt.Fprintf(os.Stderr, "Error: --did and --to are required\n")
 		os.Exit(1)
 	}
 	if !did.IsValidDID(*to) {
 		fmt.Fprintf(os.Stderr, "Invalid --to: %s\n", *to)
-		os.Exit(1)
-	}
-
-	custodyKey, err := LoadKey(*didStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading custody key: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -52,10 +53,13 @@ func runTransfer(args []string) {
 		os.Exit(1)
 	}
 
-	newCustody, newCustodyDIDKey, err := newKey()
+	custodySigner, err := resolveSigner(ctx, tk, *didStr, currentOp, purposeTransfer)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
+	}
+	newCustodyDIDKey, saveCustody, err := newCustody(ctx, tk)
+	if err != nil {
+		fatal(err)
 	}
 	nextEra := cur.Number + 1
 	opening, commitment, err := newCommitment(*to, nextEra)
@@ -65,7 +69,7 @@ func runTransfer(args []string) {
 	}
 	effectiveAt := time.Now().UTC().Format(time.RFC3339)
 
-	op, err := signOp(custodyKey, &did.UnsignedOperation{
+	op, err := signOpWith(ctx, custodySigner, &did.UnsignedOperation{
 		Type:              did.OpTypeTransfer,
 		RotationKeys:      []string{newCustodyDIDKey},
 		AlsoKnownAs:       currentOp.AlsoKnownAs,
@@ -75,8 +79,7 @@ func runTransfer(args []string) {
 		Prev:              &prevCID,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
 	resp, err := c.Submit(ctx, *didStr, op)
@@ -85,7 +88,7 @@ func runTransfer(args []string) {
 		os.Exit(1)
 	}
 
-	if err := SaveKey(*didStr, newCustody); err != nil {
+	if err := saveCustody(*didStr); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save new custody key: %v\n", err)
 	}
 	if err := SaveOpening(*didStr, opening); err != nil {
