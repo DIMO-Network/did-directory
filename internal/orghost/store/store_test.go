@@ -643,3 +643,34 @@ func TestStore_HasLocalOrgsPostgres(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, has)
 }
+
+// CountOrgsSince is what the register daily cap reads: orgs created after
+// since, whatever backend their key is in.
+func TestStore_CountOrgsSince(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC()
+			// Other packages' tests write orgs to the same database at the same
+			// time, so on Postgres only bounds hold; the memory store is exact.
+			before, err := s.CountOrgsSince(ctx, now.Add(-time.Minute))
+			require.NoError(t, err)
+			old := fmt.Sprintf("did:dimo:old%d-%d", now.UnixNano(), orgCounter.Add(1))
+			require.NoError(t, s.CreateOrg(ctx, Org{DID: old, KeyEnc: []byte("sealed"), CreatedAt: now.Add(-48 * time.Hour)}))
+			newOrg(t, s)
+			kms := fmt.Sprintf("did:dimo:kms%d-%d", now.UnixNano(), orgCounter.Add(1))
+			require.NoError(t, s.CreateOrg(ctx, Org{DID: kms, KeyRef: "arn:aws:kms:us-east-1:111122223333:key/count"}))
+
+			n, err := s.CountOrgsSince(ctx, now.Add(-time.Minute))
+			require.NoError(t, err)
+			if name == "memory" {
+				assert.Equal(t, 2, n, "the org created two days ago is outside the window")
+			} else {
+				assert.GreaterOrEqual(t, n, before+2)
+			}
+			n, err = s.CountOrgsSince(ctx, time.Now().Add(time.Hour))
+			require.NoError(t, err)
+			assert.Zero(t, n, "nothing is created in the future")
+		})
+	}
+}

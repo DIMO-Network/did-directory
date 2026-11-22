@@ -119,11 +119,18 @@ func main() {
 	if len(cfg.IssuerDIDs) == 0 {
 		log.Warn().Msg("No ISSUER_DIDS configured: nothing may call /authorize")
 	}
-	if cfg.RegisterRateLimitPerMinute < 0 {
-		log.Fatal().Int("value", cfg.RegisterRateLimitPerMinute).Msg("REGISTER_RATE_LIMIT_PER_MINUTE must be 0 (no limit) or more")
+	for name, v := range map[string]int{
+		"REGISTER_RATE_LIMIT_PER_MINUTE":            cfg.RegisterRateLimitPerMinute,
+		"REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE": cfg.RegisterRateLimitPerCallerPerMinute,
+		"ORG_REGISTER_MAX_PER_DAY":                  cfg.RegisterMaxPerDay,
+	} {
+		if v < 0 {
+			log.Fatal().Int("value", v).Msgf("%s must be 0 (no limit) or more", name)
+		}
 	}
 	publicURL := cfg.HostURL()
 	log.Info().Str("public_url", publicURL).Int("register_per_minute", cfg.RegisterRateLimitPerMinute).
+		Int("register_per_caller_per_minute", cfg.RegisterRateLimitPerCallerPerMinute).Int("register_max_per_day", cfg.RegisterMaxPerDay).
 		Msg("Orgs register here only if their DID names this URL as #dimo_org_host")
 
 	// The commit policy profiles a role may name (plan §3.2). The booking
@@ -150,18 +157,20 @@ func main() {
 	repo := &orghost.Repository{Store: st, Signer: orghost.NewRoutingSigner(st, local, kmsSigner, registerWith)}
 	directory := client.New(cfg.DirectoryURL)
 	app := orghost.New(orghost.Options{
-		Repo:              repo,
-		Auth:              auth,
-		Control:           directory,
-		Documents:         directory,
-		PublicURL:         publicURL,
-		RegisterPerMinute: cfg.RegisterRateLimitPerMinute,
-		Issuers:           cfg.IssuerDIDs,
-		Admins:            cfg.AdminDIDs,
-		Policies:          policies,
-		PageSize:          cfg.PageSize,
-		ControlCacheTTL:   controlTTL,
-		Log:               log,
+		Repo:                       repo,
+		Auth:                       auth,
+		Control:                    directory,
+		Documents:                  directory,
+		PublicURL:                  publicURL,
+		RegisterPerMinute:          cfg.RegisterRateLimitPerMinute,
+		RegisterPerCallerPerMinute: cfg.RegisterRateLimitPerCallerPerMinute,
+		RegisterMaxPerDay:          cfg.RegisterMaxPerDay,
+		Issuers:                    cfg.IssuerDIDs,
+		Admins:                     cfg.AdminDIDs,
+		Policies:                   policies,
+		PageSize:                   cfg.PageSize,
+		ControlCacheTTL:            controlTTL,
+		Log:                        log,
 	})
 
 	go func() {

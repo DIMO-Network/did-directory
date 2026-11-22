@@ -57,6 +57,18 @@ func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {
 	return nil
 }
 
+func (s *MemoryStore) CountOrgsSince(_ context.Context, since time.Time) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, o := range s.orgs {
+		if o.org.CreatedAt.After(since) {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (s *MemoryStore) HasLocalOrgs(_ context.Context) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

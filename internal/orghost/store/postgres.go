@@ -49,6 +49,8 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		);
 		ALTER TABLE orgs ADD COLUMN IF NOT EXISTS signing_key_ref TEXT;
 		ALTER TABLE orgs ALTER COLUMN signing_key_enc DROP NOT NULL;
+		-- The register daily cap counts the orgs created in the last day.
+		CREATE INDEX IF NOT EXISTS orgs_created_at_idx ON orgs (created_at);
 		CREATE TABLE IF NOT EXISTS commits (
 			org          TEXT NOT NULL REFERENCES orgs(did),
 			seq          BIGINT NOT NULL,
@@ -150,6 +152,14 @@ func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
 		return ErrOrgExists
 	}
 	return nil
+}
+
+func (s *PostgresStore) CountOrgsSince(ctx context.Context, since time.Time) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM orgs WHERE created_at > $1`, since).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count orgs: %w", err)
+	}
+	return n, nil
 }
 
 func (s *PostgresStore) HasLocalOrgs(ctx context.Context) (bool, error) {

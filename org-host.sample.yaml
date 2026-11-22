@@ -54,8 +54,17 @@ IDENTITY_AUDIENCE: "http://localhost:8081"
 # name the host by another one.
 PUBLIC_URL: ""
 # Registers allowed host-wide in any rolling minute (each can make a billable
-# KMS key); past it, 429 with Retry-After. 0 disables the limit.
+# KMS key); past it, 429 with Retry-After. A register is charged only once it
+# will make a key: one refused for its DID, or for an org already here, spends
+# nothing. 0 disables the limit.
 REGISTER_RATE_LIMIT_PER_MINUTE: 10
+# Registers one caller may make in any rolling minute, so a DID whose register
+# keeps failing cannot spend the host-wide minute alone. 0 disables it.
+REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE: 3
+# New orgs (keys) this host may create in any rolling 24 hours, counted in the
+# database so every replica shares it. Past it registers answer 429 and the
+# host logs at error level: alert on that line. 0 disables the cap.
+ORG_REGISTER_MAX_PER_DAY: 200
 # The DID directory, for control state and for the org DIDs register checks.
 DIRECTORY_URL: "http://localhost:8082"
 # How long a vehicle's control state read from the directory is served before

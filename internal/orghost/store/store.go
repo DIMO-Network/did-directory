@@ -125,6 +125,9 @@ type Store interface {
 	HasLocalOrgs(ctx context.Context) (bool, error)
 	// GetOrg returns an org, or ErrNotFound.
 	GetOrg(ctx context.Context, did string) (*Org, error)
+	// CountOrgsSince counts the orgs created after since, on this host and
+	// every replica sharing its database: the register daily cap.
+	CountOrgsSince(ctx context.Context, since time.Time) (int, error)
 
 	// Head returns the org's log head, or ErrNotFound for an org not on this host.
 	Head(ctx context.Context, org string) (Head, error)

@@ -45,6 +45,15 @@ type Settings struct {
 	// RegisterRateLimitPerMinute bounds registers host-wide in any rolling
 	// minute, since under KMS each one makes a billable key; 0 disables it.
 	RegisterRateLimitPerMinute int `yaml:"REGISTER_RATE_LIMIT_PER_MINUTE"`
+	// RegisterRateLimitPerCallerPerMinute bounds one caller's registers in any
+	// rolling minute, so no single DID can spend the host-wide minute; 0
+	// disables it.
+	RegisterRateLimitPerCallerPerMinute int `yaml:"REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE"`
+	// RegisterMaxPerDay caps the orgs this host (every replica sharing its
+	// database) creates in any rolling 24 hours. Past it registers are refused
+	// and the host logs at error level, which is the alarm to page on. 0
+	// disables it.
+	RegisterMaxPerDay int `yaml:"ORG_REGISTER_MAX_PER_DAY"`
 	// DirectoryURL is the DID directory, for control state (plan §3.3).
 	DirectoryURL string `yaml:"DIRECTORY_URL"`
 	// IssuerDIDs are the DIDs that may call POST /authorize: dauth's.
@@ -63,7 +72,7 @@ type Settings struct {
 // LoadSettings reads path, then applies environment overrides.
 func LoadSettings(path string) (*Settings, error) {
 	s := &Settings{Port: 8081, LogLevel: "info", PageSize: 100, Signer: "local", KMSAliasPrefix: "alias/dimo-org/",
-		RegisterRateLimitPerMinute: 10}
+		RegisterRateLimitPerMinute: 10, RegisterRateLimitPerCallerPerMinute: 3, RegisterMaxPerDay: 200}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := yaml.Unmarshal(data, s); err != nil {
 			return nil, err
@@ -104,11 +113,16 @@ func LoadSettings(path string) (*Settings, error) {
 			s.PageSize = p
 		}
 	}
-	if v := os.Getenv("REGISTER_RATE_LIMIT_PER_MINUTE"); v != "" {
-		if p, err := strconv.Atoi(v); err == nil {
-			s.RegisterRateLimitPerMinute = p
+	envInt := func(name string, dst *int) {
+		if v := os.Getenv(name); v != "" {
+			if p, err := strconv.Atoi(v); err == nil {
+				*dst = p
+			}
 		}
 	}
+	envInt("REGISTER_RATE_LIMIT_PER_MINUTE", &s.RegisterRateLimitPerMinute)
+	envInt("REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE", &s.RegisterRateLimitPerCallerPerMinute)
+	envInt("ORG_REGISTER_MAX_PER_DAY", &s.RegisterMaxPerDay)
 	return s, nil
 }
 

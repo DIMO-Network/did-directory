@@ -41,6 +41,10 @@ type Server struct {
 	documents DocumentSource
 	publicURL string
 	registers *rateLimiter
+	// perCaller bounds each caller's registers; maxPerDay caps the orgs made
+	// in any rolling day, counted in the store.
+	perCaller *callerLimiter
+	maxPerDay int
 	policies  Policies
 	issuers   map[string]bool
 	admins    map[string]bool
@@ -64,6 +68,13 @@ type Options struct {
 	// RegisterPerMinute bounds registers host-wide in any rolling minute, since
 	// each one can make a billable KMS key; zero means no limit.
 	RegisterPerMinute int
+	// RegisterPerCallerPerMinute bounds one caller's registers in any rolling
+	// minute, so a DID whose register keeps failing cannot spend the host-wide
+	// minute alone; zero means no limit.
+	RegisterPerCallerPerMinute int
+	// RegisterMaxPerDay caps the orgs made in any rolling 24 hours, counted in
+	// the store so every replica sharing it shares the cap; zero means no cap.
+	RegisterMaxPerDay int
 	// Issuers are the DIDs that may call POST /authorize (plan §3.3): dauth.
 	Issuers []string
 	// Admins are the DIDs that may set party attributes (plan §1 decision E).
@@ -102,6 +113,8 @@ func New(o Options) *fiber.App {
 		resolver:  &Resolver{Store: o.Repo.Store, Control: o.Control, Now: o.Repo.now, ControlCacheTTL: o.ControlCacheTTL},
 		documents: o.Documents, publicURL: strings.TrimRight(o.PublicURL, "/"),
 		registers: &rateLimiter{limit: o.RegisterPerMinute},
+		perCaller: &callerLimiter{limit: o.RegisterPerCallerPerMinute},
+		maxPerDay: o.RegisterMaxPerDay,
 		policies:  policies,
 		issuers:   set(o.Issuers), admins: set(o.Admins),
 		pageSize: o.PageSize, log: o.Log.With().Str("component", "orghost").Logger(),
@@ -221,15 +234,19 @@ func params(c *fiber.Ctx) (org, collection, rkey string) {
 // register puts an org on this host. Only the org itself may do it: this is
 // where its signing key is born, and under KMS each key is billed. So the
 // caller must be the org, the org's DID must already name this host as its
-// #dimo_org_host, and registers are rate limited host-wide.
+// #dimo_org_host, and registers are budgeted: per caller and host-wide each
+// minute, and by a daily cap on new orgs. A register that will not make a key
+// (refused, malformed, or for an org already here) is answered before any
+// budget is charged, so nobody can spend what new orgs need by sending those.
 func (s *Server) register(c *fiber.Ctx) error {
 	org, _, _ := params(c)
-	if caller(c) != org {
+	who := caller(c)
+	if who != org {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "only the org itself may register its repository"})
 	}
-	if ok, wait := s.registers.allow(s.repo.now()); !ok {
-		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(retryAfterSeconds(wait)))
-		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "too many registers on this host, retry later"})
+	key, bad := registerKey(c.Body())
+	if bad != "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": bad})
 	}
 	if s.documents == nil {
 		s.log.Error().Str("org", org).Msg("register: no DID document source configured")
@@ -247,30 +264,36 @@ func (s *Server) register(c *fiber.Ctx) error {
 	if !ours {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": errNotThisHost})
 	}
-	var body struct {
-		// PrivateKey is an optional PKCS#8 key in base64, for an org whose key
-		// was generated elsewhere (dimocli create --org keeps one).
-		PrivateKey string `json:"privateKey"`
+	if _, err := s.repo.Store.GetOrg(c.Context(), org); err == nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "org is already registered on this host"})
+	} else if !store.IsNotFound(err) {
+		return s.fail(c, err)
 	}
-	if len(c.Body()) > 0 {
-		if err := json.Unmarshal(c.Body(), &body); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("invalid JSON: %v", err)})
+
+	// From here the register makes a key. The caller's own budget comes first,
+	// so a caller past it spends nothing of anyone else's.
+	now := s.repo.now()
+	if ok, wait := s.perCaller.allow(who, now); !ok {
+		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(retryAfterSeconds(wait)))
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "too many registers by this caller, retry later"})
+	}
+	if s.maxPerDay > 0 {
+		n, err := s.repo.Store.CountOrgsSince(c.Context(), now.Add(-24*time.Hour))
+		if err != nil {
+			return s.fail(c, err)
+		}
+		if n >= s.maxPerDay {
+			// The alarm: either real demand outgrew the cap, or someone is minting
+			// org DIDs that name this host to make it create keys.
+			s.log.Error().Str("org", org).Int("orgs_last_24h", n).Int("max_per_day", s.maxPerDay).
+				Msg("register refused: the daily cap on new org keys is reached (ORG_REGISTER_MAX_PER_DAY)")
+			c.Set(fiber.HeaderRetryAfter, "3600")
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "this host has registered as many orgs as it may today, retry later"})
 		}
 	}
-	var key *ecdsa.PrivateKey
-	if body.PrivateKey != "" {
-		der, err := base64.StdEncoding.DecodeString(body.PrivateKey)
-		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "privateKey must be base64 PKCS#8"})
-		}
-		parsed, err := x509.ParsePKCS8PrivateKey(der)
-		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("privateKey: %v", err)})
-		}
-		var ok bool
-		if key, ok = parsed.(*ecdsa.PrivateKey); !ok {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "privateKey must be an ECDSA key"})
-		}
+	if ok, wait := s.registers.allow(now); !ok {
+		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(retryAfterSeconds(wait)))
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "too many registers on this host, retry later"})
 	}
 	didKey, err := s.repo.Register(c.Context(), org, key)
 	if errors.Is(err, ErrPrivateKeyNotAccepted) {
@@ -285,6 +308,37 @@ func (s *Server) register(c *fiber.Ctx) error {
 	}
 	s.log.Info().Str("org", org).Str("key", didKey).Msg("org registered")
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"did": org, "key": didKey})
+}
+
+// registerKey reads a register body: empty, or {"privateKey": <base64
+// PKCS#8>} for an org whose key was generated elsewhere (dimocli create --org
+// keeps one). It returns the key, nil for none, or why the body is refused.
+func registerKey(body []byte) (*ecdsa.PrivateKey, string) {
+	if len(body) == 0 {
+		return nil, ""
+	}
+	var req struct {
+		PrivateKey string `json:"privateKey"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Sprintf("invalid JSON: %v", err)
+	}
+	if req.PrivateKey == "" {
+		return nil, ""
+	}
+	der, err := base64.StdEncoding.DecodeString(req.PrivateKey)
+	if err != nil {
+		return nil, "privateKey must be base64 PKCS#8"
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Sprintf("privateKey: %v", err)
+	}
+	key, ok := parsed.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, "privateKey must be an ECDSA key"
+	}
+	return key, ""
 }
 
 func (s *Server) getOrg(c *fiber.Ctx) error {

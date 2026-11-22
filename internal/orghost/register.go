@@ -74,6 +74,44 @@ func (l *rateLimiter) allow(now time.Time) (bool, time.Duration) {
 	return true, 0
 }
 
+// callerLimiter is a rateLimiter per caller DID. Callers whose window has
+// emptied are dropped as it goes, so the map holds only callers seen in the
+// last minute.
+type callerLimiter struct {
+	limit int
+
+	mu      sync.Mutex
+	callers map[string]*rateLimiter
+	swept   time.Time
+}
+
+// allow admits one event by caller at now, or says how long until one would be.
+func (l *callerLimiter) allow(caller string, now time.Time) (bool, time.Duration) {
+	if l == nil || l.limit <= 0 {
+		return true, 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.callers == nil {
+		l.callers = map[string]*rateLimiter{}
+	}
+	if now.Sub(l.swept) >= time.Minute {
+		cutoff := now.Add(-time.Minute)
+		for did, r := range l.callers {
+			if n := len(r.hits); n == 0 || !r.hits[n-1].After(cutoff) {
+				delete(l.callers, did)
+			}
+		}
+		l.swept = now
+	}
+	r, ok := l.callers[caller]
+	if !ok {
+		r = &rateLimiter{limit: l.limit}
+		l.callers[caller] = r
+	}
+	return r.allow(now)
+}
+
 // retryAfterSeconds rounds a wait up to whole seconds, at least one.
 func retryAfterSeconds(wait time.Duration) int {
 	return max(1, int(math.Ceil(wait.Seconds())))
