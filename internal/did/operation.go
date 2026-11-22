@@ -10,6 +10,7 @@ import (
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/pkg/control"
+	"github.com/DIMO-Network/did-directory/pkg/didkey"
 )
 
 // Operation types.
@@ -42,6 +43,20 @@ const (
 // differ from the directory's clock. It prevents backdating a transfer to strip
 // grantees of history they were entitled to.
 const MaxClockSkew = 5 * time.Minute
+
+// Limits on a submitted operation. The directory takes operations from anyone,
+// and ValidateCreate and ValidateUpdate check these before any key is decoded
+// or any signature tried, so an anonymous request cannot buy CPU with a long
+// key list or a long key.
+const (
+	// MaxRotationKeys bounds rotationKeys.
+	MaxRotationKeys = 5
+	// MaxVerificationMethods bounds verificationMethods.
+	MaxVerificationMethods = 32
+	// MaxDIDKeyBytes bounds each did:key string, rotation key or verification
+	// method. A did:key of either supported curve is 57 bytes.
+	MaxDIDKeyBytes = didkey.MaxLength
+)
 
 // Service represents a DID service endpoint.
 type Service struct {
@@ -109,6 +124,9 @@ func (o *Operation) IsControlled() bool {
 
 // ValidateCreate checks that a genesis operation has all required fields.
 func ValidateCreate(op *Operation) error {
+	if err := validateLimits(op); err != nil {
+		return err
+	}
 	if op.Type != OpTypeCreate {
 		return errors.New("genesis operation must have type plc_operation")
 	}
@@ -143,6 +161,28 @@ func ValidateCreate(op *Operation) error {
 	return nil
 }
 
+// validateLimits checks the key counts and the length of every did:key. It
+// decodes nothing, so it runs first.
+func validateLimits(op *Operation) error {
+	if n := len(op.RotationKeys); n > MaxRotationKeys {
+		return fmt.Errorf("at most %d rotation keys, got %d", MaxRotationKeys, n)
+	}
+	if n := len(op.VerificationMethods); n > MaxVerificationMethods {
+		return fmt.Errorf("at most %d verification methods, got %d", MaxVerificationMethods, n)
+	}
+	for i, rk := range op.RotationKeys {
+		if len(rk) > MaxDIDKeyBytes {
+			return fmt.Errorf("rotation key [%d] is longer than %d bytes", i, MaxDIDKeyBytes)
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(op.VerificationMethods)) {
+		if len(op.VerificationMethods[id]) > MaxDIDKeyBytes {
+			return fmt.Errorf("verification method %q is longer than %d bytes", id, MaxDIDKeyBytes)
+		}
+	}
+	return nil
+}
+
 // validateStateShape enforces the controlled/uncontrolled invariants on a
 // state-carrying operation.
 func validateStateShape(op *Operation) error {
@@ -165,6 +205,9 @@ func validateStateShape(op *Operation) error {
 // ValidateUpdate checks that an update operation is well-formed on its own.
 // Use ValidateTransition to check it against the current state.
 func ValidateUpdate(op *Operation) error {
+	if err := validateLimits(op); err != nil {
+		return err
+	}
 	if op.Prev == nil {
 		return errors.New("update operation must reference a previous CID")
 	}
