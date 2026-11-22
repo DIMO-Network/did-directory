@@ -377,6 +377,9 @@ func TestRepositoryFlow(t *testing.T) {
 			status, body = h.do(http.MethodGet, "/orgs/"+org, alice, nil)
 			require.Equal(t, http.StatusOK, status, body)
 			assert.Equal(t, orgKey, body["key"])
+			assert.NotContains(t, body, "head", "alice is not a member yet")
+			status, body = h.do(http.MethodGet, "/orgs/"+org, org, nil)
+			require.Equal(t, http.StatusOK, status, body)
 			assert.Equal(t, float64(0), body["head"].(map[string]any)["seq"])
 
 			// Writes to an org that is not on this host are refused.

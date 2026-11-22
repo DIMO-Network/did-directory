@@ -180,9 +180,9 @@ func TestAvisActions(t *testing.T) {
 				status, body = a.approve(id, bob)
 				assert.Equal(t, http.StatusForbidden, status, body)
 				status, body = a.approve(id, fordCredit)
-				assert.Equal(t, http.StatusForbidden, status, body)
+				assert.Equal(t, http.StatusNotFound, status, body, "not a member: the pending write is outside its reach")
 				status, body = a.approve(id, alice)
-				assert.Equal(t, http.StatusForbidden, status, body, "alice's role does not cover financed-fc")
+				assert.Equal(t, http.StatusNotFound, status, body, "alice's role does not cover financed-fc, so she cannot see it either")
 				// The pending list shows each member what they wrote or could
 				// approve, nothing else.
 				pending := func(as string) int {
@@ -235,7 +235,7 @@ func TestAvisActions(t *testing.T) {
 				assert.Equal(t, 1, pending(carol), "carol may approve what she could not write")
 				assert.Equal(t, 0, pending(bob))
 				status, body = a.approve(id, bob)
-				assert.Equal(t, http.StatusForbidden, status, body, "bob's role does not cover ford-pro-enrolled")
+				assert.Equal(t, http.StatusNotFound, status, body, "bob's role does not cover ford-pro-enrolled, so he cannot see it either")
 				status, body = a.approve(id, carol)
 				require.Equal(t, http.StatusCreated, status, body)
 

@@ -349,17 +349,28 @@ func registerKey(body []byte) (*ecdsa.PrivateKey, string) {
 	return key, ""
 }
 
+// getOrg answers an org's key, which its DID document publishes anyway, to
+// anyone signed in, and its log head only to the org and its members: the
+// head says how many commits the repository holds and when it last changed,
+// which is the repository's business (spec §6.2).
 func (s *Server) getOrg(c *fiber.Ctx) error {
 	org, _, _ := params(c)
-	head, err := s.repo.Store.Head(c.Context(), org)
-	if err != nil {
-		return s.fail(c, err)
-	}
 	key, err := s.repo.Signer.PublicKey(c.Context(), org)
 	if err != nil {
 		return s.fail(c, err)
 	}
-	return c.JSON(fiber.Map{"did": org, "key": key, "head": fiber.Map{"seq": head.Seq, "cid": head.CID, "rev": head.Rev}})
+	out := fiber.Map{"did": org, "key": key}
+	if _, err := s.reader(c.Context(), org, caller(c)); errors.Is(err, ErrForbidden) {
+		return c.JSON(out)
+	} else if err != nil {
+		return s.fail(c, err)
+	}
+	head, err := s.repo.Store.Head(c.Context(), org)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	out["head"] = fiber.Map{"seq": head.Seq, "cid": head.CID, "rev": head.Rev}
+	return c.JSON(out)
 }
 
 func (s *Server) commits(c *fiber.Ctx) error {
