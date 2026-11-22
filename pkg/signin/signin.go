@@ -104,10 +104,10 @@ type Token struct {
 }
 
 // SignIn runs the challenge and token round trip. The token carries the
-// scope asked for and is bound to Key: the challenge names the key's
-// thumbprint, and /signin/token takes a proof from it. A challenge that is
-// not the sign-in text for this request is refused unsigned, with an error
-// wrapping ErrInvalidChallenge.
+// scope asked for and is bound to its DPoP key: Key, or DPoPKey when Signer is
+// set. The challenge names that key's thumbprint, and /signin/token takes a
+// proof from it. A challenge that is not the sign-in text for this request is
+// refused unsigned, with an error wrapping ErrInvalidChallenge.
 func SignIn(ctx context.Context, r Request) (Token, error) {
 	dpopPriv := r.Key
 	if r.Signer != nil {

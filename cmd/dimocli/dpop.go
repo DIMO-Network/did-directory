@@ -12,8 +12,9 @@ import (
 
 // runDPoP prints a DPoP proof that presents an identity token signin printed,
 // for one request, so a script calling the org host with curl can send the
-// token under the DPoP scheme. The key is the keystore's key for the token's
-// sub, which is the key signin bound the token to.
+// token under the DPoP scheme. The key is the one signin bound the token to:
+// the keystore key of the token's sub, or for a Turnkey-held key the DPoP key
+// signin stored beside it (<did>.dpop.json); see makeDPoPProof.
 func runDPoP(args []string) {
 	fs := flag.NewFlagSet("dpop", flag.ExitOnError)
 	token := fs.String("token", "", "identity token the request presents")

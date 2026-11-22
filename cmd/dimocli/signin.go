@@ -19,12 +19,15 @@ import (
 	"github.com/DIMO-Network/did-directory/pkg/signin"
 )
 
-// runSignin drives dauth's DID sign-in for a DID whose key is in the local
-// keystore: it asks for a challenge, signs it with the DID's #signing key (the
-// same r||s signature the directory checks on operations) and prints the
-// identity token, which is what the org host and dauth's /exchange take. The
-// token is bound to that same key as its DPoP key, so every request that
-// presents it carries a proof from the keystore (see `dimocli dpop`).
+// runSignin drives dauth's DID sign-in: it asks for a challenge, signs it with
+// the DID's #signing key (the same r||s signature the directory checks on
+// operations) and prints the identity token, which is what the org host and
+// dauth's /exchange take. Every request that presents the token carries a
+// proof from its DPoP key (see `dimocli dpop`). For a key in the local
+// keystore, that key is the DPoP key too. For a key in Turnkey (the --turnkey
+// flags), the challenge is signed through Turnkey and the token is bound to a
+// fresh P-256 key, stored as <did>.dpop.json; the onboarding credential is
+// refused.
 func runSignin(args []string) {
 	fs := flag.NewFlagSet("signin", flag.ExitOnError)
 	dauth := fs.String("dauth", defaultDauth(), "dauth base URL")
