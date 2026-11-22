@@ -83,9 +83,9 @@ func (s *Server) couldApprove(ctx context.Context, org, member string, p *store.
 // Who the caller is in the org is settled before the write is claimed. A
 // pending write the caller could neither see nor approve (listPending's rule)
 // is not found, exactly as one that does not exist, so its id tells a stranger
-// nothing about what it covers; one the caller may see but holds no authority
-// to approve is refused. Neither is claimed, so a real approver never finds it
-// missing.
+// nothing about what it covers; one the caller may see but may not approve
+// (its author, its recipient, or a member without the authority) is refused.
+// Neither is claimed, so a real approver never finds it missing.
 func (s *Server) approve(c *fiber.Ctx) error {
 	org, _, _ := params(c)
 	id := strings.Clone(c.Params("id"))
@@ -113,6 +113,25 @@ func (s *Server) approve(c *fiber.Ctx) error {
 	}
 	if !visible && !authority {
 		return s.fail(c, store.ErrNotFound)
+	}
+	// The author (the org, for its own write) and the recipient can never
+	// approve: refuse them now, before the write is claimed. checkApprover
+	// applies the same rules again at commit.
+	author := p.CommittedBy
+	if author == "" {
+		author = org
+	}
+	if who == author {
+		return s.fail(c, forbidden("the author cannot approve their own write"))
+	}
+	if p.Collection == delegation.CollectionDelegation || p.Collection == delegation.CollectionRole {
+		rec, err := odrl.Decode(p.Record)
+		if err != nil {
+			return s.fail(c, err)
+		}
+		if rec.To != "" && who == rec.To {
+			return s.fail(c, forbidden("the recipient cannot approve a write in their favour"))
+		}
 	}
 	if !authority {
 		return s.fail(c, forbidden("%s holds no authority to approve this write", who))

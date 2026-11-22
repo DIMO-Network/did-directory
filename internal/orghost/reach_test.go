@@ -120,3 +120,55 @@ func TestApprove_ReaderWithoutAuthorityClaimsNothing(t *testing.T) {
 	require.Equal(t, http.StatusCreated, status, body)
 	assert.Equal(t, 1, counted.deletes)
 }
+
+// Fix round 1, item 3: the author (the org, for its own write) and the
+// recipient may never approve, so they are refused before the pending write
+// is claimed, and it never goes missing for a real approver.
+func TestApprove_AuthorAndRecipientClaimNothing(t *testing.T) {
+	h := newHost(t, store.NewMemoryStore())
+	org := newOrgDID()
+	h.publish(org)
+	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
+	require.Equal(t, http.StatusCreated, status, body)
+	const carol, dave = "did:dimo:carol", "did:dimo:dave"
+	h.grantRole(org, roleRecord(org, carol, delegation.Covers{Inherit: true}, delegation.AbilityOrgAdmin, delegation.AbilityOrgMembers, delegation.AbilityOrgRead))
+	h.grantRole(org, roleRecord(org, dave, delegation.Covers{Inherit: true}, delegation.AbilityOrgAdmin, delegation.AbilityOrgMembers))
+
+	// The org's own write, and a write in carol's favour.
+	ownID := pendingRole(t, h, org, "did:dimo:car1")
+	role := delegation.Record{
+		Type: delegation.TypeRole, From: org, To: carol,
+		Covers: delegation.Covers{Vehicle: "did:dimo:car2"}, Abilities: []string{"command:lock"},
+		Redelegate: delegation.Redelegate{Mode: delegation.RedelegateNone}, CreatedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	status, body = h.do(http.MethodPost, "/orgs/"+org+"/"+delegation.CollectionRole, org, role)
+	require.Equal(t, http.StatusAccepted, status, body)
+	forCarol := body["pending"].(string)
+	// Carol's own write: a role addressed to herself, which always waits for
+	// somebody else.
+	role.To, role.Covers, role.Abilities = carol, delegation.Covers{Vehicle: "did:dimo:car3"}, []string{delegation.AbilityOrgRead}
+	status, body = h.do(http.MethodPost, "/orgs/"+org+"/"+delegation.CollectionRole, carol, role)
+	require.Equal(t, http.StatusAccepted, status, body)
+	byCarol := body["pending"].(string)
+
+	counted := &countingStore{Store: h.repo.Store}
+	h.repo.Store = counted
+	for _, tc := range []struct{ id, as, want string }{
+		{ownID, org, "the author cannot approve their own write"},
+		{byCarol, carol, "the author cannot approve their own write"},
+		{forCarol, carol, "the recipient cannot approve a write in their favour"},
+	} {
+		status, body := h.do(http.MethodPost, "/orgs/"+org+"/pending/"+tc.id+"/approve", tc.as, nil)
+		assert.Equal(t, http.StatusForbidden, status, body)
+		assert.Contains(t, body["error"], tc.want)
+	}
+	assert.Zero(t, counted.deletes, "no pending write was claimed")
+
+	// Somebody else approves each.
+	for _, id := range []string{ownID, forCarol} {
+		status, body := h.do(http.MethodPost, "/orgs/"+org+"/pending/"+id+"/approve", dave, nil)
+		require.Equal(t, http.StatusCreated, status, body)
+	}
+	status, body = h.do(http.MethodPost, "/orgs/"+org+"/pending/"+byCarol+"/approve", org, nil)
+	require.Equal(t, http.StatusCreated, status, body)
+}
