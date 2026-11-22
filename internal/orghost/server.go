@@ -183,6 +183,13 @@ func (s *Server) authenticate(c *fiber.Ctx) error {
 			c.Set(fiber.HeaderWWWAuthenticate, `DPoP error="invalid_token"`)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error(), "code": "invalid_token"})
 		}
+		if errors.Is(err, ErrRateLimited) {
+			c.Set(fiber.HeaderRetryAfter, "60")
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error": "too many requests from this caller, retry later",
+				"code":  "too_many_requests",
+			})
+		}
 		s.log.Warn().Err(err).Str("path", c.Path()).Msg("could not authenticate the request")
 		c.Set(fiber.HeaderRetryAfter, "1")
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{

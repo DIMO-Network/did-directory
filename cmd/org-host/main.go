@@ -89,7 +89,7 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatal().Err(err).Msg("Bad host URL")
 	}
-	var auth orghost.Authenticator
+	var auth *orghost.JWKSAuthenticator
 	switch {
 	case cfg.IdentityJWKSURL != "":
 		auth, err = orghost.NewJWKSAuthenticatorFromURL(ctx, cfg.IdentityJWKSURL, cfg.IdentityIssuer, cfg.IdentityAudience)
@@ -101,6 +101,17 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to load identity keys")
 	}
+	// Accepted DPoP proofs are remembered in the database when there is one, so
+	// every replica refuses a proof any of them accepted.
+	var proofs store.ProofStore = store.NewMemoryProofs(store.DefaultMaxProofs)
+	if pg, ok := st.(*store.PostgresStore); ok {
+		proofs = pg
+		go orghost.SweepProofs(ctx, pg, time.Minute, log)
+	}
+	if cfg.DPoPMaxProofsPerSubject < 0 {
+		log.Fatal().Int("value", cfg.DPoPMaxProofsPerSubject).Msg("DPOP_MAX_PROOFS_PER_SUBJECT must be 0 (no limit) or more")
+	}
+	auth.UseProofStore(proofs, cfg.DPoPMaxProofsPerSubject, cfg.IssuerDIDs)
 
 	if cfg.DirectoryURL == "" {
 		log.Fatal().Msg("DIRECTORY_URL is required: /authorize reads control state from the directory")

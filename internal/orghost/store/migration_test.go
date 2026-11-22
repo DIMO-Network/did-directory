@@ -91,5 +91,5 @@ func TestPostgres_MigratesAPreKMSOrgsTable(t *testing.T) {
 	assert.Equal(t, "YES", nullable)
 	var tables int
 	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = $1`, schema).Scan(&tables))
-	assert.Equal(t, 5, tables, "orgs, commits, heads, parties, pending")
+	assert.Equal(t, 6, tables, "orgs, commits, heads, parties, pending, dpop_proofs")
 }

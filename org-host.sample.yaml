@@ -78,6 +78,11 @@ REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE: 3
 # database so every replica shares it. Past it registers answer 429 and the
 # host logs at error level: alert on that line. 0 disables the cap.
 ORG_REGISTER_MAX_PER_DAY: 200
+# Every accepted DPoP proof is remembered until it expires (six minutes), in
+# the database when DATABASE_URL is set so a proof one replica accepted is
+# refused by the others. One caller DID may hold this many live proofs; past
+# it, that caller alone gets 429. ISSUER_DIDS are not bounded. 0 disables it.
+DPOP_MAX_PROOFS_PER_SUBJECT: 10000
 # The DID directory, for control state and for the org DIDs register checks.
 DIRECTORY_URL: "http://localhost:8082"
 # How long a vehicle's control state read from the directory is served before

@@ -91,3 +91,16 @@ func TestSettings_HostURLIsNormalised(t *testing.T) {
 	s = Settings{IdentityAudience: "http://localhost:8081"}
 	assert.Equal(t, "http://localhost:8081", s.HostURL())
 }
+
+func TestLoadSettings_DPoPProofsPerSubject(t *testing.T) {
+	s, err := LoadSettings("../../org-host.sample.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, DefaultProofsPerSubject, s.DPoPMaxProofsPerSubject)
+	s, err = LoadSettings("/nonexistent")
+	require.NoError(t, err)
+	assert.Equal(t, 10_000, s.DPoPMaxProofsPerSubject)
+	t.Setenv("DPOP_MAX_PROOFS_PER_SUBJECT", "50")
+	s, err = LoadSettings("/nonexistent")
+	require.NoError(t, err)
+	assert.Equal(t, 50, s.DPoPMaxProofsPerSubject)
+}

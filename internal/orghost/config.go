@@ -57,6 +57,11 @@ type Settings struct {
 	// and the host logs at error level, which is the alarm to page on. 0
 	// disables it.
 	RegisterMaxPerDay int `yaml:"ORG_REGISTER_MAX_PER_DAY"`
+	// DPoPMaxProofsPerSubject bounds how many live DPoP proofs one caller DID
+	// may hold (a proof lives six minutes), so one signed-in DID cannot fill
+	// the proof store for everyone; past it that caller gets 429. ISSUER_DIDS
+	// are not bounded. 0 disables it.
+	DPoPMaxProofsPerSubject int `yaml:"DPOP_MAX_PROOFS_PER_SUBJECT"`
 	// DirectoryURL is the DID directory, for control state (plan §3.3).
 	DirectoryURL string `yaml:"DIRECTORY_URL"`
 	// IssuerDIDs are the DIDs that may call POST /authorize: dauth's.
@@ -75,7 +80,8 @@ type Settings struct {
 // LoadSettings reads path, then applies environment overrides.
 func LoadSettings(path string) (*Settings, error) {
 	s := &Settings{Port: 8081, LogLevel: "info", PageSize: 100, Signer: "local", KMSAliasPrefix: "alias/dimo-org/",
-		RegisterRateLimitPerMinute: 10, RegisterRateLimitPerCallerPerMinute: 3, RegisterMaxPerDay: 200}
+		RegisterRateLimitPerMinute: 10, RegisterRateLimitPerCallerPerMinute: 3, RegisterMaxPerDay: 200,
+		DPoPMaxProofsPerSubject: DefaultProofsPerSubject}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := yaml.Unmarshal(data, s); err != nil {
 			return nil, err
@@ -126,6 +132,7 @@ func LoadSettings(path string) (*Settings, error) {
 	envInt("REGISTER_RATE_LIMIT_PER_MINUTE", &s.RegisterRateLimitPerMinute)
 	envInt("REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE", &s.RegisterRateLimitPerCallerPerMinute)
 	envInt("ORG_REGISTER_MAX_PER_DAY", &s.RegisterMaxPerDay)
+	envInt("DPOP_MAX_PROOFS_PER_SUBJECT", &s.DPoPMaxProofsPerSubject)
 	return s, nil
 }
 

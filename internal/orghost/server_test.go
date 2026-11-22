@@ -801,14 +801,14 @@ func TestJWKSAuthenticator(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// TestReplayCacheFull: a full DPoP replay cache is this host's capacity, not
+// TestReplayCacheFull: a full DPoP proof store is this host's capacity, not
 // the caller's credentials, so a sound request is answered 503 with
 // Retry-After and no WWW-Authenticate challenge, bad credentials are still 401,
 // and the request passes once there is room.
 func TestReplayCacheFull(t *testing.T) {
 	h := newHost(t, store.NewMemoryStore())
 	org := newOrgDID()
-	h.auth.proofs.MaxReplayEntries = 1
+	h.auth.UseProofStore(store.NewMemoryProofs(1), 0, nil)
 	// The register request's proof fills the cache.
 	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
@@ -840,7 +840,7 @@ func TestReplayCacheFull(t *testing.T) {
 	assert.Equal(t, "invalid_token", body["code"])
 
 	// With room again the same request passes.
-	h.auth.proofs.MaxReplayEntries = 2
+	h.auth.UseProofStore(store.NewMemoryProofs(2), 0, nil)
 	status, body = h.do(http.MethodGet, path, org, nil)
 	assert.Equal(t, http.StatusOK, status, body)
 }

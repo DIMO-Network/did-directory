@@ -86,6 +86,17 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 			operator BOOLEAN NOT NULL,
 			set_at   TIMESTAMPTZ NOT NULL
 		);
+		-- Accepted DPoP proofs, so a proof is accepted once by every replica on
+		-- this database (R5-F6); expired rows are deleted by DeleteExpiredProofs.
+		CREATE TABLE IF NOT EXISTS dpop_proofs (
+			jkt        TEXT NOT NULL,
+			jti        TEXT NOT NULL,
+			subject    TEXT NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (jkt, jti)
+		);
+		CREATE INDEX IF NOT EXISTS dpop_proofs_subject_idx ON dpop_proofs (subject, expires_at);
+		CREATE INDEX IF NOT EXISTS dpop_proofs_expires_idx ON dpop_proofs (expires_at);
 		CREATE TABLE IF NOT EXISTS pending (
 			org          TEXT NOT NULL REFERENCES orgs(did),
 			id           TEXT NOT NULL,
@@ -172,6 +183,44 @@ func (s *PostgresStore) AnyKMSKeyRef(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("query kms orgs: %w", err)
 	}
 	return ref, nil
+}
+
+func (s *PostgresStore) RecordProof(ctx context.Context, p Proof, now time.Time, perSubject int) error {
+	if perSubject > 0 {
+		// LIMIT bounds the count's cost at the cap, however many proofs the
+		// subject has.
+		var n int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT count(*) FROM (SELECT 1 FROM dpop_proofs WHERE subject = $1 AND expires_at > $2 LIMIT $3) live`,
+			p.Subject, now, perSubject).Scan(&n); err != nil {
+			return fmt.Errorf("count dpop proofs: %w", err)
+		}
+		if n >= perSubject {
+			return ErrProofLimit
+		}
+	}
+	// An expired row with the same key and id may be taken over; a live one
+	// is a replay.
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO dpop_proofs (jkt, jti, subject, expires_at) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (jkt, jti) DO UPDATE SET subject = EXCLUDED.subject, expires_at = EXCLUDED.expires_at
+			WHERE dpop_proofs.expires_at <= $5`,
+		p.JKT, p.JTI, p.Subject, p.Expires, now)
+	if err != nil {
+		return fmt.Errorf("record dpop proof: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProofReplayed
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteExpiredProofs(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM dpop_proofs WHERE expires_at <= $1`, now)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired dpop proofs: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *PostgresStore) HasLocalOrgs(ctx context.Context) (bool, error) {
