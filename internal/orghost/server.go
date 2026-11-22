@@ -3,6 +3,7 @@ package orghost
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -45,11 +46,14 @@ type Server struct {
 	// in any rolling day, counted in the store.
 	perCaller *callerLimiter
 	maxPerDay int
-	policies  Policies
-	issuers   map[string]bool
-	admins    map[string]bool
-	pageSize  int
-	log       zerolog.Logger
+	// attempts bounds every register attempt per caller, ahead of the DID
+	// resolve each makes; it is not the key budget.
+	attempts *callerLimiter
+	policies Policies
+	issuers  map[string]bool
+	admins   map[string]bool
+	pageSize int
+	log      zerolog.Logger
 }
 
 // Options configures a Server.
@@ -75,6 +79,9 @@ type Options struct {
 	// RegisterMaxPerDay caps the orgs made in any rolling 24 hours, counted in
 	// the store so every replica sharing it shares the cap; zero means no cap.
 	RegisterMaxPerDay int
+	// RegisterAttemptsPerCallerPerMinute bounds every register attempt by one
+	// caller, ahead of the DID resolve each one makes; zero means no limit.
+	RegisterAttemptsPerCallerPerMinute int
 	// Issuers are the DIDs that may call POST /authorize (plan §3.3): dauth.
 	Issuers []string
 	// Admins are the DIDs that may set party attributes (plan §1 decision E).
@@ -114,6 +121,7 @@ func New(o Options) *fiber.App {
 		documents: o.Documents, publicURL: normalHostURL(o.PublicURL),
 		registers: &rateLimiter{limit: o.RegisterPerMinute},
 		perCaller: &callerLimiter{limit: o.RegisterPerCallerPerMinute},
+		attempts:  &callerLimiter{limit: o.RegisterAttemptsPerCallerPerMinute},
 		maxPerDay: o.RegisterMaxPerDay,
 		policies:  policies,
 		issuers:   set(o.Issuers), admins: set(o.Admins),
@@ -251,6 +259,12 @@ func (s *Server) register(c *fiber.Ctx) error {
 	if who != org {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "only the org itself may register its repository"})
 	}
+	// Every attempt resolves the DID, uncached, so attempts are bounded per
+	// caller first: a flood costs the flooder, and no resolve, past this.
+	if ok, wait := s.attempts.allow(who, s.repo.now()); !ok {
+		c.Set(fiber.HeaderRetryAfter, strconv.Itoa(retryAfterSeconds(wait)))
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "too many register attempts by this caller, retry later"})
+	}
 	key, bad := registerKey(c.Body())
 	if bad != "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": bad})
@@ -353,8 +367,10 @@ func registerKey(body []byte) (*ecdsa.PrivateKey, string) {
 		return nil, fmt.Sprintf("privateKey: %v", err)
 	}
 	key, ok := parsed.(*ecdsa.PrivateKey)
-	if !ok {
-		return nil, "privateKey must be an ECDSA key"
+	if !ok || key.Curve != elliptic.P256() {
+		// #dimo_org is a P-256 key (did:key and the commit verifiers take no
+		// other), and this is checked before any budget is charged.
+		return nil, "privateKey must be a P-256 ECDSA key"
 	}
 	return key, ""
 }

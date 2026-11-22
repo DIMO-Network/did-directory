@@ -340,3 +340,67 @@ func TestRegister_KMSPrivateKeySpendsNoBudget(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, h.registerResp(org).StatusCode, "the budget is whole")
 	assert.Len(t, api.created, 1)
 }
+
+// Fix round 1, item 1 (the reviewer's probe): on the local signer a P-384
+// privateKey used to be refused only after both budgets were charged, so four
+// self-made DIDs posting one kept every register out. The curve is checked
+// with the body, before any charge.
+func TestRegister_NonP256KeySpendsNoBudget(t *testing.T) {
+	h := newHostWith(t, store.NewMemoryStore(), nil, func(o *Options) {
+		o.RegisterPerMinute = 10
+		o.RegisterPerCallerPerMinute = 3
+	})
+	h.clock = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(p384)
+	require.NoError(t, err)
+	body := map[string]string{"privateKey": base64.StdEncoding.EncodeToString(der)}
+	for range 4 {
+		attacker := newOrgDID()
+		h.publish(attacker)
+		for range 5 {
+			status, resp := h.do(http.MethodPost, "/orgs/"+attacker, attacker, body)
+			require.Equal(t, http.StatusBadRequest, status, resp)
+			assert.Contains(t, resp["error"], "P-256")
+		}
+	}
+	for i := range 10 {
+		org := newOrgDID()
+		h.publish(org)
+		require.Equal(t, http.StatusCreated, h.registerResp(org).StatusCode, "legit register %d", i)
+	}
+}
+
+// Fix round 1, item 2: every register attempt by a caller resolves its DID,
+// uncached, so attempts are bounded per caller ahead of the resolve. Only the
+// flooder is slowed; it spends none of the key budget either.
+func TestRegister_AttemptsPerCallerBoundTheResolves(t *testing.T) {
+	h, api := kmsHost(t, func(o *Options) {
+		o.RegisterPerMinute = 10
+		o.RegisterAttemptsPerCallerPerMinute = 5
+	})
+	h.clock = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	flooder := newOrgDID() // names no host, so every attempt is a 403 after a resolve
+	h.directory.publishHost(flooder, "https://elsewhere.test")
+	for range 5 {
+		status, body := h.do(http.MethodPost, "/orgs/"+flooder, flooder, nil)
+		require.Equal(t, http.StatusForbidden, status, body)
+	}
+	before := h.directory.resolves
+	for range 20 {
+		status, body := h.do(http.MethodPost, "/orgs/"+flooder, flooder, nil)
+		require.Equal(t, http.StatusTooManyRequests, status, body)
+		assert.Contains(t, body["error"], "register attempts")
+	}
+	assert.Equal(t, before, h.directory.resolves, "past its attempts the flooder costs no resolve")
+
+	org := newOrgDID()
+	h.publish(org)
+	assert.Equal(t, http.StatusCreated, h.registerResp(org).StatusCode, "another caller is untouched")
+	assert.Len(t, api.created, 1)
+
+	h.clock = h.clock.Add(time.Minute + time.Second)
+	status, body := h.do(http.MethodPost, "/orgs/"+flooder, flooder, nil)
+	assert.Equal(t, http.StatusForbidden, status, body, "a minute on, the flooder may try again")
+}

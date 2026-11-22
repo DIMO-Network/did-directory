@@ -134,6 +134,7 @@ func main() {
 		"REGISTER_RATE_LIMIT_PER_MINUTE":            cfg.RegisterRateLimitPerMinute,
 		"REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE": cfg.RegisterRateLimitPerCallerPerMinute,
 		"ORG_REGISTER_MAX_PER_DAY":                  cfg.RegisterMaxPerDay,
+		"REGISTER_ATTEMPTS_PER_CALLER_PER_MINUTE":   cfg.RegisterAttemptsPerCallerPerMinute,
 	} {
 		if v < 0 {
 			log.Fatal().Int("value", v).Msgf("%s must be 0 (no limit) or more", name)
@@ -166,20 +167,21 @@ func main() {
 	repo := &orghost.Repository{Store: st, Signer: signers.Signer}
 	directory := client.New(cfg.DirectoryURL)
 	app := orghost.New(orghost.Options{
-		Repo:                       repo,
-		Auth:                       auth,
-		Control:                    directory,
-		Documents:                  directory,
-		PublicURL:                  publicURL,
-		RegisterPerMinute:          cfg.RegisterRateLimitPerMinute,
-		RegisterPerCallerPerMinute: cfg.RegisterRateLimitPerCallerPerMinute,
-		RegisterMaxPerDay:          cfg.RegisterMaxPerDay,
-		Issuers:                    cfg.IssuerDIDs,
-		Admins:                     cfg.AdminDIDs,
-		Policies:                   policies,
-		PageSize:                   cfg.PageSize,
-		ControlCacheTTL:            controlTTL,
-		Log:                        log,
+		Repo:                               repo,
+		Auth:                               auth,
+		Control:                            directory,
+		Documents:                          directory,
+		PublicURL:                          publicURL,
+		RegisterPerMinute:                  cfg.RegisterRateLimitPerMinute,
+		RegisterPerCallerPerMinute:         cfg.RegisterRateLimitPerCallerPerMinute,
+		RegisterMaxPerDay:                  cfg.RegisterMaxPerDay,
+		RegisterAttemptsPerCallerPerMinute: cfg.RegisterAttemptsPerCallerPerMinute,
+		Issuers:                            cfg.IssuerDIDs,
+		Admins:                             cfg.AdminDIDs,
+		Policies:                           policies,
+		PageSize:                           cfg.PageSize,
+		ControlCacheTTL:                    controlTTL,
+		Log:                                log,
 	})
 
 	go func() {

@@ -74,6 +74,10 @@ REGISTER_RATE_LIMIT_PER_MINUTE: 10
 # Registers one caller may make in any rolling minute, so a DID whose register
 # keeps failing cannot spend the host-wide minute alone. 0 disables it.
 REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE: 3
+# Register attempts one caller may make in any rolling minute, counted ahead of
+# the DID resolve every attempt makes, whatever it then answers. It only ever
+# slows that caller and spends nothing of the key budget. 0 disables it.
+REGISTER_ATTEMPTS_PER_CALLER_PER_MINUTE: 30
 # New orgs (keys) this host may create in any rolling 24 hours, counted in the
 # database so every replica shares it. Past it registers answer 429 and the
 # host logs at error level: alert on that line. 0 disables the cap.

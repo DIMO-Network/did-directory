@@ -35,10 +35,12 @@ func TestLoadSettings_RegisterBudgets(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, s.RegisterRateLimitPerCallerPerMinute, "3 registers a minute per caller by default")
 	assert.Equal(t, 200, s.RegisterMaxPerDay, "200 new orgs a day by default")
+	assert.Equal(t, 30, s.RegisterAttemptsPerCallerPerMinute, "30 register attempts a minute per caller by default")
 	s, err = LoadSettings("../../org-host.sample.yaml")
 	require.NoError(t, err)
 	assert.Equal(t, 3, s.RegisterRateLimitPerCallerPerMinute)
 	assert.Equal(t, 200, s.RegisterMaxPerDay)
+	assert.Equal(t, 30, s.RegisterAttemptsPerCallerPerMinute)
 
 	t.Setenv("REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE", "1")
 	t.Setenv("ORG_REGISTER_MAX_PER_DAY", "0")
