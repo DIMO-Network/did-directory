@@ -111,7 +111,7 @@ func signedEvent(source, subject, producer, machineKey, ceType, dataVersion, dat
 
 // loadOrCreatePEMKey reads a SEC 1 PEM P-256 key, or makes one at path.
 func loadOrCreatePEMKey(path string) (*ecdsa.PrivateKey, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readSecretFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
@@ -121,7 +121,7 @@ func loadOrCreatePEMKey(path string) (*ecdsa.PrivateKey, error) {
 		if err != nil {
 			return nil, err
 		}
-		return key, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600)
+		return key, writeSecretFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}))
 	}
 	if err != nil {
 		return nil, err

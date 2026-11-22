@@ -66,7 +66,7 @@ func writeKey(path, did string, key *ecdsa.PrivateKey) error {
 		return fmt.Errorf("marshal key entry: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := writeSecretFile(path, data); err != nil {
 		return fmt.Errorf("write key file: %w", err)
 	}
 
@@ -80,7 +80,7 @@ func LoadKey(did string) (*ecdsa.PrivateKey, error) {
 
 // readKey parses the KeyEntry at path.
 func readKey(path string) (*ecdsa.PrivateKey, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSecretFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read key file %s: %w", path, err)
 	}
@@ -132,7 +132,7 @@ func SaveOpening(did string, o control.Opening) error {
 	if err != nil {
 		return fmt.Errorf("marshal opening: %w", err)
 	}
-	if err := os.WriteFile(openingFilePath(did), data, 0600); err != nil {
+	if err := writeSecretFile(openingFilePath(did), data); err != nil {
 		return fmt.Errorf("write opening file: %w", err)
 	}
 	return nil

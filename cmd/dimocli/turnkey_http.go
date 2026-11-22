@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +30,7 @@ type turnkeyAPIKey struct {
 // loadTurnkeyAPIKey reads a JSON {publicKey, privateKey} file. Errors never
 // include key material.
 func loadTurnkeyAPIKey(path string) (*turnkeyAPIKey, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSecretFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read Turnkey API key file: %w", err)
 	}
