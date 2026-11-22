@@ -210,8 +210,22 @@ func checkChallenge(text, nonce, did, jkt, scope string, audience []string) erro
 	return nil
 }
 
+// refreshTimeout bounds one Client sign-in, so a dauth that never answers
+// holds the refresh only this long before a later call can start another.
+// Tests shorten it.
+var refreshTimeout = 2 * time.Minute
+
 // Client keeps one identity token and signs in again when it is about to
 // expire. It is safe for concurrent use.
+//
+// One sign-in runs at a time however many callers want a token, and no
+// caller waits on it while the current token is still valid: inside Margin
+// the current token is returned at once while the replacement is fetched in
+// the background. A caller with no valid token waits for that sign-in, or
+// until its own ctx is done. The sign-in runs on its own context (the values
+// of the ctx of the call that started it, without its cancellation, and at
+// most refreshTimeout), so one caller giving up neither fails nor restarts
+// the sign-in the others are waiting on.
 type Client struct {
 	Request Request
 	// Margin is how long before expiry a token is replaced; 30s when zero.
@@ -220,25 +234,77 @@ type Client struct {
 	mu      sync.Mutex
 	token   string
 	expires time.Time
+	// refresh is the sign-in in flight; nil when there is none.
+	refresh *refresh
 }
 
-// Token returns a token with at least Margin left on it.
+// refresh is one sign-in, which every caller without a valid token waits on.
+type refresh struct {
+	done  chan struct{}
+	token string
+	err   error
+}
+
+// Token returns a token that is still valid, signing in again when the
+// current one has less than Margin left (see Client).
 func (c *Client) Token(ctx context.Context) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	margin := c.Margin
 	if margin == 0 {
 		margin = 30 * time.Second
 	}
-	if c.token != "" && time.Until(c.expires) > margin {
-		return c.token, nil
+
+	c.mu.Lock()
+	now := time.Now()
+	if c.token != "" && c.expires.Sub(now) > margin {
+		tok := c.token
+		c.mu.Unlock()
+		return tok, nil
 	}
-	t, err := SignIn(ctx, c.Request)
-	if err != nil {
-		return "", err
+	r := c.refresh
+	if r == nil {
+		r = &refresh{done: make(chan struct{})}
+		c.refresh = r
+		go c.signIn(context.WithoutCancel(ctx), r)
 	}
-	c.token, c.expires = t.Token, time.Now().Add(time.Duration(t.ExpiresIn)*time.Second)
-	return c.token, nil
+	if c.token != "" && now.Before(c.expires) {
+		tok := c.token
+		c.mu.Unlock()
+		return tok, nil
+	}
+	c.mu.Unlock()
+
+	select {
+	case <-r.done:
+		return r.token, r.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// signIn runs r's sign-in and hands its result to the Client and to every
+// caller waiting on r. A panic (SignIn on a Request with no key) is returned
+// as r's error: it happens on this goroutine, where it would end the process.
+func (c *Client) signIn(ctx context.Context, r *refresh) {
+	var (
+		t   Token
+		err error
+	)
+	defer func() {
+		if p := recover(); p != nil {
+			t, err = Token{}, fmt.Errorf("sign-in panicked: %v", p)
+		}
+		c.mu.Lock()
+		if err == nil {
+			c.token, c.expires = t.Token, time.Now().Add(time.Duration(t.ExpiresIn)*time.Second)
+		}
+		r.token, r.err = t.Token, err
+		c.refresh = nil
+		c.mu.Unlock()
+		close(r.done)
+	}()
+	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	defer cancel()
+	t, err = SignIn(ctx, c.Request)
 }
 
 // HTTPError is a non-2xx answer, with the body dauth sent. A 503 or 429 that
