@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"sync"
 	"testing"
+	"time"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
@@ -47,13 +48,19 @@ type fakeKMS struct {
 	raceOrg   string
 	lostReply bool // the next CreateAlias succeeds but answers AlreadyExists, as a retried call does
 	state     map[string]kmstypes.KeyState
+	// spec and usage override what DescribeKey reports for a key; algs
+	// overrides the signing algorithms GetPublicKey reports.
+	spec  map[string]kmstypes.KeySpec
+	usage map[string]kmstypes.KeyUsageType
+	algs  []kmstypes.SigningAlgorithmSpec
 }
 
 func newFakeKMS(t *testing.T) *fakeKMS {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	return &fakeKMS{key: key, state: map[string]kmstypes.KeyState{}, tags: map[string][]kmstypes.Tag{}, aliasTo: map[string]string{}}
+	return &fakeKMS{key: key, state: map[string]kmstypes.KeyState{}, tags: map[string][]kmstypes.Tag{}, aliasTo: map[string]string{},
+		spec: map[string]kmstypes.KeySpec{}, usage: map[string]kmstypes.KeyUsageType{}}
 }
 
 func (f *fakeKMS) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func(*kms.Options)) (*kms.CreateKeyOutput, error) {
@@ -84,7 +91,15 @@ func (f *fakeKMS) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...
 	if !ok {
 		st = kmstypes.KeyStateEnabled
 	}
-	return &kms.DescribeKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{Arn: &arn, KeyState: st}}, nil
+	spec, ok := f.spec[arn]
+	if !ok {
+		spec = kmstypes.KeySpecEccNistP256
+	}
+	usage, ok := f.usage[arn]
+	if !ok {
+		usage = kmstypes.KeyUsageTypeSignVerify
+	}
+	return &kms.DescribeKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{Arn: &arn, KeyState: st, KeySpec: spec, KeyUsage: usage}}, nil
 }
 
 func (f *fakeKMS) ListResourceTags(_ context.Context, in *kms.ListResourceTagsInput, _ ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
@@ -154,7 +169,12 @@ func (f *fakeKMS) GetPublicKey(_ context.Context, _ *kms.GetPublicKeyInput, _ ..
 	if err != nil {
 		return nil, err
 	}
-	return &kms.GetPublicKeyOutput{PublicKey: der}, nil
+	algs := f.algs
+	if algs == nil {
+		algs = []kmstypes.SigningAlgorithmSpec{kmstypes.SigningAlgorithmSpecEcdsaSha256}
+	}
+	return &kms.GetPublicKeyOutput{PublicKey: der, SigningAlgorithms: algs,
+		KeySpec: kmstypes.KeySpecEccNistP256, KeyUsage: kmstypes.KeyUsageTypeSignVerify}, nil
 }
 
 func TestKMSSigner_RegisterCreatesKey(t *testing.T) {
@@ -180,7 +200,7 @@ func TestKMSSigner_RegisterCreatesKey(t *testing.T) {
 
 	sum := sha256.Sum256([]byte(org))
 	require.Len(t, api.aliases, 1)
-	assert.Equal(t, "alias/dimo-org/"+hex.EncodeToString(sum[:])[:16], *api.aliases[0].AliasName)
+	assert.Equal(t, "alias/dimo-org/"+hex.EncodeToString(sum[:]), *api.aliases[0].AliasName, "all 256 bits of the DID's hash, not 64")
 	assert.Equal(t, fakeKeyARN, *api.aliases[0].TargetKeyId)
 
 	row, err := st.GetOrg(ctx, org)
@@ -434,4 +454,217 @@ func TestKMSSigner_RegisterRefusesKeyThatIsNotEnabled(t *testing.T) {
 	_, err := s.Register(ctx, "did:dimo:org1", nil)
 	assert.EqualError(t, err, "KMS key for did:dimo:org1 is Disabled; an operator must re-enable it")
 	assert.Empty(t, api.created)
+}
+
+// R4-F12: a key found through the alias must be one this host could have
+// made: a P-256 signing key. A P-256 KEY_AGREEMENT key, or an RSA one, would
+// register and then fail every Sign.
+func TestKMSSigner_RegisterRefusesAliasedKeyOfAnotherKind(t *testing.T) {
+	ctx := context.Background()
+	for name, set := range map[string]func(f *fakeKMS, arn string){
+		"key agreement": func(f *fakeKMS, arn string) { f.usage[arn] = kmstypes.KeyUsageTypeKeyAgreement },
+		"rsa":           func(f *fakeKMS, arn string) { f.spec[arn] = kmstypes.KeySpecRsa2048 },
+		"secp256k1":     func(f *fakeKMS, arn string) { f.spec[arn] = kmstypes.KeySpecEccSecgP256k1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := store.NewMemoryStore()
+			api := newFakeKMS(t)
+			s := NewKMSSigner(st, api, "alias/dimo-org/")
+			arn := api.newKeyLocked([]kmstypes.Tag{{TagKey: ptr("org"), TagValue: ptr("did:dimo:org1")}})
+			api.aliasTo[s.alias("did:dimo:org1")] = arn
+			set(api, arn)
+
+			_, err := s.Register(ctx, "did:dimo:org1", nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "not a P-256 signing key")
+			assert.Empty(t, api.created)
+			_, err = st.GetOrg(ctx, "did:dimo:org1")
+			assert.True(t, store.IsNotFound(err))
+		})
+	}
+}
+
+func TestKMSSigner_PublicKeyNeedsECDSASHA256(t *testing.T) {
+	st := store.NewMemoryStore()
+	api := newFakeKMS(t)
+	api.algs = []kmstypes.SigningAlgorithmSpec{kmstypes.SigningAlgorithmSpecEcdsaSha384}
+	_, err := NewKMSSigner(st, api, "alias/dimo-org/").Register(context.Background(), "did:dimo:org1", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ECDSA_SHA_256")
+	_, err = st.GetOrg(context.Background(), "did:dimo:org1")
+	assert.True(t, store.IsNotFound(err), "no row for a key that cannot sign commits")
+}
+
+// deadlineKMS records the deadline each call's context carries, and blocks
+// Sign until its context ends when stall is set.
+type deadlineKMS struct {
+	*fakeKMS
+	mu        sync.Mutex
+	deadlines map[string][]time.Duration // call -> time left when it arrived
+	stall     bool
+}
+
+func (d *deadlineKMS) note(ctx context.Context, call string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	left := time.Duration(-1)
+	if dl, ok := ctx.Deadline(); ok {
+		left = time.Until(dl)
+	}
+	d.deadlines[call] = append(d.deadlines[call], left)
+}
+
+func (d *deadlineKMS) CreateKey(ctx context.Context, in *kms.CreateKeyInput, o ...func(*kms.Options)) (*kms.CreateKeyOutput, error) {
+	d.note(ctx, "CreateKey")
+	return d.fakeKMS.CreateKey(ctx, in, o...)
+}
+
+func (d *deadlineKMS) CreateAlias(ctx context.Context, in *kms.CreateAliasInput, o ...func(*kms.Options)) (*kms.CreateAliasOutput, error) {
+	d.note(ctx, "CreateAlias")
+	return d.fakeKMS.CreateAlias(ctx, in, o...)
+}
+
+func (d *deadlineKMS) DescribeKey(ctx context.Context, in *kms.DescribeKeyInput, o ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
+	d.note(ctx, "DescribeKey")
+	return d.fakeKMS.DescribeKey(ctx, in, o...)
+}
+
+func (d *deadlineKMS) ListResourceTags(ctx context.Context, in *kms.ListResourceTagsInput, o ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
+	d.note(ctx, "ListResourceTags")
+	return d.fakeKMS.ListResourceTags(ctx, in, o...)
+}
+
+func (d *deadlineKMS) GetPublicKey(ctx context.Context, in *kms.GetPublicKeyInput, o ...func(*kms.Options)) (*kms.GetPublicKeyOutput, error) {
+	d.note(ctx, "GetPublicKey")
+	return d.fakeKMS.GetPublicKey(ctx, in, o...)
+}
+
+func (d *deadlineKMS) Sign(ctx context.Context, in *kms.SignInput, o ...func(*kms.Options)) (*kms.SignOutput, error) {
+	d.note(ctx, "Sign")
+	if d.stall {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return d.fakeKMS.Sign(ctx, in, o...)
+}
+
+// R4-F2: every KMS call carries its own deadline, whatever the caller's
+// context: the Fiber request context never expires and the AWS SDK sets no
+// read timeout, so a stalled call would hold the org's write lock for good.
+func TestKMSSigner_EveryCallHasADeadline(t *testing.T) {
+	ctx := context.Background() // no deadline of its own, like fasthttp's
+	api := &deadlineKMS{fakeKMS: newFakeKMS(t), deadlines: map[string][]time.Duration{}}
+	st := store.NewMemoryStore()
+	s := NewKMSSigner(st, api, "alias/dimo-org/")
+	_, err := s.Register(ctx, "did:dimo:org1", nil)
+	require.NoError(t, err)
+	_, err = s.Sign(ctx, "did:dimo:org1", []byte("x"))
+	require.NoError(t, err)
+	_, err = NewKMSSigner(st, api, "alias/dimo-org/").PublicKey(ctx, "did:dimo:org1")
+	require.NoError(t, err)
+
+	within := func(call string, limit time.Duration) {
+		t.Helper()
+		got := api.deadlines[call]
+		require.NotEmpty(t, got, call)
+		for _, left := range got {
+			assert.Greater(t, left, time.Duration(0), "%s has a deadline", call)
+			assert.LessOrEqual(t, left, limit, call)
+		}
+	}
+	for _, call := range []string{"DescribeKey", "CreateKey", "CreateAlias"} {
+		within(call, 15*time.Second)
+	}
+	within("GetPublicKey", 5*time.Second)
+	within("Sign", 5*time.Second)
+}
+
+// R4-F2, reviewer 4's P5: a stalled Sign gives up at its deadline, so the
+// write that was waiting on the org's lock runs.
+func TestKMSSigner_StalledSignGivesUp(t *testing.T) {
+	st := store.NewMemoryStore()
+	api := &deadlineKMS{fakeKMS: newFakeKMS(t), deadlines: map[string][]time.Duration{}}
+	s := NewKMSSigner(st, api, "alias/dimo-org/")
+	s.callTimeout = 100 * time.Millisecond
+	_, err := s.Register(context.Background(), "did:dimo:org1", nil)
+	require.NoError(t, err)
+
+	api.stall = true
+	start := time.Now()
+	_, err = s.Sign(context.Background(), "did:dimo:org1", []byte("x"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), 2*time.Second)
+}
+
+// lagKMS answers NotFound for the alias once right after CreateAlias, as
+// KMS's eventually consistent alias reads may.
+type lagKMS struct {
+	*fakeKMS
+	mu        sync.Mutex
+	aliasMade bool
+	lagged    bool
+}
+
+func (l *lagKMS) CreateAlias(ctx context.Context, in *kms.CreateAliasInput, o ...func(*kms.Options)) (*kms.CreateAliasOutput, error) {
+	out, err := l.fakeKMS.CreateAlias(ctx, in, o...)
+	l.mu.Lock()
+	l.aliasMade = true
+	l.mu.Unlock()
+	return out, err
+}
+
+func (l *lagKMS) DescribeKey(ctx context.Context, in *kms.DescribeKeyInput, o ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
+	l.mu.Lock()
+	lag := l.aliasMade && !l.lagged
+	if lag {
+		l.lagged = true
+	}
+	l.mu.Unlock()
+	if lag {
+		return nil, &kmstypes.NotFoundException{}
+	}
+	return l.fakeKMS.DescribeKey(ctx, in, o...)
+}
+
+// R4-F3, reviewer 4's P2: CreateAlias landed but its reply was lost, the SDK's
+// retry answers AlreadyExists, and the alias read lags once. The alias may
+// well name our key, so nothing is deleted: the register asks for a retry,
+// and the retry finds the key through the alias.
+func TestKMSSigner_AliasLagAfterAlreadyExistsDeletesNothing(t *testing.T) {
+	st := store.NewMemoryStore()
+	base := newFakeKMS(t)
+	base.lostReply = true
+	api := &lagKMS{fakeKMS: base}
+	s := NewKMSSigner(st, api, "alias/dimo-org/")
+
+	_, err := s.Register(t.Context(), "did:dimo:org1", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRetryLater)
+	assert.Empty(t, base.deleted, "the key the alias may name is never scheduled for deletion")
+
+	didKey, err := s.Register(t.Context(), "did:dimo:org1", nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, didKey)
+	assert.Len(t, base.created, 1, "the retry reuses the aliased key")
+	row, err := st.GetOrg(t.Context(), "did:dimo:org1")
+	require.NoError(t, err)
+	assert.Equal(t, base.aliasTo[s.alias("did:dimo:org1")], row.KeyRef)
+}
+
+// The handler answers a register that should be retried 503, not 500.
+func TestRegisterHandler_RetryLaterIs503(t *testing.T) {
+	st := store.NewMemoryStore()
+	h := newHost(t, st)
+	base := newFakeKMS(t)
+	base.lostReply = true
+	h.repo.Signer = NewKMSSigner(st, &lagKMS{fakeKMS: base}, "alias/dimo-org/")
+	org := newOrgDID()
+	h.publish(org)
+
+	status, body := h.do("POST", "/orgs/"+org, org, nil)
+	assert.Equal(t, 503, status, body)
+	assert.Equal(t, "temporarily_unavailable", body["code"])
+	status, body = h.do("POST", "/orgs/"+org, org, nil)
+	assert.Equal(t, 201, status, body)
 }

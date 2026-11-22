@@ -36,9 +36,13 @@ MASTER_KEY: ""
 ORG_SIGNER: "local"
 KMS_REGION: ""
 # Give each environment its own prefix, for example alias/dimo-org/prod/ and
-# alias/dimo-org/dev/: an alias is derived from the org DID alone, so dev and
-# prod in one account would otherwise share aliases, and an org on both hosts
-# would get one key.
+# alias/dimo-org/dev/: an alias is the prefix plus the hex SHA-256 of the org
+# DID (64 characters), derived from the DID alone, so dev and prod in one
+# account would otherwise share aliases, and an org on both hosts would get one
+# key. A register refuses a key found through the alias unless it is tagged for
+# the org, enabled, and a P-256 SIGN_VERIFY key offering ECDSA_SHA_256. Every
+# KMS call has its own deadline: 5 s for Sign and GetPublicKey, 15 s for each
+# other step of a register.
 KMS_ALIAS_PREFIX: "alias/dimo-org/"
 # Identity tokens (RS256, sub = member DID) are verified against this key set.
 IDENTITY_JWKS_URL: "http://localhost:8080/signin/keys"

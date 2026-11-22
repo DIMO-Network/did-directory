@@ -302,6 +302,14 @@ func (s *Server) register(c *fiber.Ctx) error {
 	if errors.Is(err, store.ErrOrgExists) {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "org is already registered on this host"})
 	}
+	if errors.Is(err, ErrRetryLater) {
+		s.log.Warn().Err(err).Str("org", org).Msg("register did not finish; the caller should retry")
+		c.Set(fiber.HeaderRetryAfter, "2")
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "the register did not finish, retry shortly",
+			"code":  "temporarily_unavailable",
+		})
+	}
 	if err != nil {
 		s.log.Error().Err(err).Str("org", org).Msg("register org")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
