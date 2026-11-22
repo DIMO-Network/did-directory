@@ -45,13 +45,15 @@ type fakeKMS struct {
 	deleted   []*kms.ScheduleKeyDeletionInput
 	raceAlias bool // the next CreateAlias loses to a concurrent register
 	raceOrg   string
+	lostReply bool // the next CreateAlias succeeds but answers AlreadyExists, as a retried call does
+	state     map[string]kmstypes.KeyState
 }
 
 func newFakeKMS(t *testing.T) *fakeKMS {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	return &fakeKMS{key: key, tags: map[string][]kmstypes.Tag{}, aliasTo: map[string]string{}}
+	return &fakeKMS{key: key, state: map[string]kmstypes.KeyState{}, tags: map[string][]kmstypes.Tag{}, aliasTo: map[string]string{}}
 }
 
 func (f *fakeKMS) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func(*kms.Options)) (*kms.CreateKeyOutput, error) {
@@ -78,7 +80,11 @@ func (f *fakeKMS) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...
 	if !ok {
 		return nil, &kmstypes.NotFoundException{}
 	}
-	return &kms.DescribeKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{Arn: &arn}}, nil
+	st, ok := f.state[arn]
+	if !ok {
+		st = kmstypes.KeyStateEnabled
+	}
+	return &kms.DescribeKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{Arn: &arn, KeyState: st}}, nil
 }
 
 func (f *fakeKMS) ListResourceTags(_ context.Context, in *kms.ListResourceTagsInput, _ ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
@@ -97,6 +103,11 @@ func (f *fakeKMS) ScheduleKeyDeletion(_ context.Context, in *kms.ScheduleKeyDele
 func (f *fakeKMS) CreateAlias(_ context.Context, in *kms.CreateAliasInput, _ ...func(*kms.Options)) (*kms.CreateAliasOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.lostReply {
+		f.lostReply = false
+		f.aliasTo[*in.AliasName] = *in.TargetKeyId
+		return nil, &kmstypes.AlreadyExistsException{}
+	}
 	if f.raceAlias {
 		f.raceAlias = false
 		winner := f.newKeyLocked([]kmstypes.Tag{{TagKey: ptr("org"), TagValue: ptr(f.raceOrg)}})
@@ -390,4 +401,36 @@ func TestKMSSigner_RegisterRefusesAliasTaggedForAnotherOrg(t *testing.T) {
 			assert.True(t, store.IsNotFound(err))
 		})
 	}
+}
+
+// A retried CreateAlias whose first attempt landed answers AlreadyExists for an
+// alias that already names our own key. Deleting that key would destroy the
+// org's live key.
+func TestKMSSigner_RegisterAliasAlreadyOursKeepsKey(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	api := newFakeKMS(t)
+	api.lostReply = true
+	s := NewKMSSigner(st, api, "alias/dimo-org/")
+
+	_, err := s.Register(ctx, "did:dimo:org1", nil)
+	require.NoError(t, err)
+	assert.Empty(t, api.deleted, "the key behind the alias must never be scheduled for deletion")
+	row, err := st.GetOrg(ctx, "did:dimo:org1")
+	require.NoError(t, err)
+	assert.Equal(t, fakeKeyARN, row.KeyRef)
+}
+
+func TestKMSSigner_RegisterRefusesKeyThatIsNotEnabled(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	api := newFakeKMS(t)
+	s := NewKMSSigner(st, api, "alias/dimo-org/")
+	arn := api.newKeyLocked([]kmstypes.Tag{{TagKey: ptr("org"), TagValue: ptr("did:dimo:org1")}})
+	api.aliasTo[s.alias("did:dimo:org1")] = arn
+	api.state[arn] = kmstypes.KeyStateDisabled
+
+	_, err := s.Register(ctx, "did:dimo:org1", nil)
+	assert.EqualError(t, err, "KMS key for did:dimo:org1 is Disabled; an operator must re-enable it")
+	assert.Empty(t, api.created)
 }

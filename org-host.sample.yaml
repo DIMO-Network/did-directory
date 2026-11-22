@@ -8,7 +8,8 @@ MASTER_KEY: ""
 # Orgs already registered keep the backend their row names, so switching to kms
 # keeps MASTER_KEY needed until no local org remains. kms uses the AWS default
 # credential chain (IRSA in the cluster) and needs kms:CreateKey,
-# kms:CreateAlias, kms:TagResource, kms:Sign and kms:GetPublicKey.
+# kms:CreateAlias, kms:TagResource, kms:Sign, kms:GetPublicKey,
+# kms:DescribeKey, kms:ListResourceTags and kms:ScheduleKeyDeletion.
 ORG_SIGNER: "local"
 KMS_REGION: ""
 KMS_ALIAS_PREFIX: "alias/dimo-org/"

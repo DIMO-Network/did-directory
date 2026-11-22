@@ -130,13 +130,20 @@ func (s *KMSSigner) ensureKey(ctx context.Context, org string) (string, error) {
 	if !errors.As(err, &exists) {
 		return "", fmt.Errorf("create kms alias: %w", err)
 	}
-	// Lost the race. The key is ours alone and unused, so let it go.
-	if _, derr := s.api.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &mine, PendingWindowInDays: ptr(int32(7))}); derr != nil {
-		return "", fmt.Errorf("schedule deletion of losing kms key %s: %w", mine, derr)
-	}
+	// AlreadyExists is either a concurrent register that won the alias, or our
+	// own earlier attempt (the SDK retries CreateAlias, and a reply lost after
+	// the alias landed comes back as AlreadyExists). Look at what the alias
+	// names before touching our key.
 	arn, err = s.aliasedKey(ctx, org, alias)
 	if err != nil {
 		return "", err
+	}
+	if arn == mine {
+		return mine, nil
+	}
+	// Another key holds the alias, so ours is unused and ours alone: let it go.
+	if _, derr := s.api.ScheduleKeyDeletion(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &mine, PendingWindowInDays: ptr(int32(7))}); derr != nil {
+		return "", fmt.Errorf("schedule deletion of losing kms key %s: %w", mine, derr)
 	}
 	if arn == "" {
 		return "", errors.New("kms alias vanished during register")
@@ -166,6 +173,9 @@ func (s *KMSSigner) aliasedKey(ctx context.Context, org, alias string) (string, 
 	}
 	for _, t := range tags.Tags {
 		if t.TagKey != nil && *t.TagKey == "org" && t.TagValue != nil && *t.TagValue == org {
+			if desc.KeyMetadata.KeyState != kmstypes.KeyStateEnabled {
+				return "", fmt.Errorf("KMS key for %s is %s; an operator must re-enable it", org, desc.KeyMetadata.KeyState)
+			}
 			return arn, nil
 		}
 	}
