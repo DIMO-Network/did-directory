@@ -82,7 +82,7 @@ func TestSignin_TurnkeyRootedOrgSignsInAndProvesTheTokenKey(t *testing.T) {
 	require.Error(t, err, "the org has no local key")
 
 	token, _, err := executeSignin(context.Background(), dauth, orgDID, "signing", nil, "read",
-		tkFlags(f, true), orgDirectory(t, root))
+		tkFlags(f, false), orgDirectory(t, root))
 	require.NoError(t, err)
 	assert.Equal(t, 1, f.signed, "the challenge was signed through Turnkey")
 
@@ -110,4 +110,15 @@ func TestSignin_FileKeyPathUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	_, err = dpop.NewVerifier().Verify(proof, "GET", "https://org.test/x", token)
 	require.NoError(t, err)
+}
+
+func TestSignin_RefusesTheOnboardingCredential(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newFakeTurnkey(t, 0)
+	root := f.didKeyAt(t, "m/44'/60'/0'/0/0")
+	_, _, err := executeSignin(context.Background(), "http://127.0.0.1:1", orgDID, "signing", nil, "read",
+		tkFlags(f, true), orgDirectory(t, root))
+	require.Error(t, err)
+	assert.Equal(t, "the onboarding credential can't sign in as an org", err.Error())
+	assert.Equal(t, 0, f.signed)
 }

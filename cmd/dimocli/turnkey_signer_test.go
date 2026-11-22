@@ -403,6 +403,9 @@ func TestLoadTurnkeyAPIKey_NeverEchoesKeyMaterial(t *testing.T) {
 }
 
 // turnkeyHTTPStub speaks the three Turnkey endpoints dimocli uses.
+var stubAfters []string // `after` cursors the list stub saw, reset by the tests that read it
+var stubIgnoreAfter bool
+
 func turnkeyHTTPStub(t *testing.T, f *fakeTurnkey, signStatus string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -420,6 +423,12 @@ func turnkeyHTTPStub(t *testing.T, f *fakeTurnkey, signStatus string) *httptest.
 					limit, _ = strconv.Atoi(l)
 				}
 				after, _ = po["after"].(string)
+			}
+			if after != "" {
+				stubAfters = append(stubAfters, after)
+			}
+			if stubIgnoreAfter {
+				after = ""
 			}
 			assert.LessOrEqual(t, limit, 100)
 			start := 0
@@ -538,10 +547,11 @@ func TestTransferAndRevokeSince_RefuseTheOnboardingCredential(t *testing.T) {
 	}
 }
 
-// A wallet past Turnkey's default page of 10: the next index must count them
-// all, and an account on page 3 must still be found.
-func TestHTTPClient_WalletWithTwentyFiveAccounts(t *testing.T) {
-	idx := make([]int, 25)
+// A wallet of 250 accounts is three pages (100, 100, 50): the client must send
+// `after` and Turnkey's cursor must be honoured.
+func TestHTTPClient_WalletWithTwoHundredFiftyAccountsPages(t *testing.T) {
+	stubAfters, stubIgnoreAfter = nil, false
+	idx := make([]int, 250)
 	for i := range idx {
 		idx[i] = i
 	}
@@ -552,10 +562,14 @@ func TestHTTPClient_WalletWithTwentyFiveAccounts(t *testing.T) {
 
 	sg, err := tf.newSigner(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, []string{"m/44'/60'/0'/0/25"}, f.created, "index 25, not 10")
-	assert.Equal(t, f.didKeyAt(t, "m/44'/60'/0'/0/25"), sg.DIDKey())
+	assert.Equal(t, []string{"m/44'/60'/0'/0/250"}, f.created, "index 250, not 10 or 100")
+	assert.Equal(t, f.didKeyAt(t, "m/44'/60'/0'/0/250"), sg.DIDKey())
+	// Two listings (before and after the create), each with two cursors:
+	// after account 99, then after account 199.
+	assert.Equal(t, []string{f.accounts[99].ID, f.accounts[199].ID, f.accounts[99].ID, f.accounts[199].ID}, stubAfters[:4])
 
-	want := f.didKeyAt(t, "m/44'/60'/0'/0/23")
+	// An account on the third page is found by address.
+	want := f.didKeyAt(t, "m/44'/60'/0'/0/230")
 	got, err := tf.existingSigner(context.Background(), want)
 	require.NoError(t, err)
 	assert.Equal(t, want, got.DIDKey())
@@ -567,6 +581,33 @@ func TestHTTPClient_WalletWithTwentyFiveAccounts(t *testing.T) {
 
 	_, err = tf.existingSigner(context.Background(), newSecpDIDKey(t))
 	require.Error(t, err)
+
+	// The client itself returns every account.
+	api, err := tf.client()
+	require.NoError(t, err)
+	all, err := api.ListWalletAccounts(context.Background(), "o", "w")
+	require.NoError(t, err)
+	assert.Len(t, all, 251)
+}
+
+// Turnkey ignoring `after` returns the same full page forever: stop.
+func TestHTTPClient_StuckCursorStops(t *testing.T) {
+	stubAfters, stubIgnoreAfter = nil, true
+	t.Cleanup(func() { stubIgnoreAfter = false })
+	idx := make([]int, 150)
+	for i := range idx {
+		idx[i] = i
+	}
+	f := newFakeTurnkey(t, idx...)
+	srv := turnkeyHTTPStub(t, f, "ACTIVITY_STATUS_COMPLETED")
+	keyPath, _ := writeAPIKey(t)
+	tf := &turnkeyFlags{Org: "o", Wallet: "w", AdminAPIKey: keyPath, BaseURL: srv.URL}
+	api, err := tf.client()
+	require.NoError(t, err)
+	_, err = api.ListWalletAccounts(context.Background(), "o", "w")
+	require.Error(t, err)
+	assert.Equal(t, "turnkey: wallet account paging did not advance", err.Error())
+	assert.LessOrEqual(t, len(stubAfters), 3, "it stops at once, not after a thousand pages")
 }
 
 func newSecpDIDKey(t *testing.T) string {

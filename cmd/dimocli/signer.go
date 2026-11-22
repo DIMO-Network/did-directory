@@ -60,6 +60,8 @@ const (
 	purposeRevoke
 )
 
+const errOnboardingSignin = "the onboarding credential can't sign in as an org"
+
 const errOnboardingRefused = "the onboarding credential can't sign transfers or revocations"
 
 // turnkeyFlags are the flags that select Turnkey over the file keystore.
@@ -112,13 +114,16 @@ func (t *turnkeyFlags) validate() error {
 // onboarding reports whether the credential is the batch-scoped one.
 func (t *turnkeyFlags) onboarding() bool { return t.APIKey != "" }
 
-// refuseSensitive is the transfer and revocation guard.
-func (t *turnkeyFlags) refuseSensitive() error {
+// refuseOnboarding fails with msg when the credential is the onboarding one.
+func (t *turnkeyFlags) refuseOnboarding(msg string) error {
 	if t.enabled() && t.onboarding() {
-		return errors.New(errOnboardingRefused)
+		return errors.New(msg)
 	}
 	return nil
 }
+
+// refuseSensitive is the transfer and revocation guard.
+func (t *turnkeyFlags) refuseSensitive() error { return t.refuseOnboarding(errOnboardingRefused) }
 
 func (t *turnkeyFlags) client() (turnkeyAPI, error) {
 	if t.api != nil {

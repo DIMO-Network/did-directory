@@ -195,14 +195,18 @@ func (a tkAccount) account() walletAccount {
 	return walletAccount{ID: a.ID, Address: a.Address, Path: a.Path, PublicKey: a.PublicKey}
 }
 
-const accountsPageSize = 100
+const (
+	accountsPageSize = 100
+	// maxAccountPages backstops the cursor loop.
+	maxAccountPages = 1000
+)
 
 // ListWalletAccounts follows Turnkey's cursor (limit 100, after the last
 // walletAccountId) until a short page comes back. The default page is 10.
 func (c *turnkeyHTTPClient) ListWalletAccounts(ctx context.Context, org, walletID string) ([]walletAccount, error) {
 	var out []walletAccount
 	after := ""
-	for {
+	for page := 0; page < maxAccountPages; page++ {
 		po := map[string]string{"limit": strconv.Itoa(accountsPageSize)}
 		if after != "" {
 			po["after"] = after
@@ -221,11 +225,16 @@ func (c *turnkeyHTTPClient) ListWalletAccounts(ctx context.Context, org, walletI
 		if len(res.Accounts) < accountsPageSize {
 			return out, nil
 		}
-		after = res.Accounts[len(res.Accounts)-1].ID
-		if after == "" {
+		next := res.Accounts[len(res.Accounts)-1].ID
+		if next == "" {
 			return nil, errors.New("turnkey returned a full page of accounts without ids to page on")
 		}
+		if next == after {
+			return nil, errors.New("turnkey: wallet account paging did not advance")
+		}
+		after = next
 	}
+	return nil, errors.New("turnkey: wallet account paging did not advance")
 }
 
 func (c *turnkeyHTTPClient) GetWalletAccount(ctx context.Context, org, walletID, address string) (walletAccount, error) {

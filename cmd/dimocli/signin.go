@@ -71,6 +71,9 @@ func executeSignin(ctx context.Context, dauth, didStr, key string, aud []string,
 		}
 		return signIn(dauth, didStr, priv, key, aud, scope)
 	}
+	if err := tk.refuseOnboarding(errOnboardingSignin); err != nil {
+		return "", 0, err
+	}
 	_, current, err := getLatestCIDAndOp(ctx, c, didStr)
 	if err != nil {
 		return "", 0, fmt.Errorf("getting latest state: %w", err)
