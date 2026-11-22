@@ -674,3 +674,31 @@ func TestStore_CountOrgsSince(t *testing.T) {
 		})
 	}
 }
+
+// AnyKMSKeyRef is how a host finds out at startup that it has orgs whose keys
+// are in KMS, and one key to probe KMS with.
+func TestStore_AnyKMSKeyRef(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemoryStore()
+	ref, err := m.AnyKMSKeyRef(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, ref)
+	newOrg(t, m)
+	ref, err = m.AnyKMSKeyRef(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, ref, "a sealed key is not a KMS key")
+	require.NoError(t, m.CreateOrg(ctx, Org{DID: "did:dimo:k", KeyRef: "arn:aws:kms:us-east-1:111122223333:key/k"}))
+	ref, err = m.AnyKMSKeyRef(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "arn:aws:kms:us-east-1:111122223333:key/k", ref)
+
+	pg, ok := stores(t)["postgres"]
+	if !ok {
+		return
+	}
+	did := fmt.Sprintf("did:dimo:kmsref%d-%d", time.Now().UnixNano(), orgCounter.Add(1))
+	require.NoError(t, pg.CreateOrg(ctx, Org{DID: did, KeyRef: "arn:aws:kms:us-east-1:111122223333:key/pg"}))
+	ref, err = pg.AnyKMSKeyRef(ctx)
+	require.NoError(t, err)
+	assert.NotEmpty(t, ref)
+}

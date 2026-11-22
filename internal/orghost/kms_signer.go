@@ -30,8 +30,8 @@ var ErrPrivateKeyNotAccepted = errors.New("privateKey is not accepted with the K
 // answered 503 with Retry-After.
 var ErrRetryLater = errors.New("register did not finish, retry shortly")
 
-// kmsAPI is the part of the KMS client the signer uses; *kms.Client satisfies it.
-type kmsAPI interface {
+// KMSAPI is the part of the KMS client the signer uses; *kms.Client satisfies it.
+type KMSAPI interface {
 	CreateKey(ctx context.Context, in *kms.CreateKeyInput, optFns ...func(*kms.Options)) (*kms.CreateKeyOutput, error)
 	CreateAlias(ctx context.Context, in *kms.CreateAliasInput, optFns ...func(*kms.Options)) (*kms.CreateAliasOutput, error)
 	Sign(ctx context.Context, in *kms.SignInput, optFns ...func(*kms.Options)) (*kms.SignOutput, error)
@@ -47,7 +47,7 @@ type kmsAPI interface {
 // apart.
 type KMSSigner struct {
 	store       store.Store
-	api         kmsAPI
+	api         KMSAPI
 	aliasPrefix string
 	// callTimeout bounds Sign and GetPublicKey; registerTimeout bounds each
 	// other call a register makes.
@@ -74,7 +74,7 @@ const (
 // aliasPrefix + hex(sha256(org DID)), all 64 hex characters: aliases cannot be
 // removed or repointed by this host, so a squatted one would block the org's
 // register for good, and a shorter hash is a cheaper second preimage.
-func NewKMSSigner(st store.Store, api kmsAPI, aliasPrefix string) *KMSSigner {
+func NewKMSSigner(st store.Store, api KMSAPI, aliasPrefix string) *KMSSigner {
 	return &KMSSigner{store: st, api: api, aliasPrefix: aliasPrefix, callTimeout: kmsCallTimeout, registerTimeout: kmsRegisterTimeout,
 		refs: map[string]string{}, pubs: map[string]string{}}
 }
@@ -337,6 +337,40 @@ func (s *KMSSigner) Sign(ctx context.Context, org string, data []byte) (string, 
 	sig.R.FillBytes(raw[:32])
 	sig.S.FillBytes(raw[32:])
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// probeAlias names no org (it is not a DID's hash); describing it tells a
+// host with no KMS orgs yet whether KMS answers its credentials at all.
+const probeAlias = "startup-probe"
+
+// Probe checks once, at startup, that KMS answers this host. With ref, the
+// key of an org already here, it must hand out that key, which takes working
+// credentials, the right region and kms:GetPublicKey. Without one it describes
+// an alias that does not exist: NotFound (or AccessDenied, which KMS may answer
+// for a key that is not there) means the call reached KMS and was
+// authenticated; anything else, such as missing or invalid credentials or an
+// unreachable endpoint, fails.
+func (s *KMSSigner) Probe(ctx context.Context, ref string) error {
+	if ref != "" {
+		if _, err := s.fetchPublicKey(ctx, ref); err != nil {
+			return fmt.Errorf("KMS probe: %w", err)
+		}
+		return nil
+	}
+	step, cancel := s.registerStep(ctx)
+	defer cancel()
+	alias := s.aliasPrefix + probeAlias
+	_, err := s.api.DescribeKey(step, &kms.DescribeKeyInput{KeyId: &alias})
+	var notFound *kmstypes.NotFoundException
+	var denied interface{ ErrorCode() string }
+	switch {
+	case err == nil, errors.As(err, &notFound):
+		return nil
+	case errors.As(err, &denied) && denied.ErrorCode() == "AccessDeniedException":
+		return nil
+	default:
+		return fmt.Errorf("KMS probe: describe %s: %w", alias, err)
+	}
 }
 
 func ptr[T any](v T) *T { return &v }

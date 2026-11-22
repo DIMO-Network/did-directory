@@ -27,7 +27,7 @@ import (
 
 const fakeKeyARN = "arn:aws:kms:us-east-1:111122223333:key/11111111-2222-3333-4444-555555555555"
 
-// fakeKMS is a kmsAPI backed by one real P-256 key, so signatures it returns
+// fakeKMS is a KMSAPI backed by one real P-256 key, so signatures it returns
 // verify against the public key it hands out.
 type fakeKMS struct {
 	mu  sync.Mutex

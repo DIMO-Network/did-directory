@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -39,13 +38,6 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-
-	if cfg.Signer != "local" && cfg.Signer != "kms" {
-		log.Fatal().Str("value", cfg.Signer).Msg("ORG_SIGNER must be local or kms")
-	}
-	if cfg.Signer == "kms" && !strings.HasPrefix(cfg.KMSAliasPrefix, "alias/") {
-		log.Fatal().Str("value", cfg.KMSAliasPrefix).Msg("KMS_ALIAS_PREFIX must start with alias/")
-	}
 
 	var st store.Store
 	var sealer *orghost.Sealer
@@ -139,22 +131,20 @@ func main() {
 	booking := agreement.CommitPolicy()
 	policies := orghost.Policies{booking.Name: booking}
 
-	var local *orghost.LocalSigner
-	if sealer != nil {
-		local = orghost.NewLocalSigner(st, sealer)
+	signers, err := orghost.BuildSigners(ctx, st, sealer, orghost.SignerConfig{Signer: cfg.Signer, AliasPrefix: cfg.KMSAliasPrefix},
+		func(ctx context.Context) (orghost.KMSAPI, error) {
+			awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.KMSRegion))
+			if err != nil {
+				return nil, err
+			}
+			return kms.NewFromConfig(awsCfg), nil
+		})
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to set up org signing keys")
 	}
-	var kmsSigner *orghost.KMSSigner
-	registerWith := orghost.Registrar(local)
-	if cfg.Signer == "kms" {
-		awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.KMSRegion))
-		if err != nil {
-			log.Fatal().Err(err).Msg("Failed to load AWS config")
-		}
-		kmsSigner = orghost.NewKMSSigner(st, kms.NewFromConfig(awsCfg), cfg.KMSAliasPrefix)
-		registerWith = kmsSigner
-	}
-	log.Info().Str("signer", cfg.Signer).Msg("New orgs register with this signer")
-	repo := &orghost.Repository{Store: st, Signer: orghost.NewRoutingSigner(st, local, kmsSigner, registerWith)}
+	log.Info().Str("signer", cfg.Signer).Bool("kms_client", signers.KMS != nil).Bool("local_signer", signers.Local != nil).
+		Msg("New orgs register with this signer; existing orgs keep the backend their row names")
+	repo := &orghost.Repository{Store: st, Signer: signers.Signer}
 	directory := client.New(cfg.DirectoryURL)
 	app := orghost.New(orghost.Options{
 		Repo:                       repo,

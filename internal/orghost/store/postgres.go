@@ -162,6 +162,18 @@ func (s *PostgresStore) CountOrgsSince(ctx context.Context, since time.Time) (in
 	return n, nil
 }
 
+func (s *PostgresStore) AnyKMSKeyRef(ctx context.Context) (string, error) {
+	var ref string
+	err := s.pool.QueryRow(ctx, `SELECT signing_key_ref FROM orgs WHERE signing_key_ref IS NOT NULL LIMIT 1`).Scan(&ref)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query kms orgs: %w", err)
+	}
+	return ref, nil
+}
+
 func (s *PostgresStore) HasLocalOrgs(ctx context.Context) (bool, error) {
 	var has bool
 	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orgs WHERE signing_key_enc IS NOT NULL)`).Scan(&has); err != nil {

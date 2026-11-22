@@ -6,7 +6,12 @@ LOG_LEVEL: "info"
 MASTER_KEY: ""
 # Where new orgs' #dimo_org keys live: local (sealed under MASTER_KEY) or kms.
 # Orgs already registered keep the backend their row names, so switching to kms
-# keeps MASTER_KEY needed until no local org remains. kms uses the AWS default
+# keeps MASTER_KEY needed until no local org remains, and switching back to
+# local still builds the KMS client while any org's key is in KMS (only new
+# orgs register locally). Whenever the host has a KMS client it probes KMS once
+# at startup (GetPublicKey on an org's key, or DescribeKey on
+# <KMS_ALIAS_PREFIX>startup-probe when it has no KMS org yet) and refuses to
+# start if KMS does not answer its credentials. kms uses the AWS default
 # credential chain (IRSA in the cluster). Each new key gets the account's
 # default key policy, which defers to IAM, so the role's IAM policy is the
 # whole boundary. Least privilege for the role, every key tagged org=<org DID>:

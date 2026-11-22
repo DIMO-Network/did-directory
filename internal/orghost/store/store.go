@@ -123,6 +123,9 @@ type Store interface {
 	// HasLocalOrgs reports whether any org's key is sealed under the host master
 	// key, which a host needs MASTER_KEY to use.
 	HasLocalOrgs(ctx context.Context) (bool, error)
+	// AnyKMSKeyRef returns the KMS key of some org on this host, or "" when no
+	// org's key is in KMS: a host needs a KMS client exactly when it has one.
+	AnyKMSKeyRef(ctx context.Context) (string, error)
 	// GetOrg returns an org, or ErrNotFound.
 	GetOrg(ctx context.Context, did string) (*Org, error)
 	// CountOrgsSince counts the orgs created after since, on this host and

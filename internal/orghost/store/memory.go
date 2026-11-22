@@ -69,6 +69,17 @@ func (s *MemoryStore) CountOrgsSince(_ context.Context, since time.Time) (int, e
 	return n, nil
 }
 
+func (s *MemoryStore) AnyKMSKeyRef(_ context.Context) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, o := range s.orgs {
+		if o.org.KeyRef != "" {
+			return o.org.KeyRef, nil
+		}
+	}
+	return "", nil
+}
+
 func (s *MemoryStore) HasLocalOrgs(_ context.Context) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
