@@ -4,8 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-
-	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 )
 
 func runPubkey(args []string) {
@@ -20,19 +18,9 @@ func runPubkey(args []string) {
 
 	didStr := fs.Arg(0)
 
-	load := LoadKey
-	if *org {
-		load = LoadOrgKey
-	}
-	privKey, err := load(didStr)
+	didKey, err := pubkeyOf(didStr, *org)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading key for %s: %v\n", didStr, err)
-		os.Exit(1)
-	}
-
-	didKey, err := dimocrypto.EncodeDIDKey(&privKey.PublicKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error encoding did:key: %v\n", err)
 		os.Exit(1)
 	}
 

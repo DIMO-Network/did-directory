@@ -57,8 +57,13 @@ func runRotate(args []string) {
 		fatal(err)
 	}
 
-	// The NEW key: Turnkey's next account, or a fresh P-256 key for the keystore.
-	newDIDKey, saveNew, err := newCustody(ctx, tk)
+	// The NEW key: Turnkey's next account, or a fresh keystore key of the old
+	// root's curve (secp256k1 for an org root, P-256 otherwise).
+	current := ""
+	if len(currentOp.RotationKeys) > 0 {
+		current = currentOp.RotationKeys[0]
+	}
+	newDIDKey, saveNew, err := newCustodyLike(ctx, tk, current)
 	if err != nil {
 		fatal(err)
 	}

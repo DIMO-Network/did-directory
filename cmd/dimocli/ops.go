@@ -19,8 +19,15 @@ func signOp(key *ecdsa.PrivateKey, unsigned *did.UnsignedOperation) (*did.Operat
 	return signOpWith(context.Background(), &fileSigner{key: key}, unsigned)
 }
 
-// signOpWith signs an unsigned operation through s and returns the signed operation.
+// signOpWith signs an unsigned operation through s and returns the signed
+// operation. alsoKnownAs goes out as [] when there are none, never null: the
+// SDK's verified reads refuse null.
 func signOpWith(ctx context.Context, s opSigner, unsigned *did.UnsignedOperation) (*did.Operation, error) {
+	if unsigned.AlsoKnownAs == nil {
+		u := *unsigned
+		u.AlsoKnownAs = []string{}
+		unsigned = &u
+	}
 	data, err := json.Marshal(unsigned)
 	if err != nil {
 		return nil, fmt.Errorf("marshal operation: %w", err)

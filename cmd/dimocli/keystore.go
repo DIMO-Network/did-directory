@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/pkg/control"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 // KeyEntry represents a stored key in the keystore.
@@ -44,32 +46,30 @@ func SaveKey(did string, key *ecdsa.PrivateKey) error {
 
 // writeKey stores key as a KeyEntry at path, creating the keystore directory.
 func writeKey(path, did string, key *ecdsa.PrivateKey) error {
-	dir := keystoreDir()
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create keystore dir: %w", err)
-	}
-
 	pkcs8Bytes, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return fmt.Errorf("marshal private key: %w", err)
 	}
+	return writeEntry(path, KeyEntry{DID: did, Curve: key.Curve.Params().Name, PrivateKeyBase64: base64.StdEncoding.EncodeToString(pkcs8Bytes)})
+}
 
-	entry := KeyEntry{
-		DID:              did,
-		Curve:            key.Curve.Params().Name,
-		PrivateKeyBase64: base64.StdEncoding.EncodeToString(pkcs8Bytes),
-		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+// writeK1Key stores a secp256k1 key as a KeyEntry at path.
+func writeK1Key(path, did string, key *secp256k1.PrivateKey) error {
+	return writeEntry(path, KeyEntry{DID: did, Curve: curveSecp256k1, PrivateKeyBase64: base64.StdEncoding.EncodeToString(key.Serialize())})
+}
+
+func writeEntry(path string, entry KeyEntry) error {
+	if err := os.MkdirAll(keystoreDir(), 0700); err != nil {
+		return fmt.Errorf("create keystore dir: %w", err)
 	}
-
+	entry.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal key entry: %w", err)
 	}
-
 	if err := writeSecretFile(path, data); err != nil {
 		return fmt.Errorf("write key file: %w", err)
 	}
-
 	return nil
 }
 
@@ -78,8 +78,20 @@ func LoadKey(did string) (*ecdsa.PrivateKey, error) {
 	return readKey(keyFilePath(did))
 }
 
-// readKey parses the KeyEntry at path.
+// readKey parses the KeyEntry at path, which must hold a P-256 key.
 func readKey(path string) (*ecdsa.PrivateKey, error) {
+	s, err := readSigner(path)
+	if err != nil {
+		return nil, err
+	}
+	if s.key == nil {
+		return nil, fmt.Errorf("%s holds a secp256k1 key; this needs a P-256 one", path)
+	}
+	return s.key, nil
+}
+
+// readSigner parses the KeyEntry at path: a P-256 key, or a secp256k1 one.
+func readSigner(path string) (*fileSigner, error) {
 	data, err := readSecretFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read key file %s: %w", path, err)
@@ -95,6 +107,14 @@ func readKey(path string) (*ecdsa.PrivateKey, error) {
 		return nil, fmt.Errorf("decode private key base64: %w", err)
 	}
 
+	if entry.Curve == curveSecp256k1 {
+		if len(keyBytes) != 32 {
+			return nil, fmt.Errorf("secp256k1 key in %s is not 32 bytes", path)
+		}
+		k := secp256k1.PrivKeyFromBytes(keyBytes)
+		return &fileSigner{k1: k, didKey: dimocrypto.FromSecp256k1(k.PubKey()).DIDKey()}, nil
+	}
+
 	// Try PKCS8 first.
 	parsed, err := x509.ParsePKCS8PrivateKey(keyBytes)
 	if err == nil {
@@ -102,7 +122,7 @@ func readKey(path string) (*ecdsa.PrivateKey, error) {
 		if !ok {
 			return nil, fmt.Errorf("key is not ECDSA")
 		}
-		return ecKey, nil
+		return newFileSigner(ecKey)
 	}
 
 	// Fallback: try raw 32-byte scalar for P-256.
@@ -111,7 +131,7 @@ func readKey(path string) (*ecdsa.PrivateKey, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse raw private key: %w", err)
 		}
-		return key, nil
+		return newFileSigner(key)
 	}
 
 	return nil, fmt.Errorf("unable to parse private key")

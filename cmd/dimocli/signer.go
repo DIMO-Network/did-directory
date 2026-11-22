@@ -10,6 +10,7 @@ import (
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/did"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 // opSigner signs DID operations. The file keystore and Turnkey both
@@ -22,9 +23,11 @@ type opSigner interface {
 	Sign(ctx context.Context, data []byte) (string, error)
 }
 
-// fileSigner signs with a key from the local keystore.
+// fileSigner signs with a key from the local keystore: key, a P-256 key, or
+// k1, a secp256k1 org root.
 type fileSigner struct {
 	key    *ecdsa.PrivateKey
+	k1     *secp256k1.PrivateKey
 	didKey string
 }
 
@@ -48,6 +51,9 @@ func newFileSignerNew() (*fileSigner, error) {
 func (s *fileSigner) DIDKey() string { return s.didKey }
 
 func (s *fileSigner) Sign(_ context.Context, data []byte) (string, error) {
+	if s.k1 != nil {
+		return signSecp256k1(s.k1, data), nil
+	}
 	return dimocrypto.SignOperation(s.key, data)
 }
 
@@ -203,11 +209,11 @@ func (t *turnkeyFlags) existingSigner(ctx context.Context, didKey string) (*turn
 // a Turnkey account when Turnkey flags are set, else the keystore key.
 func resolveSigner(ctx context.Context, tk *turnkeyFlags, didStr string, current *did.Operation, purpose signPurpose) (opSigner, error) {
 	if !tk.enabled() {
-		key, err := LoadKey(didStr)
+		s, err := loadSigner(didStr)
 		if err != nil {
 			return nil, fmt.Errorf("loading key: %w", err)
 		}
-		return newFileSigner(key)
+		return s, nil
 	}
 	if purpose != purposeUpdate {
 		if err := tk.refuseSensitive(); err != nil {

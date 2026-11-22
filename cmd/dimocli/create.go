@@ -130,8 +130,9 @@ func runCreate(args []string) {
 
 	// The rotation key: a new account of the Turnkey wallet (the org root for
 	// --org, the custody key for --controller), at --turnkey-index or the next
-	// free index, else a new P-256 key that goes to the keystore. A controlled
-	// DID's key only authorizes DID operations.
+	// free index, else a new key that goes to the keystore: secp256k1 for an
+	// org, the type of a Turnkey org root, P-256 otherwise. A controlled DID's
+	// key only authorizes DID operations.
 	ctx := context.Background()
 	var signer opSigner
 	if tk.enabled() {
@@ -141,7 +142,7 @@ func runCreate(args []string) {
 		}
 		signer = sg
 	} else {
-		sg, err := newFileSignerNew()
+		sg, err := localRootFor(opts)
 		if err != nil {
 			fatal(err)
 		}
@@ -182,7 +183,7 @@ func executeCreate(ctx context.Context, c *client.Client, opts createOptions, si
 	fmt.Fprintf(out, "DID created: %s\n", resp.DID)
 	fmt.Fprintf(out, "CID: %s\n", resp.CID)
 	if fsg, ok := signer.(*fileSigner); ok {
-		if err := SaveKey(derivedDID, fsg.key); err != nil {
+		if err := saveSigner(derivedDID, fsg); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to save key: %v\n", err)
 		}
 		fmt.Fprintf(out, "Key stored at: %s\n", keyFilePath(derivedDID))
