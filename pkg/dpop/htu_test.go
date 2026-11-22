@@ -24,13 +24,13 @@ func readHTUVectors(t *testing.T) []htuVector {
 	require.NoError(t, err)
 	var vs []htuVector
 	require.NoError(t, json.Unmarshal(raw, &vs))
-	require.Len(t, vs, 4)
+	require.Len(t, vs, 5)
 	return vs
 }
 
 // R5-F9: Go and the SDK normalise htu identically: scheme and host
 // lowercased, :443 dropped for https and :80 for http, query and fragment
-// dropped, the path left byte for byte.
+// dropped, the path in its percent-encoded wire form (EscapedPath).
 func TestNormalizeURI_ContractVectors(t *testing.T) {
 	for _, v := range readHTUVectors(t) {
 		assert.Equal(t, v.Out, NormalizeURI(v.In), "in %q", v.In)
