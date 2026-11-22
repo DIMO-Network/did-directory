@@ -36,6 +36,8 @@ func main() {
 		runRotate(args)
 	case "transfer":
 		runTransfer(args)
+	case "custody-proof":
+		runCustodyProof(args)
 	case "revoke-since":
 		runRevokeSince(args)
 	case "pubkey":
@@ -73,7 +75,11 @@ Commands:
   resolve      Resolve a DID to its document
   update       Update a DID's service endpoints, #dimo_org key or #dimo_org_host
   rotate       Rotate a DID's keys
-  transfer     Transfer a controlled DID to a new controller (starts a new era)
+  transfer     Transfer a controlled DID to a new controller (starts a new era); a
+               custody key the new controller supplies needs its --new-custody-proof
+  custody-proof
+               As the new controller: sign the acceptance of a transfer with the new
+               custody key from a key file (--generate makes one), for the seller
   revoke-since Record a compromise window and rotate the custody key
   pubkey       Print the did:key public key for a local DID (--org for its #dimo_org key)
   signin       Sign in to dauth as a local DID and print the identity token: --scope

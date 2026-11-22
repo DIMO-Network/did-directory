@@ -23,6 +23,7 @@ func runTransfer(args []string) {
 	didStr := fs.String("did", "", "controlled DID to transfer (required)")
 	to := fs.String("to", "", "new controller of record DID (required)")
 	newCustodyKey := fs.String("new-custody-key", "", "did:key of the custody key the new controller supplies; required with Turnkey, else one is generated and stored locally")
+	newCustodyProof := fs.String("new-custody-proof", "", "the new controller's acceptance, signed with --new-custody-key over the car, --to and the next era (dimocli custody-proof); required with --new-custody-key")
 	tk := bindTurnkeyFlags(fs)
 	fs.Parse(args)
 
@@ -43,16 +44,18 @@ func runTransfer(args []string) {
 
 	c := client.New(*server)
 	c.SetVerbose(isVerbose())
-	if err := executeTransfer(context.Background(), c, tk, *didStr, *to, *newCustodyKey, os.Stdout); err != nil {
+	if err := executeTransfer(context.Background(), c, tk, *didStr, *to, *newCustodyKey, *newCustodyProof, os.Stdout); err != nil {
 		fatal(err)
 	}
 }
 
-// executeTransfer signs a transfer of didStr to the controller `to`. newKey is
-// the new controller's custody did:key; empty means generate one into the
-// keystore, which Turnkey signing refuses: the key must be the buyer's, not one
-// created in the seller's wallet.
-func executeTransfer(ctx context.Context, c *client.Client, tk *turnkeyFlags, didStr, to, newKey string, out io.Writer) error {
+// executeTransfer signs a transfer of didStr to the controller `to`, which
+// must be a live DID in the directory. newKey is the new controller's custody
+// did:key and proof its acceptance of this transfer (verifyCustodyProof),
+// both checked before anything is signed; an empty newKey means generate one
+// into the keystore, which Turnkey signing refuses: the key must be the
+// buyer's, not one created in the seller's wallet.
+func executeTransfer(ctx context.Context, c *client.Client, tk *turnkeyFlags, didStr, to, newKey, proof string, out io.Writer) error {
 	if tk.enabled() && newKey == "" {
 		return errors.New("a Turnkey transfer needs --new-custody-key from the new controller")
 	}
@@ -60,11 +63,23 @@ func executeTransfer(ctx context.Context, c *client.Client, tk *turnkeyFlags, di
 		if _, err := dimocrypto.DecodeDIDKey(newKey); err != nil {
 			return fmt.Errorf("--new-custody-key: %w", err)
 		}
+		if proof == "" {
+			return errNoCustodyProof
+		}
+	}
+	if err := resolveController(ctx, c, to); err != nil {
+		return err
 	}
 
 	cur, err := currentEra(ctx, c, didStr)
 	if err != nil {
 		return err
+	}
+	nextEra := cur.Number + 1
+	if newKey != "" {
+		if err := verifyCustodyProof(newKey, proof, didStr, to, nextEra); err != nil {
+			return err
+		}
 	}
 	prevCID, currentOp, err := getLatestCIDAndOp(ctx, c, didStr)
 	if err != nil {
@@ -82,7 +97,6 @@ func executeTransfer(ctx context.Context, c *client.Client, tk *turnkeyFlags, di
 			return err
 		}
 	}
-	nextEra := cur.Number + 1
 	opening, commitment, err := newCommitment(to, nextEra)
 	if err != nil {
 		return fmt.Errorf("creating control commitment: %w", err)
