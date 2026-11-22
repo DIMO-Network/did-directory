@@ -14,6 +14,13 @@
 // audience asked for. Anything else fails with ErrInvalidChallenge before the
 // key is used.
 //
+// A DID whose key is not an in-process P-256 key (secp256k1 in Turnkey, a KMS)
+// sets Signer, which signs the challenge text, and DPoPKey, a separate P-256 key
+// for the DPoP proofs. dauth only needs the DPoP proof's key to match the
+// thumbprint the challenge names, and checks the challenge signature against the
+// DID's verification method on its own. The challenge is checked before Signer
+// is called, as it is before Key signs.
+//
 // dauth answers 503 (directory or store unavailable, replay cache full) and
 // 429 (rate limit) without spending the challenge, so SignIn tries each call
 // up to three times, waiting for the answer's Retry-After (at most 5s, 1s
@@ -76,6 +83,11 @@ type Request struct {
 	DID         string
 	Key         *ecdsa.PrivateKey
 	KeyFragment string
+	// Signer, when set, signs the challenge in place of Key (base64url r||s
+	// over the SHA-256 of the data, as dimocrypto.SignOperation does), and
+	// DPoPKey is then required: the DPoP proofs come from it, not from Key.
+	Signer  func(ctx context.Context, data []byte) (string, error)
+	DPoPKey *ecdsa.PrivateKey
 	// Audience and Scope are what the token is asked for. An empty Audience
 	// takes dauth's default. Scope is a scope claim (see identity.ParseScope);
 	// one that does not parse fails before dauth is called.
@@ -97,7 +109,14 @@ type Token struct {
 // not the sign-in text for this request is refused unsigned, with an error
 // wrapping ErrInvalidChallenge.
 func SignIn(ctx context.Context, r Request) (Token, error) {
-	key, err := dpop.NewKey(r.Key)
+	dpopPriv := r.Key
+	if r.Signer != nil {
+		if r.DPoPKey == nil {
+			return Token{}, errors.New("a Signer needs a DPoPKey for the DPoP proofs")
+		}
+		dpopPriv = r.DPoPKey
+	}
+	key, err := dpop.NewKey(dpopPriv)
 	if err != nil {
 		return Token{}, err
 	}
@@ -131,7 +150,12 @@ func SignIn(ctx context.Context, r Request) (Token, error) {
 		return Token{}, err
 	}
 
-	sig, err := dimocrypto.SignOperation(r.Key, []byte(challenge.Challenge))
+	var sig string
+	if r.Signer != nil {
+		sig, err = r.Signer(ctx, []byte(challenge.Challenge))
+	} else {
+		sig, err = dimocrypto.SignOperation(r.Key, []byte(challenge.Challenge))
+	}
 	if err != nil {
 		return Token{}, fmt.Errorf("sign challenge: %w", err)
 	}

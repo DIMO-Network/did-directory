@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,8 +18,11 @@ import (
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
 	"github.com/DIMO-Network/did-directory/internal/did"
+	"github.com/DIMO-Network/did-directory/pkg/didkey"
 	"github.com/DIMO-Network/did-directory/pkg/dpop"
 	"github.com/DIMO-Network/did-directory/pkg/identity"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	dcrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -428,4 +432,60 @@ func TestRetryAfter(t *testing.T) {
 	} {
 		assert.Equal(t, want, retryAfter(in), "%q", in)
 	}
+}
+
+// A DID whose key is secp256k1 and held elsewhere signs the challenge through
+// Signer; DPoP uses its own P-256 key.
+func TestSignInWithSignerAndSeparateDPoPKey(t *testing.T) {
+	stubSleep(t)
+	k1, err := secp256k1.GeneratePrivateKey()
+	require.NoError(t, err)
+	f := newFakeDauth(t, newKey(t))
+	f.pub = didkey.FromSecp256k1(k1.PubKey())
+
+	var signed []string
+	signer := func(_ context.Context, data []byte) (string, error) {
+		signed = append(signed, string(data))
+		h := sha256.Sum256(data)
+		sig := dcrecdsa.Sign(k1, h[:])
+		r, s := sig.R(), sig.S()
+		rb, sb := r.Bytes(), s.Bytes()
+		return base64.RawURLEncoding.EncodeToString(append(rb[:], sb[:]...)), nil
+	}
+	dpopKey := newKey(t)
+	tok, err := SignIn(context.Background(), Request{
+		Dauth: f.url, DID: testDID, Signer: signer, DPoPKey: dpopKey, Scope: "read",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "id-token", tok.Token)
+	require.Len(t, signed, 1)
+	assert.Equal(t, f.issued, signed[0])
+	jkt, err := dpop.NewKey(dpopKey)
+	require.NoError(t, err)
+	assert.Equal(t, jkt.Thumbprint(), f.challenges[0].JKT, "the challenge names the DPoP key's thumbprint")
+}
+
+func TestSignInSignerNotCalledForHostileChallenge(t *testing.T) {
+	stubSleep(t)
+	f := newFakeDauth(t, newKey(t))
+	f.text = func(challengeRequest, string) string { return `{"type":"create"}` }
+	called := false
+	_, err := SignIn(context.Background(), Request{
+		Dauth: f.url, DID: testDID, DPoPKey: newKey(t), Scope: "read",
+		Signer: func(context.Context, []byte) (string, error) { called = true; return "", nil },
+	})
+	require.ErrorIs(t, err, ErrInvalidChallenge)
+	assert.False(t, called)
+	assert.Empty(t, f.tokens)
+}
+
+func TestSignInSignerNeedsDPoPKey(t *testing.T) {
+	f := newFakeDauth(t, newKey(t))
+	_, err := SignIn(context.Background(), Request{
+		Dauth: f.url, DID: testDID, Scope: "read",
+		Signer: func(context.Context, []byte) (string, error) { return "", nil },
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DPoPKey")
+	assert.Empty(t, f.challenges, "fails before dauth is called")
 }
