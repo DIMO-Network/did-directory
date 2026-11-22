@@ -152,6 +152,14 @@ func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
 	return nil
 }
 
+func (s *PostgresStore) HasLocalOrgs(ctx context.Context) (bool, error) {
+	var has bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orgs WHERE signing_key_enc IS NOT NULL)`).Scan(&has); err != nil {
+		return false, fmt.Errorf("query local orgs: %w", err)
+	}
+	return has, nil
+}
+
 func (s *PostgresStore) GetOrg(ctx context.Context, did string) (*Org, error) {
 	var org Org
 	err := s.pool.QueryRow(ctx, `SELECT did, signing_key_enc, COALESCE(signing_key_ref, ''), created_at FROM orgs WHERE did = $1`, did).

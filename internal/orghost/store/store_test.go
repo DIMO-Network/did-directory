@@ -616,3 +616,30 @@ func TestStore_OrgKeyRef(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_HasLocalOrgs(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	has, err := s.HasLocalOrgs(ctx)
+	require.NoError(t, err)
+	assert.False(t, has)
+	require.NoError(t, s.CreateOrg(ctx, Org{DID: "did:dimo:k", KeyRef: "arn"}))
+	has, err = s.HasLocalOrgs(ctx)
+	require.NoError(t, err)
+	assert.False(t, has, "a KMS-only store has no local keys")
+	require.NoError(t, s.CreateOrg(ctx, Org{DID: "did:dimo:l", KeyEnc: []byte("sealed")}))
+	has, err = s.HasLocalOrgs(ctx)
+	require.NoError(t, err)
+	assert.True(t, has)
+}
+
+func TestStore_HasLocalOrgsPostgres(t *testing.T) {
+	s, ok := stores(t)["postgres"]
+	if !ok {
+		t.Skip("no " + TestDatabaseURLEnv)
+	}
+	newOrg(t, s)
+	has, err := s.HasLocalOrgs(context.Background())
+	require.NoError(t, err)
+	assert.True(t, has)
+}

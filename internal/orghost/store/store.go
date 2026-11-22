@@ -120,6 +120,9 @@ type Party struct {
 type Store interface {
 	// CreateOrg registers an org on this host with its sealed signing key.
 	CreateOrg(ctx context.Context, org Org) error
+	// HasLocalOrgs reports whether any org's key is sealed under the host master
+	// key, which a host needs MASTER_KEY to use.
+	HasLocalOrgs(ctx context.Context) (bool, error)
 	// GetOrg returns an org, or ErrNotFound.
 	GetOrg(ctx context.Context, did string) (*Org, error)
 

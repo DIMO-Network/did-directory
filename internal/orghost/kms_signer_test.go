@@ -10,6 +10,8 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"math/big"
 	"sync"
 	"testing"
@@ -37,26 +39,72 @@ type fakeKMS struct {
 	shortR    bool // sign until r fits in 31 bytes
 	highS     bool // return s as n-s when it is the low one
 	signCalls int
+
+	tags      map[string][]kmstypes.Tag // key ARN -> tags
+	aliasTo   map[string]string         // alias -> key ARN
+	deleted   []*kms.ScheduleKeyDeletionInput
+	raceAlias bool // the next CreateAlias loses to a concurrent register
+	raceOrg   string
 }
 
 func newFakeKMS(t *testing.T) *fakeKMS {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	return &fakeKMS{key: key}
+	return &fakeKMS{key: key, tags: map[string][]kmstypes.Tag{}, aliasTo: map[string]string{}}
 }
 
 func (f *fakeKMS) CreateKey(_ context.Context, in *kms.CreateKeyInput, _ ...func(*kms.Options)) (*kms.CreateKeyOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, in)
-	return &kms.CreateKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{Arn: ptr(fakeKeyARN), KeyId: ptr("11111111-2222-3333-4444-555555555555")}}, nil
+	arn := f.newKeyLocked(in.Tags)
+	return &kms.CreateKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{Arn: &arn}}, nil
+}
+
+func (f *fakeKMS) newKeyLocked(tags []kmstypes.Tag) string {
+	arn := fakeKeyARN
+	if n := len(f.tags); n > 0 {
+		arn = fmt.Sprintf("%s-%d", fakeKeyARN, n)
+	}
+	f.tags[arn] = tags
+	return arn
+}
+
+func (f *fakeKMS) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	arn, ok := f.aliasTo[*in.KeyId]
+	if !ok {
+		return nil, &kmstypes.NotFoundException{}
+	}
+	return &kms.DescribeKeyOutput{KeyMetadata: &kmstypes.KeyMetadata{Arn: &arn}}, nil
+}
+
+func (f *fakeKMS) ListResourceTags(_ context.Context, in *kms.ListResourceTagsInput, _ ...func(*kms.Options)) (*kms.ListResourceTagsOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return &kms.ListResourceTagsOutput{Tags: f.tags[*in.KeyId]}, nil
+}
+
+func (f *fakeKMS) ScheduleKeyDeletion(_ context.Context, in *kms.ScheduleKeyDeletionInput, _ ...func(*kms.Options)) (*kms.ScheduleKeyDeletionOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, in)
+	return &kms.ScheduleKeyDeletionOutput{}, nil
 }
 
 func (f *fakeKMS) CreateAlias(_ context.Context, in *kms.CreateAliasInput, _ ...func(*kms.Options)) (*kms.CreateAliasOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.raceAlias {
+		f.raceAlias = false
+		winner := f.newKeyLocked([]kmstypes.Tag{{TagKey: ptr("org"), TagValue: ptr(f.raceOrg)}})
+		f.aliasTo[*in.AliasName] = winner
+		return nil, &kmstypes.AlreadyExistsException{}
+	}
 	f.aliases = append(f.aliases, in)
+	f.aliasTo[*in.AliasName] = *in.TargetKeyId
 	return &kms.CreateAliasOutput{}, nil
 }
 
@@ -248,4 +296,98 @@ func TestRegisterHandler_KMSRefusesPrivateKey(t *testing.T) {
 	status, body = h.do("POST", "/orgs/"+org, org, nil)
 	require.Equal(t, 201, status, body)
 	assert.NotEmpty(t, body["key"])
+}
+
+// failingCreateStore fails CreateOrg once, as a database blip would.
+type failingCreateStore struct {
+	store.Store
+	failed bool
+}
+
+func (f *failingCreateStore) CreateOrg(ctx context.Context, o store.Org) error {
+	if !f.failed {
+		f.failed = true
+		return errors.New("db down")
+	}
+	return f.Store.CreateOrg(ctx, o)
+}
+
+func TestKMSSigner_RegisterRetryReusesKey(t *testing.T) {
+	ctx := context.Background()
+	base := store.NewMemoryStore()
+	st := &failingCreateStore{Store: base}
+	api := newFakeKMS(t)
+	s := NewKMSSigner(st, api, "alias/dimo-org/")
+
+	_, err := s.Register(ctx, "did:dimo:org1", nil)
+	require.Error(t, err)
+	didKey, err := s.Register(ctx, "did:dimo:org1", nil)
+	require.NoError(t, err)
+	want, _ := dimocrypto.EncodeDIDKey(&api.key.PublicKey)
+	assert.Equal(t, want, didKey)
+	assert.Len(t, api.created, 1, "the retry must reuse the key the first attempt made")
+	assert.Empty(t, api.deleted)
+	row, err := base.GetOrg(ctx, "did:dimo:org1")
+	require.NoError(t, err)
+	assert.Equal(t, fakeKeyARN, row.KeyRef)
+}
+
+func TestKMSSigner_RegisterConcurrentLoserSchedulesDeletion(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	api := newFakeKMS(t)
+	api.raceAlias, api.raceOrg = true, "did:dimo:org1"
+	s := NewKMSSigner(st, api, "alias/dimo-org/")
+
+	didKey, err := s.Register(ctx, "did:dimo:org1", nil)
+	require.NoError(t, err)
+	want, _ := dimocrypto.EncodeDIDKey(&api.key.PublicKey)
+	assert.Equal(t, want, didKey)
+
+	require.Len(t, api.created, 1)
+	require.Len(t, api.deleted, 1)
+	assert.Equal(t, fakeKeyARN, *api.deleted[0].KeyId, "the loser's own key is scheduled for deletion")
+	assert.EqualValues(t, 7, *api.deleted[0].PendingWindowInDays)
+	row, err := st.GetOrg(ctx, "did:dimo:org1")
+	require.NoError(t, err)
+	assert.Equal(t, fakeKeyARN+"-1", row.KeyRef, "the winner's key is the one recorded")
+}
+
+func TestKMSSigner_RegisterConcurrentStoreWinnerSameKey(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemoryStore()
+	api := newFakeKMS(t)
+	s := NewKMSSigner(st, api, "alias/dimo-org/")
+	// The winner already wrote its row for the key the alias names.
+	arn := api.newKeyLocked([]kmstypes.Tag{{TagKey: ptr("org"), TagValue: ptr("did:dimo:org1")}})
+	api.aliasTo[s.alias("did:dimo:org1")] = arn
+	require.NoError(t, st.CreateOrg(ctx, store.Org{DID: "did:dimo:org1", KeyRef: arn}))
+	// A register that passed its row check before the winner's insert lands here.
+	got, err := s.finish(ctx, "did:dimo:org1", arn)
+	require.NoError(t, err)
+	assert.NotEmpty(t, got)
+	_, err = s.finish(ctx, "did:dimo:org1", "arn:other")
+	assert.ErrorIs(t, err, store.ErrOrgExists)
+}
+
+func TestKMSSigner_RegisterRefusesAliasTaggedForAnotherOrg(t *testing.T) {
+	ctx := context.Background()
+	for name, tags := range map[string][]kmstypes.Tag{
+		"another org": {{TagKey: ptr("org"), TagValue: ptr("did:dimo:other")}},
+		"no tag":      nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := store.NewMemoryStore()
+			api := newFakeKMS(t)
+			s := NewKMSSigner(st, api, "alias/dimo-org/")
+			arn := api.newKeyLocked(tags)
+			api.aliasTo[s.alias("did:dimo:org1")] = arn
+
+			_, err := s.Register(ctx, "did:dimo:org1", nil)
+			require.Error(t, err)
+			assert.Empty(t, api.created)
+			_, err = st.GetOrg(ctx, "did:dimo:org1")
+			assert.True(t, store.IsNotFound(err))
+		})
+	}
 }

@@ -57,6 +57,17 @@ func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {
 	return nil
 }
 
+func (s *MemoryStore) HasLocalOrgs(_ context.Context) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, o := range s.orgs {
+		if len(o.org.KeyEnc) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *MemoryStore) GetOrg(_ context.Context, did string) (*Org, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -51,7 +51,8 @@ func main() {
 	var sealer *orghost.Sealer
 	if cfg.DatabaseURL != "" {
 		// Orgs registered under the local signer stay sealed under MASTER_KEY, so
-		// it is required unless this host is KMS-only from the start.
+		// it is required unless ORG_SIGNER=kms and the store holds no such org
+		// (checked once the store is open).
 		if cfg.MasterKey == "" && cfg.Signer == "local" {
 			log.Fatal().Msg("MASTER_KEY is required with DATABASE_URL: org signing keys are sealed at rest")
 		}
@@ -64,7 +65,7 @@ func main() {
 				log.Fatal().Err(err).Msg("Bad MASTER_KEY")
 			}
 		} else {
-			log.Warn().Msg("No MASTER_KEY: orgs sealed under a host key cannot sign on this host")
+			log.Warn().Msg("No MASTER_KEY: this host runs KMS-only")
 		}
 		pg, err := store.NewPostgresStore(ctx, cfg.DatabaseURL, log)
 		if err != nil {
@@ -72,6 +73,15 @@ func main() {
 		}
 		defer func() { _ = pg.Close() }()
 		st = pg
+		if sealer == nil {
+			has, err := pg.HasLocalOrgs(ctx)
+			if err != nil {
+				log.Fatal().Err(err).Msg("Failed to check for orgs with local signing keys")
+			}
+			if has {
+				log.Fatal().Msg("MASTER_KEY is required: this host has orgs with local signing keys")
+			}
+		}
 		log.Info().Msg("Using PostgreSQL store")
 	} else {
 		if sealer, err = orghost.NewEphemeralSealer(); err != nil {
