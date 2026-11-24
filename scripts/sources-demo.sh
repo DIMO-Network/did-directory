@@ -181,7 +181,7 @@ mkdir -p "$BIN"
 (cd "$DIN_DIR" && CGO_ENABLED=1 go build -o "$BIN/din" ./cmd/din)
 success "built into $BIN"
 
-DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
+ALLOW_MEMORY_STORE=true DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
     "$BIN/did-directory" -settings /dev/null >"$DEMO_DIR/directory.log" 2>&1 &
 PIDS+=($!)
 wait_for "$DIRECTORY_URL/health" "directory" -f
@@ -206,7 +206,7 @@ info "din: $DIN_DID"
 DIMO=$(create --alias "dimo.zone")
 
 info "The org host lets dauth and din call /authorize."
-DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" \
+DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" PUBLIC_URL="$ORG_HOST_URL" \
     IDENTITY_JWKS_URL="$DAUTH_URL/signin/keys" IDENTITY_ISSUER="$DAUTH_URL/signin" IDENTITY_AUDIENCE="$ORG_HOST_URL" \
     ISSUER_DIDS="$DAUTH_DID,$DIN_DID" ADMIN_DIDS="$DIMO" CONTROL_CACHE_TTL=1s \
     "$BIN/org-host" -settings /dev/null >"$DEMO_DIR/org-host.log" 2>&1 &
@@ -216,12 +216,12 @@ wait_for "$ORG_HOST_URL/health" "org host" -f
 # ── Step 1: the car and the relay ─────────────────────────────────────────
 
 header "Step 1: RentalCo's car, and Flespi, a relay"
-RENTAL_CO=$(create --org --org-host "$ORG_HOST_URL" --alias "rentalco.example")
+# dimocli create registers the org on the host, which makes its #dimo_org key.
+RENTAL_CO=$(create --org --org-host "$ORG_HOST_URL" --dauth "$DAUTH_URL" --alias "rentalco.example")
 info "RentalCo: $RENTAL_CO"
 RENTAL_CO_TOKEN=$(signin "$RENTAL_CO")
-RENTAL_CO_ORG_KEY=$(jq -r .privateKeyBase64 "$KEYS/${RENTAL_CO#did:dimo:}.org.json")
-host POST "/orgs/$RENTAL_CO" "$(signin "$RENTAL_CO" approve)" "$(jq -cn --arg k "$RENTAL_CO_ORG_KEY" '{privateKey: $k}')"
-expect 201 "RentalCo's repository registered"
+host GET "/orgs/$RENTAL_CO" "$RENTAL_CO_TOKEN"
+expect 200 "RentalCo's repository registered"
 
 CAR=$(create --controller "$RENTAL_CO" --alias "vin-1FTFW1E52NFA10001.rentalco.example")
 host PUT "/orgs/$RENTAL_CO/network.dimo.org.vehicleControl/$CAR" "$RENTAL_CO_TOKEN" "$(cat "$KEYS/${CAR#did:dimo:}.control.json")"

@@ -52,8 +52,11 @@ func main() {
 		st = pgStore
 		log.Info().Msg("Using PostgreSQL store")
 	} else {
+		if os.Getenv("ALLOW_MEMORY_STORE") != "true" {
+			log.Fatal().Msg("DATABASE_URL is empty: refusing to start on an in-memory store, which loses every operation on restart; set ALLOW_MEMORY_STORE=true for local runs")
+		}
 		st = store.NewMemoryStore()
-		log.Warn().Msg("Using in-memory store (no DATABASE_URL configured)")
+		log.Warn().Msg("Using in-memory store (ALLOW_MEMORY_STORE=true)")
 	}
 
 	// Create and start the HTTP server.

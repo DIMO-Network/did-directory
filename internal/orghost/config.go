@@ -1,6 +1,9 @@
 package orghost
 
 import (
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -17,6 +20,16 @@ type Settings struct {
 	// MasterKey seals org signing keys at rest, base64 of 32 bytes. Required
 	// with DATABASE_URL; the in-memory store runs under an ephemeral key.
 	MasterKey string `yaml:"MASTER_KEY"`
+	// Signer picks where new orgs' #dimo_org keys live: "local" (sealed under
+	// MASTER_KEY, the default) or "kms". Orgs already registered keep the backend
+	// their row names, whatever this says.
+	Signer string `yaml:"ORG_SIGNER"`
+	// KMSRegion is the AWS region of the KMS keys; empty uses the SDK default.
+	KMSRegion string `yaml:"KMS_REGION"`
+	// KMSAliasPrefix prefixes each org key's alias; it must start with "alias/".
+	// Give each environment its own (alias/dimo-org/prod/): the rest of the
+	// alias is derived from the org DID alone.
+	KMSAliasPrefix string `yaml:"KMS_ALIAS_PREFIX"`
 	// IdentityJWKSURL is where the identity token issuer publishes its signing
 	// keys; IdentityJWKS is the same key set given inline, for development.
 	IdentityJWKSURL string `yaml:"IDENTITY_JWKS_URL"`
@@ -27,6 +40,34 @@ type Settings struct {
 	// Both are required.
 	IdentityIssuer   string `yaml:"IDENTITY_ISSUER"`
 	IdentityAudience string `yaml:"IDENTITY_AUDIENCE"`
+	// PublicURL is this host's own URL, which an org's DID must publish as its
+	// #dimo_org_host for the org to register here. Empty means
+	// IdentityAudience, which is the same URL unless tokens name the host by
+	// another one. See HostURL.
+	PublicURL string `yaml:"PUBLIC_URL"`
+	// RegisterRateLimitPerMinute bounds registers host-wide in any rolling
+	// minute, since under KMS each one makes a billable key; 0 disables it.
+	RegisterRateLimitPerMinute int `yaml:"REGISTER_RATE_LIMIT_PER_MINUTE"`
+	// RegisterRateLimitPerCallerPerMinute bounds one caller's registers in any
+	// rolling minute, so no single DID can spend the host-wide minute; 0
+	// disables it.
+	RegisterRateLimitPerCallerPerMinute int `yaml:"REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE"`
+	// RegisterMaxPerDay caps the orgs this host (every replica sharing its
+	// database) creates in any rolling 24 hours. Past it registers are refused
+	// and the host logs at error level, which is the alarm to page on. 0
+	// disables it.
+	RegisterMaxPerDay int `yaml:"ORG_REGISTER_MAX_PER_DAY"`
+	// RegisterAttemptsPerCallerPerMinute bounds every register attempt by one
+	// caller DID in any rolling minute, ahead of the DID resolve each attempt
+	// makes, so a signed-in DID cannot make the host resolve at request rate.
+	// It is separate from the key budget and only ever slows that caller. 0
+	// disables it.
+	RegisterAttemptsPerCallerPerMinute int `yaml:"REGISTER_ATTEMPTS_PER_CALLER_PER_MINUTE"`
+	// DPoPMaxProofsPerSubject bounds how many live DPoP proofs one caller DID
+	// may hold (a proof lives six minutes), so one signed-in DID cannot fill
+	// the proof store for everyone; past it that caller gets 429. ISSUER_DIDS
+	// are not bounded. 0 disables it.
+	DPoPMaxProofsPerSubject int `yaml:"DPOP_MAX_PROOFS_PER_SUBJECT"`
 	// DirectoryURL is the DID directory, for control state (plan §3.3).
 	DirectoryURL string `yaml:"DIRECTORY_URL"`
 	// IssuerDIDs are the DIDs that may call POST /authorize: dauth's.
@@ -44,7 +85,9 @@ type Settings struct {
 
 // LoadSettings reads path, then applies environment overrides.
 func LoadSettings(path string) (*Settings, error) {
-	s := &Settings{Port: 8081, LogLevel: "info", PageSize: 100}
+	s := &Settings{Port: 8081, LogLevel: "info", PageSize: 100, Signer: "local", KMSAliasPrefix: "alias/dimo-org/",
+		RegisterRateLimitPerMinute: 10, RegisterRateLimitPerCallerPerMinute: 3, RegisterMaxPerDay: 200, RegisterAttemptsPerCallerPerMinute: 30,
+		DPoPMaxProofsPerSubject: DefaultProofsPerSubject}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := yaml.Unmarshal(data, s); err != nil {
 			return nil, err
@@ -58,10 +101,14 @@ func LoadSettings(path string) (*Settings, error) {
 	env("DATABASE_URL", &s.DatabaseURL)
 	env("LOG_LEVEL", &s.LogLevel)
 	env("MASTER_KEY", &s.MasterKey)
+	env("ORG_SIGNER", &s.Signer)
+	env("KMS_REGION", &s.KMSRegion)
+	env("KMS_ALIAS_PREFIX", &s.KMSAliasPrefix)
 	env("IDENTITY_JWKS_URL", &s.IdentityJWKSURL)
 	env("IDENTITY_JWKS", &s.IdentityJWKS)
 	env("IDENTITY_ISSUER", &s.IdentityIssuer)
 	env("IDENTITY_AUDIENCE", &s.IdentityAudience)
+	env("PUBLIC_URL", &s.PublicURL)
 	env("DIRECTORY_URL", &s.DirectoryURL)
 	env("CONTROL_CACHE_TTL", &s.ControlCacheTTL)
 	// Comma-separated in the environment.
@@ -81,7 +128,29 @@ func LoadSettings(path string) (*Settings, error) {
 			s.PageSize = p
 		}
 	}
+	envInt := func(name string, dst *int) {
+		if v := os.Getenv(name); v != "" {
+			if p, err := strconv.Atoi(v); err == nil {
+				*dst = p
+			}
+		}
+	}
+	envInt("REGISTER_RATE_LIMIT_PER_MINUTE", &s.RegisterRateLimitPerMinute)
+	envInt("REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE", &s.RegisterRateLimitPerCallerPerMinute)
+	envInt("ORG_REGISTER_MAX_PER_DAY", &s.RegisterMaxPerDay)
+	envInt("REGISTER_ATTEMPTS_PER_CALLER_PER_MINUTE", &s.RegisterAttemptsPerCallerPerMinute)
+	envInt("DPOP_MAX_PROOFS_PER_SUBJECT", &s.DPoPMaxProofsPerSubject)
 	return s, nil
+}
+
+// HostURL is the URL an org's #dimo_org_host must name: PublicURL, else
+// IdentityAudience, normalised (parseHostURL).
+func (s *Settings) HostURL() string {
+	u := s.PublicURL
+	if u == "" {
+		u = s.IdentityAudience
+	}
+	return normalHostURL(u)
 }
 
 func splitList(v string) []string {
@@ -92,4 +161,86 @@ func splitList(v string) []string {
 		}
 	}
 	return out
+}
+
+// Validate checks the URLs the host is named by (contract 5). IDENTITY_AUDIENCE
+// and PUBLIC_URL must be plain http(s) URLs, with no userinfo, query or
+// fragment, and must not end in "/": dauth issues audiences without one and
+// accounts publishes the host URL without one, so a slash here would refuse
+// every token or every register while looking right. Each must also already
+// be in its normal form (parseHostURL): the audience a client asks dauth for
+// is the URL as written, so there is only one way to write it.
+func (s *Settings) Validate() error {
+	for _, u := range []struct{ name, value string }{
+		{"IDENTITY_AUDIENCE", s.IdentityAudience},
+		{"PUBLIC_URL", s.PublicURL},
+	} {
+		if u.value == "" {
+			continue
+		}
+		if strings.HasSuffix(u.value, "/") {
+			return fmt.Errorf("%s must not end in \"/\": %q", u.name, u.value)
+		}
+		n, err := parseHostURL(u.value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", u.name, err)
+		}
+		if n != u.value {
+			return fmt.Errorf("%s must be written in its normal form %q (lower-case scheme and host, no default port): %q", u.name, n, u.value)
+		}
+	}
+	return nil
+}
+
+// parseHostURL normalises a URL naming this host: scheme and host lowercased,
+// the default port dropped, the path kept as written without a trailing
+// slash. It refuses anything but an absolute http(s) URL with a host and no
+// userinfo, query or fragment.
+func parseHostURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("not a URL: %q", raw)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch {
+	case scheme != "http" && scheme != "https":
+		return "", fmt.Errorf("must be an http or https URL: %q", raw)
+	case u.Host == "" || u.Opaque != "":
+		return "", fmt.Errorf("must name a host: %q", raw)
+	case u.User != nil:
+		return "", fmt.Errorf("must not carry userinfo: %q", raw)
+	case u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "?"):
+		return "", fmt.Errorf("must not carry a query: %q", raw)
+	case u.Fragment != "" || strings.Contains(raw, "#"):
+		return "", fmt.Errorf("must not carry a fragment: %q", raw)
+	}
+	host, port := strings.ToLower(u.Hostname()), u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	switch {
+	case port != "":
+		host = net.JoinHostPort(host, port)
+	case strings.Contains(host, ":"):
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/"), nil
+}
+
+// normalHostURL is parseHostURL for a value that may not parse: such a value
+// is kept as given, less any trailing slash, so it still compares only to
+// itself.
+func normalHostURL(raw string) string {
+	if n, err := parseHostURL(raw); err == nil {
+		return n
+	}
+	return strings.TrimRight(raw, "/")
+}
+
+// sameHostURL reports whether a URL someone else wrote (a DID's
+// #dimo_org_host, a token's aud) names the host whose normalised URL is want.
+// One that does not parse as a plain host URL names nothing.
+func sameHostURL(got, want string) bool {
+	n, err := parseHostURL(got)
+	return err == nil && want != "" && n == want
 }

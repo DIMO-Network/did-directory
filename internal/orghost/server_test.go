@@ -23,6 +23,7 @@ import (
 	"time"
 
 	dimocrypto "github.com/DIMO-Network/did-directory/internal/crypto"
+	"github.com/DIMO-Network/did-directory/internal/did"
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/client"
@@ -118,7 +119,10 @@ type host struct {
 	t      *testing.T
 	app    *fiber.App
 	issuer *issuer
-	repo   *Repository
+	// auth is the host's authenticator, for tests that reach into its DPoP
+	// verifier.
+	auth *JWKSAuthenticator
+	repo *Repository
 	// directory is what the resolver reads control state from.
 	directory *fakeDirectory
 	// clock is the host's time; tests move it to commit and evaluate at fixed
@@ -133,12 +137,50 @@ const (
 	dimoDID  = "did:dimo:dimo"
 )
 
-// fakeDirectory answers control lookups for the vehicles a test registers.
+// fakeDirectory answers control lookups for the vehicles a test registers,
+// and resolves the DID documents a test publishes.
 type fakeDirectory struct {
 	mu     sync.Mutex
 	states map[string]*control.State
 	calls  int
+	docs   map[string]*did.DIDDocument
+	// resolveErr, when set, is what every Resolve returns.
+	resolveErr error
+	resolves   int
 }
+
+func (d *fakeDirectory) Resolve(_ context.Context, didStr string) (*did.DIDDocument, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.resolves++
+	if d.resolveErr != nil {
+		return nil, d.resolveErr
+	}
+	doc, ok := d.docs[didStr]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", client.ErrNotFound, didStr)
+	}
+	return doc, nil
+}
+
+// publishDoc makes didStr resolve to a document with the given services.
+func (d *fakeDirectory) publishDoc(didStr string, services ...did.ServiceEntry) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.docs == nil {
+		d.docs = map[string]*did.DIDDocument{}
+	}
+	d.docs[didStr] = &did.DIDDocument{ID: didStr, AlsoKnownAs: []string{}, Service: services}
+}
+
+// publishHost makes org's DID name endpoint as its #dimo_org_host.
+func (d *fakeDirectory) publishHost(org, endpoint string) {
+	d.publishDoc(org, did.ServiceEntry{ID: "#" + OrgHostServiceID, Type: "DimoOrgHost", ServiceEndpoint: endpoint})
+}
+
+// publish makes org's DID name this host as its #dimo_org_host, which
+// registering on it needs.
+func (h *host) publish(org string) { h.directory.publishHost(org, hostAudience) }
 
 func (d *fakeDirectory) Control(_ context.Context, did string) (*control.State, error) {
 	d.mu.Lock()
@@ -180,14 +222,14 @@ func newHost(t *testing.T, st store.Store) *host {
 	return newHostWith(t, st, Policies{booking.Name: booking})
 }
 
-func newHostWith(t *testing.T, st store.Store, policies Policies) *host {
+func newHostWith(t *testing.T, st store.Store, policies Policies, opts ...func(*Options)) *host {
 	t.Helper()
 	iss := newIssuer(t)
 	auth, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test", hostAudience)
 	require.NoError(t, err)
 	sealer, err := NewEphemeralSealer()
 	require.NoError(t, err)
-	h := &host{t: t, issuer: iss, directory: &fakeDirectory{}}
+	h := &host{t: t, issuer: iss, auth: auth, directory: &fakeDirectory{}}
 	r := &Repository{Store: st, Signer: NewLocalSigner(st, sealer), Now: func() time.Time {
 		if h.clock.IsZero() {
 			return time.Now()
@@ -195,11 +237,15 @@ func newHostWith(t *testing.T, st store.Store, policies Policies) *host {
 		return h.clock
 	}}
 	h.repo = r
-	h.app = New(Options{
-		Repo: r, Auth: auth, Control: h.directory,
+	o := Options{
+		Repo: r, Auth: auth, Control: h.directory, Documents: h.directory, PublicURL: hostAudience,
 		Issuers: []string{dauthDID}, Admins: []string{dimoDID}, Policies: policies,
 		PageSize: 50, Log: zerolog.Nop(),
-	})
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	h.app = New(o)
 	return h
 }
 
@@ -321,6 +367,7 @@ func TestRepositoryFlow(t *testing.T) {
 			// Only the org can register itself.
 			status, body = h.do(http.MethodPost, "/orgs/"+org, alice, nil)
 			assert.Equal(t, http.StatusForbidden, status, body)
+			h.publish(org)
 			status, body = h.do(http.MethodPost, "/orgs/"+org, org, nil)
 			require.Equal(t, http.StatusCreated, status, body)
 			orgKey := body["key"].(string)
@@ -330,6 +377,9 @@ func TestRepositoryFlow(t *testing.T) {
 			status, body = h.do(http.MethodGet, "/orgs/"+org, alice, nil)
 			require.Equal(t, http.StatusOK, status, body)
 			assert.Equal(t, orgKey, body["key"])
+			assert.NotContains(t, body, "head", "alice is not a member yet")
+			status, body = h.do(http.MethodGet, "/orgs/"+org, org, nil)
+			require.Equal(t, http.StatusOK, status, body)
 			assert.Equal(t, float64(0), body["head"].(map[string]any)["seq"])
 
 			// Writes to an org that is not on this host are refused.
@@ -456,6 +506,7 @@ func TestStructuralChecks(t *testing.T) {
 	h := newHost(t, store.NewMemoryStore())
 	org := newOrgDID()
 	const alice = "did:dimo:alice"
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 
@@ -540,6 +591,7 @@ func TestRegisterWithSuppliedKey(t *testing.T) {
 	want, err := dimocrypto.EncodeDIDKey(&key.PublicKey)
 	require.NoError(t, err)
 
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, map[string]string{"privateKey": base64.StdEncoding.EncodeToString(der)})
 	require.Equal(t, http.StatusCreated, status, body)
 	assert.Equal(t, want, body["key"])
@@ -557,6 +609,7 @@ func TestRegisterWithSuppliedKey(t *testing.T) {
 	status, body = h.do(http.MethodPost, "/orgs/"+newOrgDID(), "did:dimo:x", map[string]string{"privateKey": "nope"})
 	assert.Equal(t, http.StatusForbidden, status, body)
 	other := newOrgDID()
+	h.publish(other)
 	status, body = h.do(http.MethodPost, "/orgs/"+other, other, map[string]string{"privateKey": "nope"})
 	assert.Equal(t, http.StatusBadRequest, status, body)
 }
@@ -603,6 +656,7 @@ func TestConcurrentWritesKeepOneChain(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHost(t, st)
 			org := newOrgDID()
+			h.publish(org)
 			status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 			require.Equal(t, http.StatusCreated, status, body)
 			orgKey := body["key"].(string)
@@ -673,6 +727,18 @@ func TestJWKSAuthenticator(t *testing.T) {
 	_, err = auth.Authenticate(ctx, cred(iss.token(t, with("aud", []string{"dq", hostAudience})), iss.holder))
 	require.NoError(t, err)
 
+	// R4-F6: aud is compared after the normalisation the host URL gets.
+	for _, aud := range []string{"HTTPS://OrgHost.Test", "https://orghost.test:443", "https://orghost.test/"} {
+		_, err = auth.Authenticate(ctx, cred(iss.token(t, with("aud", aud)), iss.holder))
+		assert.NoError(t, err, aud)
+	}
+	// An authenticator configured with another spelling of the same URL
+	// verifies the same tokens, and builds htu from the normalised form.
+	spelled, err := NewJWKSAuthenticator(iss.jwks(), "https://auth.test", "HTTPS://OrgHost.Test:443")
+	require.NoError(t, err)
+	_, err = spelled.Authenticate(ctx, cred(iss.token(t, good), iss.holder))
+	assert.NoError(t, err)
+
 	_, err = NewJWKSAuthenticator(iss.jwks(), "https://auth.test", "")
 	require.Error(t, err, "an authenticator without an audience accepts every relying party's tokens")
 
@@ -695,6 +761,9 @@ func TestJWKSAuthenticator(t *testing.T) {
 		"wrong issuer":   tokenCase(with("iss", "https://evil.test")),
 		"no audience":    tokenCase(with("aud", nil)),
 		"other audience": tokenCase(with("aud", "dimo")),
+		"other host":     tokenCase(with("aud", "https://orghost.test.evil")),
+		"other port":     tokenCase(with("aud", "https://orghost.test:8443")),
+		"other path":     tokenCase(with("aud", "https://orghost.test/x")),
 		"audience list":  tokenCase(with("aud", []string{"dimo", "dq"})),
 		"sub not a DID":  tokenCase(with("sub", "0xabc")),
 		"no scope":       tokenCase(with("scope", nil)),
@@ -732,11 +801,56 @@ func TestJWKSAuthenticator(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestReplayCacheFull: a full DPoP proof store is this host's capacity, not
+// the caller's credentials, so a sound request is answered 503 with
+// Retry-After and no WWW-Authenticate challenge, bad credentials are still 401,
+// and the request passes once there is room.
+func TestReplayCacheFull(t *testing.T) {
+	h := newHost(t, store.NewMemoryStore())
+	org := newOrgDID()
+	h.auth.UseProofStore(store.NewMemoryProofs(1), 0, nil)
+	// The register request's proof fills the cache.
+	h.publish(org)
+	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
+	require.Equal(t, http.StatusCreated, status, body)
+
+	path := "/orgs/" + org
+	token := h.issuer.identity(t, org)
+	proof, err := h.issuer.holder.Proof(http.MethodGet, hostAudience+path, token, time.Now())
+	require.NoError(t, err)
+	_, err = h.auth.Authenticate(t.Context(), Credentials{Authorization: "DPoP " + token, Proof: proof, Method: http.MethodGet, Path: path})
+	require.ErrorIs(t, err, ErrUnavailable)
+	assert.NotErrorIs(t, err, ErrUnauthenticated)
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	require.NoError(t, h.issuer.present(req, h.issuer.identity(t, org)))
+	resp, err := h.app.Test(req, -1)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, "1", resp.Header.Get(fiber.HeaderRetryAfter))
+	assert.Empty(t, resp.Header.Get(fiber.HeaderWWWAuthenticate), "not an authentication failure")
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	assert.Equal(t, "temporarily_unavailable", out["code"])
+
+	// Bad credentials are still 401: the token is checked before the proof.
+	status, body = h.do(http.MethodGet, path, "", nil)
+	assert.Equal(t, http.StatusUnauthorized, status, body)
+	assert.Equal(t, "invalid_token", body["code"])
+
+	// With room again the same request passes.
+	h.auth.UseProofStore(store.NewMemoryProofs(2), 0, nil)
+	status, body = h.do(http.MethodGet, path, org, nil)
+	assert.Equal(t, http.StatusOK, status, body)
+}
+
 // TestScopes: each route takes only tokens carrying its scope, and refuses
 // the rest with 403 insufficient_scope before looking at anything else.
 func TestScopes(t *testing.T) {
 	h := newHost(t, store.NewMemoryStore())
 	org := newOrgDID()
+	h.publish(org)
 	status, body := h.do(http.MethodPost, "/orgs/"+org, org, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 

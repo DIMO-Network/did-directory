@@ -65,6 +65,7 @@ func TestControllerRoot(t *testing.T) {
 			// The org sells car1 on day 12.
 			buyer := a.org + "-buyer"
 			a.clock = day(12)
+			a.publish(buyer)
 			status, body = a.do(http.MethodPost, "/orgs/"+buyer, buyer, nil)
 			require.Equal(t, http.StatusCreated, status, body)
 			salt, err := control.NewSalt()

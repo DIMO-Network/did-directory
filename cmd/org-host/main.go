@@ -17,6 +17,8 @@ import (
 	"github.com/DIMO-Network/did-directory/internal/orghost/store"
 	"github.com/DIMO-Network/did-directory/pkg/agreement"
 	"github.com/DIMO-Network/did-directory/pkg/client"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/rs/zerolog"
 )
 
@@ -37,18 +39,33 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	if cfg.Signer != "local" && cfg.Signer != "kms" {
+		log.Fatal().Str("value", cfg.Signer).Msg("ORG_SIGNER must be local or kms")
+	}
+	// Contract 5: the host's URLs are checked before anything else is opened.
+	if err := cfg.Validate(); err != nil {
+		log.Fatal().Err(err).Msg("Bad host URL")
+	}
+
 	var st store.Store
 	var sealer *orghost.Sealer
 	if cfg.DatabaseURL != "" {
-		if cfg.MasterKey == "" {
+		// Orgs registered under the local signer stay sealed under MASTER_KEY, so
+		// it is required unless ORG_SIGNER=kms and the store holds no such org
+		// (checked once the store is open).
+		if cfg.MasterKey == "" && cfg.Signer == "local" {
 			log.Fatal().Msg("MASTER_KEY is required with DATABASE_URL: org signing keys are sealed at rest")
 		}
-		masterKey, err := base64.StdEncoding.DecodeString(cfg.MasterKey)
-		if err != nil {
-			log.Fatal().Err(err).Msg("MASTER_KEY must be base64")
-		}
-		if sealer, err = orghost.NewSealer(masterKey); err != nil {
-			log.Fatal().Err(err).Msg("Bad MASTER_KEY")
+		if cfg.MasterKey != "" {
+			masterKey, err := base64.StdEncoding.DecodeString(cfg.MasterKey)
+			if err != nil {
+				log.Fatal().Err(err).Msg("MASTER_KEY must be base64")
+			}
+			if sealer, err = orghost.NewSealer(masterKey); err != nil {
+				log.Fatal().Err(err).Msg("Bad MASTER_KEY")
+			}
+		} else {
+			log.Warn().Msg("No MASTER_KEY: this host runs KMS-only")
 		}
 		pg, err := store.NewPostgresStore(ctx, cfg.DatabaseURL, log)
 		if err != nil {
@@ -56,6 +73,15 @@ func main() {
 		}
 		defer func() { _ = pg.Close() }()
 		st = pg
+		if sealer == nil {
+			has, err := pg.HasLocalOrgs(ctx)
+			if err != nil {
+				log.Fatal().Err(err).Msg("Failed to check for orgs with local signing keys")
+			}
+			if has {
+				log.Fatal().Msg("MASTER_KEY is required: this host has orgs with local signing keys")
+			}
+		}
 		log.Info().Msg("Using PostgreSQL store")
 	} else {
 		if sealer, err = orghost.NewEphemeralSealer(); err != nil {
@@ -68,7 +94,7 @@ func main() {
 	if cfg.IdentityIssuer == "" || cfg.IdentityAudience == "" {
 		log.Fatal().Msg("IDENTITY_ISSUER and IDENTITY_AUDIENCE are required: a token for another service must not write here")
 	}
-	var auth orghost.Authenticator
+	var auth *orghost.JWKSAuthenticator
 	switch {
 	case cfg.IdentityJWKSURL != "":
 		auth, err = orghost.NewJWKSAuthenticatorFromURL(ctx, cfg.IdentityJWKSURL, cfg.IdentityIssuer, cfg.IdentityAudience)
@@ -80,6 +106,17 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to load identity keys")
 	}
+	// Accepted DPoP proofs are remembered in the database when there is one, so
+	// every replica refuses a proof any of them accepted.
+	var proofs store.ProofStore = store.NewMemoryProofs(store.DefaultMaxProofs)
+	if pg, ok := st.(*store.PostgresStore); ok {
+		proofs = pg
+		go orghost.SweepProofs(ctx, pg, time.Minute, log)
+	}
+	if cfg.DPoPMaxProofsPerSubject < 0 {
+		log.Fatal().Int("value", cfg.DPoPMaxProofsPerSubject).Msg("DPOP_MAX_PROOFS_PER_SUBJECT must be 0 (no limit) or more")
+	}
+	auth.UseProofStore(proofs, cfg.DPoPMaxProofsPerSubject, cfg.IssuerDIDs)
 
 	if cfg.DirectoryURL == "" {
 		log.Fatal().Msg("DIRECTORY_URL is required: /authorize reads control state from the directory")
@@ -93,6 +130,20 @@ func main() {
 	if len(cfg.IssuerDIDs) == 0 {
 		log.Warn().Msg("No ISSUER_DIDS configured: nothing may call /authorize")
 	}
+	for name, v := range map[string]int{
+		"REGISTER_RATE_LIMIT_PER_MINUTE":            cfg.RegisterRateLimitPerMinute,
+		"REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE": cfg.RegisterRateLimitPerCallerPerMinute,
+		"ORG_REGISTER_MAX_PER_DAY":                  cfg.RegisterMaxPerDay,
+		"REGISTER_ATTEMPTS_PER_CALLER_PER_MINUTE":   cfg.RegisterAttemptsPerCallerPerMinute,
+	} {
+		if v < 0 {
+			log.Fatal().Int("value", v).Msgf("%s must be 0 (no limit) or more", name)
+		}
+	}
+	publicURL := cfg.HostURL()
+	log.Info().Str("public_url", publicURL).Int("register_per_minute", cfg.RegisterRateLimitPerMinute).
+		Int("register_per_caller_per_minute", cfg.RegisterRateLimitPerCallerPerMinute).Int("register_max_per_day", cfg.RegisterMaxPerDay).
+		Msg("Orgs register here only if their DID names this URL as #dimo_org_host")
 
 	// The commit policy profiles a role may name (plan §3.2). The booking
 	// profile is registered here by name; what a booking is stays with the
@@ -100,17 +151,37 @@ func main() {
 	booking := agreement.CommitPolicy()
 	policies := orghost.Policies{booking.Name: booking}
 
-	repo := &orghost.Repository{Store: st, Signer: orghost.NewLocalSigner(st, sealer)}
+	signers, err := orghost.BuildSigners(ctx, st, sealer, orghost.SignerConfig{Signer: cfg.Signer, AliasPrefix: cfg.KMSAliasPrefix},
+		func(ctx context.Context) (orghost.KMSAPI, error) {
+			awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.KMSRegion))
+			if err != nil {
+				return nil, err
+			}
+			return kms.NewFromConfig(awsCfg), nil
+		})
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to set up org signing keys")
+	}
+	log.Info().Str("signer", cfg.Signer).Bool("kms_client", signers.KMS != nil).Bool("local_signer", signers.Local != nil).
+		Msg("New orgs register with this signer; existing orgs keep the backend their row names")
+	repo := &orghost.Repository{Store: st, Signer: signers.Signer}
+	directory := client.New(cfg.DirectoryURL)
 	app := orghost.New(orghost.Options{
-		Repo:            repo,
-		Auth:            auth,
-		Control:         client.New(cfg.DirectoryURL),
-		Issuers:         cfg.IssuerDIDs,
-		Admins:          cfg.AdminDIDs,
-		Policies:        policies,
-		PageSize:        cfg.PageSize,
-		ControlCacheTTL: controlTTL,
-		Log:             log,
+		Repo:                               repo,
+		Auth:                               auth,
+		Control:                            directory,
+		Documents:                          directory,
+		PublicURL:                          publicURL,
+		RegisterPerMinute:                  cfg.RegisterRateLimitPerMinute,
+		RegisterPerCallerPerMinute:         cfg.RegisterRateLimitPerCallerPerMinute,
+		RegisterMaxPerDay:                  cfg.RegisterMaxPerDay,
+		RegisterAttemptsPerCallerPerMinute: cfg.RegisterAttemptsPerCallerPerMinute,
+		Issuers:                            cfg.IssuerDIDs,
+		Admins:                             cfg.AdminDIDs,
+		Policies:                           policies,
+		PageSize:                           cfg.PageSize,
+		ControlCacheTTL:                    controlTTL,
+		Log:                                log,
 	})
 
 	go func() {

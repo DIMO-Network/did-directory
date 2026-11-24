@@ -47,6 +47,7 @@ func newAvis(t *testing.T, st store.Store) *avis {
 	a.fordPro = a.org + "-fordpro"
 	a.clock = day(1)
 
+	a.publish(a.org)
 	status, body := a.do(http.MethodPost, "/orgs/"+a.org, a.org, nil)
 	require.Equal(t, http.StatusCreated, status, body)
 	status, body = a.do(http.MethodPut, "/parties/"+a.org, dimoDID, map[string]any{"kind": "org", "operator": true})
@@ -179,9 +180,9 @@ func TestAvisActions(t *testing.T) {
 				status, body = a.approve(id, bob)
 				assert.Equal(t, http.StatusForbidden, status, body)
 				status, body = a.approve(id, fordCredit)
-				assert.Equal(t, http.StatusForbidden, status, body)
+				assert.Equal(t, http.StatusNotFound, status, body, "not a member: the pending write is outside its reach")
 				status, body = a.approve(id, alice)
-				assert.Equal(t, http.StatusForbidden, status, body, "alice's role does not cover financed-fc")
+				assert.Equal(t, http.StatusNotFound, status, body, "alice's role does not cover financed-fc, so she cannot see it either")
 				// The pending list shows each member what they wrote or could
 				// approve, nothing else.
 				pending := func(as string) int {
@@ -206,6 +207,7 @@ func TestAvisActions(t *testing.T) {
 				// A lien from an org nobody attested as an operator is refused
 				// outright, not parked.
 				other := newOrgDID()
+				a.publish(other)
 				status, body = a.do(http.MethodPost, "/orgs/"+other, other, nil)
 				require.Equal(t, http.StatusCreated, status, body)
 				stranger := lien
@@ -233,11 +235,12 @@ func TestAvisActions(t *testing.T) {
 				assert.Equal(t, 1, pending(carol), "carol may approve what she could not write")
 				assert.Equal(t, 0, pending(bob))
 				status, body = a.approve(id, bob)
-				assert.Equal(t, http.StatusForbidden, status, body, "bob's role does not cover ford-pro-enrolled")
+				assert.Equal(t, http.StatusNotFound, status, body, "bob's role does not cover ford-pro-enrolled, so he cannot see it either")
 				status, body = a.approve(id, carol)
 				require.Equal(t, http.StatusCreated, status, body)
 
 				// Ford Pro passes telemetry to its integrator from its own repository.
+				a.publish(fordPro)
 				status, body = a.do(http.MethodPost, "/orgs/"+fordPro, fordPro, nil)
 				require.Equal(t, http.StatusCreated, status, body)
 				status, body = a.do(http.MethodPut, "/parties/"+fordPro, dimoDID, map[string]any{"kind": "org", "operator": true})

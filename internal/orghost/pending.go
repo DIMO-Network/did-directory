@@ -3,6 +3,7 @@ package orghost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -78,12 +79,62 @@ func (s *Server) couldApprove(ctx context.Context, org, member string, p *store.
 // still hold their authority, because the commit time is what evaluation
 // checks it at, and the approver must hold the same authority and be neither
 // the author nor the recipient.
+//
+// Who the caller is in the org is settled before the write is claimed. A
+// pending write the caller could neither see nor approve (listPending's rule)
+// is not found, exactly as one that does not exist, so its id tells a stranger
+// nothing about what it covers; one the caller may see but may not approve
+// (its author, its recipient, or a member without the authority) is refused.
+// Neither is claimed, so a real approver never finds it missing.
 func (s *Server) approve(c *fiber.Ctx) error {
 	org, _, _ := params(c)
 	id := strings.Clone(c.Params("id"))
+	who := caller(c)
 	p, err := s.repo.Store.GetPending(c.Context(), org, id)
 	if err != nil {
 		return s.fail(c, err)
+	}
+	r, err := s.reader(c.Context(), org, who)
+	if errors.Is(err, ErrForbidden) {
+		return s.fail(c, store.ErrNotFound)
+	}
+	if err != nil {
+		return s.fail(c, err)
+	}
+	visible, err := r.canRead(c.Context(), "at://"+org+"/"+p.Collection+"/"+p.RKey, p.Collection, p.Record, p.CommittedBy)
+	if err != nil {
+		return s.fail(c, err)
+	}
+	authority := who == org
+	if !authority {
+		if authority, err = s.couldApprove(c.Context(), org, who, p); err != nil {
+			return s.fail(c, err)
+		}
+	}
+	if !visible && !authority {
+		return s.fail(c, store.ErrNotFound)
+	}
+	// The author (the org, for its own write) and the recipient can never
+	// approve: refuse them now, before the write is claimed. checkApprover
+	// applies the same rules again at commit.
+	author := p.CommittedBy
+	if author == "" {
+		author = org
+	}
+	if who == author {
+		return s.fail(c, forbidden("the author cannot approve their own write"))
+	}
+	if p.Collection == delegation.CollectionDelegation || p.Collection == delegation.CollectionRole {
+		rec, err := odrl.Decode(p.Record)
+		if err != nil {
+			return s.fail(c, err)
+		}
+		if rec.To != "" && who == rec.To {
+			return s.fail(c, forbidden("the recipient cannot approve a write in their favour"))
+		}
+	}
+	if !authority {
+		return s.fail(c, forbidden("%s holds no authority to approve this write", who))
 	}
 	record, err := s.repo.Prepare(p.Org, p.Collection, p.RKey, p.Record, p.CommittedBy)
 	if err != nil {
@@ -95,7 +146,7 @@ func (s *Server) approve(c *fiber.Ctx) error {
 	if err := s.repo.Store.DeletePending(c.Context(), org, id); err != nil {
 		return s.fail(c, err)
 	}
-	approver := caller(c)
+	approver := who
 	w := &write{org: p.Org, collection: p.Collection, rkey: p.RKey, record: record, committedBy: p.CommittedBy, approvedBy: approver}
 	res, err := s.repo.Put(c.Context(), p.Org, p.Collection, p.RKey, record, p.CommittedBy, []string{approver}, func(ctx context.Context, _ *store.Stored) error {
 		return s.checkWrite(ctx, w)

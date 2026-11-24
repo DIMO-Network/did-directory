@@ -1,0 +1,41 @@
+name: update-dev-chart-values
+on:
+  workflow_run:
+    workflows: [Images]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  update-values:
+    name: update-dev-chart-values
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Its own group: a newer run queues behind the running one, and prod
+    # promotion is a PR, so nothing else writes this file.
+    concurrency:
+      group: chart-values-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: main
+
+      - name: Get short SHA
+        id: slug
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: echo "sha7=${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Update did-directory dev image tag
+        uses: fjogeleit/yaml-update-action@dffe9a5223d84653c13374032382f6bb5de8e5ef # v0.17.0
+        with:
+          valueFile: "charts/did-directory/values.yaml"
+          propertyPath: "image.tag"
+          value: ${{ steps.slug.outputs.sha7 }}
+          branch: main
+          message: "Update did-directory dev image to ${{ steps.slug.outputs.sha7 }}"

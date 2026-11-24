@@ -28,10 +28,23 @@ func TestBuildCreate_OrgPublishesCommitKeyAndHost(t *testing.T) {
 	_, rot, err := newKey()
 	require.NoError(t, err)
 
+	// With a host the genesis names it and carries no commit key: the host
+	// makes that key at register, and create publishes it then (R7-F8).
 	plan, err := buildCreate(createOptions{Org: true, OrgHost: "https://orghost.dimo.zone"}, rot)
+	require.NoError(t, err)
+	assert.Nil(t, plan.OrgKey)
+	assert.True(t, plan.Register)
+	assert.NotContains(t, plan.Op.VerificationMethods, OrgKeyID)
+	assert.Equal(t, did.Service{Type: OrgHostServiceType, Endpoint: "https://orghost.dimo.zone"}, plan.Op.Services[OrgHostServiceID])
+
+	// --org with a key the CLI generates, for seeding a demo host, and an
+	// explicit host entry beside it via --org-key.
+	plan, err = buildCreate(createOptions{Org: true}, rot)
 	require.NoError(t, err)
 	require.NotNil(t, plan.OrgKey, "the CLI generated the org key, so it must hand it back for the keystore")
 	require.Nil(t, plan.Opening)
+	assert.False(t, plan.Register)
+	plan.Op.Services = withOrgHost(plan.Op.Services, "https://orghost.dimo.zone")
 
 	published := plan.Op.VerificationMethods[OrgKeyID]
 	want, err := dimocrypto.EncodeDIDKey(&plan.OrgKey.PublicKey)
@@ -77,9 +90,10 @@ func TestBuildCreate_OrgKeyFromHost(t *testing.T) {
 func TestBuildCreate_OrgHostAloneImpliesOrg(t *testing.T) {
 	_, rot, err := newKey()
 	require.NoError(t, err)
-	plan, err := buildCreate(createOptions{OrgHost: "https://orghost.dimo.zone"}, rot)
+	plan, err := buildCreate(createOptions{OrgHost: "https://orghost.dimo.zone/"}, rot)
 	require.NoError(t, err)
-	assert.NotEmpty(t, plan.Op.VerificationMethods[OrgKeyID], "a DID with a host but no commit key would be an org nobody can write for")
+	assert.True(t, plan.Register, "a DID with a host but no commit key gets one from the host")
+	assert.Equal(t, "https://orghost.dimo.zone", plan.Op.Services[OrgHostServiceID].Endpoint, "no trailing slash")
 }
 
 func TestBuildCreate_PersonHasNoOrgFields(t *testing.T) {

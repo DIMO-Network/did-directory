@@ -14,13 +14,25 @@ import (
 	"github.com/DIMO-Network/did-directory/pkg/control"
 )
 
-// signOp signs an unsigned operation and returns the signed operation.
+// signOp signs an unsigned operation with a keystore key and returns the signed operation.
 func signOp(key *ecdsa.PrivateKey, unsigned *did.UnsignedOperation) (*did.Operation, error) {
+	return signOpWith(context.Background(), &fileSigner{key: key}, unsigned)
+}
+
+// signOpWith signs an unsigned operation through s and returns the signed
+// operation. alsoKnownAs goes out as [] when there are none, never null: the
+// SDK's verified reads refuse null.
+func signOpWith(ctx context.Context, s opSigner, unsigned *did.UnsignedOperation) (*did.Operation, error) {
+	if unsigned.AlsoKnownAs == nil {
+		u := *unsigned
+		u.AlsoKnownAs = []string{}
+		unsigned = &u
+	}
 	data, err := json.Marshal(unsigned)
 	if err != nil {
 		return nil, fmt.Errorf("marshal operation: %w", err)
 	}
-	sig, err := dimocrypto.SignOperation(key, data)
+	sig, err := s.Sign(ctx, data)
 	if err != nil {
 		return nil, fmt.Errorf("sign operation: %w", err)
 	}

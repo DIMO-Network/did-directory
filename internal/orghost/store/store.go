@@ -24,6 +24,9 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrOrgExists is returned by CreateOrg for an org already on this host.
 	ErrOrgExists = errors.New("org already exists")
+	// ErrOrgKey is returned by CreateOrg for an org without exactly one of a
+	// sealed key and a KMS key.
+	ErrOrgKey = errors.New("an org needs exactly one of a sealed key and a KMS key")
 	// ErrHeadChanged is returned by AppendAfter when another writer moved the
 	// org's log head between the caller reading it and the append.
 	ErrHeadChanged = errors.New("repository head changed")
@@ -39,9 +42,21 @@ func IsHeadChanged(err error) bool { return errors.Is(err, ErrHeadChanged) }
 type Org struct {
 	DID string
 	// KeyEnc is the org's #dimo_org private key, sealed by the host's master key.
-	// The store never sees it in the clear.
-	KeyEnc    []byte
+	// The store never sees it in the clear. Empty for an org whose key lives in
+	// KMS.
+	KeyEnc []byte
+	// KeyRef is the ARN of the org's #dimo_org key in KMS. Exactly one of KeyEnc
+	// and KeyRef is set.
+	KeyRef    string
 	CreatedAt time.Time
+}
+
+// checkKey is the rule every store applies on CreateOrg: exactly one key.
+func (o *Org) checkKey() error {
+	if (len(o.KeyEnc) > 0) == (o.KeyRef != "") {
+		return ErrOrgKey
+	}
+	return nil
 }
 
 // Head is the position of an org's log: its last commit, or the zero Head for
@@ -116,8 +131,17 @@ type Party struct {
 type Store interface {
 	// CreateOrg registers an org on this host with its sealed signing key.
 	CreateOrg(ctx context.Context, org Org) error
+	// HasLocalOrgs reports whether any org's key is sealed under the host master
+	// key, which a host needs MASTER_KEY to use.
+	HasLocalOrgs(ctx context.Context) (bool, error)
+	// AnyKMSKeyRef returns the KMS key of some org on this host, or "" when no
+	// org's key is in KMS: a host needs a KMS client exactly when it has one.
+	AnyKMSKeyRef(ctx context.Context) (string, error)
 	// GetOrg returns an org, or ErrNotFound.
 	GetOrg(ctx context.Context, did string) (*Org, error)
+	// CountOrgsSince counts the orgs created after since, on this host and
+	// every replica sharing its database: the register daily cap.
+	CountOrgsSince(ctx context.Context, since time.Time) (int, error)
 
 	// Head returns the org's log head, or ErrNotFound for an org not on this host.
 	Head(ctx context.Context, org string) (Head, error)

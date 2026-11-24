@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 
@@ -17,6 +18,9 @@ type Settings struct {
 	ExportPageSize      int    `yaml:"EXPORT_PAGE_SIZE"`
 }
 
+// DefaultMaxOperationsPerDID is MAX_OPERATIONS_PER_DID when it is not set.
+const DefaultMaxOperationsPerDID = 1000
+
 // LoadConfig reads a YAML settings file and returns the parsed Settings.
 // Environment variables override YAML values when set.
 func LoadConfig(path string) (*Settings, error) {
@@ -24,7 +28,7 @@ func LoadConfig(path string) (*Settings, error) {
 		Port:                8080,
 		MonitoringPort:      8888,
 		LogLevel:            "info",
-		MaxOperationsPerDID: 1000,
+		MaxOperationsPerDID: DefaultMaxOperationsPerDID,
 		ExportPageSize:      100,
 	}
 
@@ -51,6 +55,20 @@ func LoadConfig(path string) (*Settings, error) {
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		s.LogLevel = v
+	}
+	if v := os.Getenv("MAX_OPERATIONS_PER_DID"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("MAX_OPERATIONS_PER_DID must be a positive integer, got %q", v)
+		}
+		s.MaxOperationsPerDID = n
+	}
+	if v := os.Getenv("EXPORT_PAGE_SIZE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("EXPORT_PAGE_SIZE must be a positive integer, got %q", v)
+		}
+		s.ExportPageSize = n
 	}
 
 	return s, nil

@@ -111,6 +111,7 @@ func runUpdate(args []string) {
 	newOrgKey := fs.Bool("new-org-key", false, "generate a new #dimo_org commit signing key and store it in the keystore")
 	orgHost := fs.String("org-host", "", "org host URL, published as the #dimo_org_host service entry")
 	signingKey := fs.String("signing-key", "", "P-256 did:key to publish as #signing, when the private half is held elsewhere (a KMS)")
+	tk := bindTurnkeyFlags(fs)
 	fs.Parse(args)
 
 	if *didStr == "" {
@@ -122,11 +123,8 @@ func runUpdate(args []string) {
 		os.Exit(1)
 	}
 
-	// Load private key from keystore.
-	privKey, err := LoadKey(*didStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading key: %v\n", err)
-		os.Exit(1)
+	if err := tk.validate(); err != nil {
+		fatal(err)
 	}
 
 	c := client.New(*server)
@@ -138,6 +136,12 @@ func runUpdate(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting latest state: %v\n", err)
 		os.Exit(1)
+	}
+
+	// The rotation key signs: from the keystore, or the Turnkey account that holds it.
+	signer, err := resolveSigner(ctx, tk, *didStr, currentOp, purposeUpdate)
+	if err != nil {
+		fatal(err)
 	}
 
 	plan, err := buildUpdate(currentOp, prevCID, updateOptions{
@@ -153,10 +157,9 @@ func runUpdate(args []string) {
 		os.Exit(1)
 	}
 
-	op, err := signOp(privKey, plan.Op)
+	op, err := signOpWith(ctx, signer, plan.Op)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
 	resp, err := c.Submit(ctx, *didStr, op)

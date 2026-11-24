@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,8 +12,9 @@ import (
 
 // runDPoP prints a DPoP proof that presents an identity token signin printed,
 // for one request, so a script calling the org host with curl can send the
-// token under the DPoP scheme. The key is the keystore's key for the token's
-// sub, which is the key signin bound the token to.
+// token under the DPoP scheme. The key is the one signin bound the token to:
+// the keystore key of the token's sub, or for a Turnkey-held key the DPoP key
+// signin stored beside it (<did>.dpop.json); see makeDPoPProof.
 func runDPoP(args []string) {
 	fs := flag.NewFlagSet("dpop", flag.ExitOnError)
 	token := fs.String("token", "", "identity token the request presents")
@@ -41,15 +43,49 @@ func runDPoP(args []string) {
 		}
 		did = claims.Sub
 	}
-	priv, err := LoadKey(did)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	proof, err := dpopProof(priv, strings.ToUpper(*method), *url, *token, time.Now())
+	proof, err := makeDPoPProof(did, *token, strings.ToUpper(*method), *url, time.Now())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println(proof)
+}
+
+// makeDPoPProof signs a proof for one request presenting token, with the key
+// signin bound the token to: the DID's keystore key, or for a Turnkey-rooted
+// DID the P-256 key signin stored beside it (<did>.dpop.json). When both exist,
+// the one whose thumbprint is the token's cnf.jkt wins.
+func makeDPoPProof(did, token, method, url string, now time.Time) (string, error) {
+	var keys []*ecdsa.PrivateKey
+	var firstErr error
+	for _, load := range []func(string) (*ecdsa.PrivateKey, error){LoadKey, LoadDPoPKey} {
+		k, err := load(did)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return "", firstErr
+	}
+	priv := keys[0]
+	if raw, err := jwtClaims(token); err == nil {
+		var c struct {
+			Cnf struct {
+				Jkt string `json:"jkt"`
+			} `json:"cnf"`
+		}
+		if json.Unmarshal(raw, &c) == nil && c.Cnf.Jkt != "" {
+			for _, k := range keys {
+				if jwk, err := publicJWK(&k.PublicKey); err == nil && jwkThumbprint(jwk) == c.Cnf.Jkt {
+					priv = k
+					break
+				}
+			}
+		}
+	}
+	return dpopProof(priv, method, url, token, now)
 }

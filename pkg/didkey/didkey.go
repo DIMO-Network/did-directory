@@ -31,6 +31,14 @@ const (
 // supported curves.
 const coordSize = 32
 
+// MaxLength is the longest did:key string Decode reads. A did:key of either
+// supported curve is 57 bytes. base58 decoding is quadratic in the input
+// length, so anything longer is refused before it is decoded.
+const MaxLength = 128
+
+// didKeyPrefix starts every did:key string.
+const didKeyPrefix = "did:key:"
+
 // PublicKey is a verification key on one of the curves did:key supports.
 // P-256 keys are held as the standard library's ecdsa.PublicKey; secp256k1
 // keys are held in the decred library's native form, since the standard
@@ -136,17 +144,34 @@ func Encode(pub *ecdsa.PublicKey) (string, error) {
 	return k.DIDKey(), nil
 }
 
-// Decode decodes a did:key string. P-256 and secp256k1 are supported.
+// Decode decodes a did:key string. P-256 and secp256k1 are supported. Only
+// the canonical form is accepted (see DecodeMultibase), so one key has
+// exactly one did:key string and callers may compare keys as strings.
 func Decode(didKey string) (*PublicKey, error) {
-	if len(didKey) < 8 || didKey[:8] != "did:key:" {
+	if len(didKey) > MaxLength {
+		return nil, fmt.Errorf("did:key too long: %d bytes, at most %d", len(didKey), MaxLength)
+	}
+	if len(didKey) < len(didKeyPrefix) || didKey[:len(didKeyPrefix)] != didKeyPrefix {
 		return nil, errors.New("invalid did:key format")
 	}
-	return DecodeMultibase(didKey[8:])
+	return DecodeMultibase(didKey[len(didKeyPrefix):])
 }
 
 // DecodeMultibase decodes a multikey as a DID document's publicKeyMultibase
 // carries it: the did:key identifier without its prefix.
+//
+// It accepts only the canonical form: base58btc (multibase prefix z), a
+// minimal multicodec varint, and the compressed point, so that the input is
+// exactly what Multibase would produce for the key. Every other multibase
+// base, a padded varint, or anything else whose re-encoding differs from the
+// input is refused.
 func DecodeMultibase(encoded string) (*PublicKey, error) {
+	if len(encoded) > MaxLength-len(didKeyPrefix) {
+		return nil, fmt.Errorf("multikey too long: %d bytes, at most %d", len(encoded), MaxLength-len(didKeyPrefix))
+	}
+	if encoded == "" || encoded[0] != byte(multibase.Base58BTC) {
+		return nil, errors.New("multikey must be base58btc (multibase prefix z)")
+	}
 	_, data, err := multibase.Decode(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("multibase decode: %w", err)
@@ -156,17 +181,28 @@ func DecodeMultibase(encoded string) (*PublicKey, error) {
 	if n <= 0 {
 		return nil, errors.New("invalid multicodec varint")
 	}
+	if n != len(multicodecVarint(codec)) {
+		return nil, errors.New("multicodec varint is not minimal")
+	}
 
 	keyBytes := data[n:]
 
+	var pub *PublicKey
 	switch multicodec.Code(codec) {
 	case codecP256Pub:
-		return unmarshalP256Compressed(keyBytes)
+		pub, err = unmarshalP256Compressed(keyBytes)
 	case codecSecp256k1:
-		return unmarshalSecp256k1Compressed(keyBytes)
+		pub, err = unmarshalSecp256k1Compressed(keyBytes)
 	default:
 		return nil, fmt.Errorf("unsupported multicodec: 0x%x", codec)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if pub.Multibase() != encoded {
+		return nil, errors.New("multikey is not in canonical form")
+	}
+	return pub, nil
 }
 
 func multicodecVarint(code uint64) []byte {

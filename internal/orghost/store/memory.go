@@ -42,6 +42,9 @@ func NewMemoryStore() *MemoryStore {
 }
 
 func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {
+	if err := org.checkKey(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	did := strings.Clone(org.DID)
@@ -55,6 +58,40 @@ func (s *MemoryStore) CreateOrg(_ context.Context, org Org) error {
 	}
 	s.orgs[did] = &memOrg{org: org, heads: map[string]memHead{}}
 	return nil
+}
+
+func (s *MemoryStore) CountOrgsSince(_ context.Context, since time.Time) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, o := range s.orgs {
+		if o.org.CreatedAt.After(since) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *MemoryStore) AnyKMSKeyRef(_ context.Context) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, o := range s.orgs {
+		if o.org.KeyRef != "" {
+			return o.org.KeyRef, nil
+		}
+	}
+	return "", nil
+}
+
+func (s *MemoryStore) HasLocalOrgs(_ context.Context) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, o := range s.orgs {
+		if len(o.org.KeyEnc) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *MemoryStore) GetOrg(_ context.Context, did string) (*Org, error) {

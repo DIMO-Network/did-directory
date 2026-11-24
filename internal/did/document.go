@@ -1,6 +1,7 @@
 package did
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -44,11 +45,16 @@ type ServiceEntry struct {
 	ServiceEndpoint string `json:"serviceEndpoint"`
 }
 
+// ErrDeactivated is wrapped by GenerateDocument's error for a tombstoned DID.
+// Any other error means the state does not make a document (a verification
+// method that does not decode), which is not deactivation.
+var ErrDeactivated = errors.New("deactivated")
+
 // GenerateDocument generates a W3C DID Document from the current DID state.
 // state may be nil for uncontrolled DIDs.
 func GenerateDocument(did string, op *Operation, state *control.State) (*DIDDocument, error) {
 	if op.IsTombstone() {
-		return nil, fmt.Errorf("DID %s has been deactivated", did)
+		return nil, fmt.Errorf("DID %s has been %w", did, ErrDeactivated)
 	}
 
 	doc := &DIDDocument{

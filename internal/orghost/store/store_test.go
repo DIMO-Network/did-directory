@@ -594,3 +594,141 @@ func TestStore_VehicleTags(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_OrgKeyRef(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			did := fmt.Sprintf("did:dimo:kms%d-%d", time.Now().UnixNano(), orgCounter.Add(1))
+			const arn = "arn:aws:kms:us-east-1:111122223333:key/abc"
+			require.NoError(t, s.CreateOrg(ctx, Org{DID: did, KeyRef: arn}))
+			org, err := s.GetOrg(ctx, did)
+			require.NoError(t, err)
+			assert.Equal(t, arn, org.KeyRef)
+			assert.Empty(t, org.KeyEnc)
+
+			// A row sealed under the master key has no ref and still loads.
+			old := newOrg(t, s)
+			org, err = s.GetOrg(ctx, old)
+			require.NoError(t, err)
+			assert.Equal(t, []byte("sealed"), org.KeyEnc)
+			assert.Empty(t, org.KeyRef)
+		})
+	}
+}
+
+func TestStore_HasLocalOrgs(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	has, err := s.HasLocalOrgs(ctx)
+	require.NoError(t, err)
+	assert.False(t, has)
+	require.NoError(t, s.CreateOrg(ctx, Org{DID: "did:dimo:k", KeyRef: "arn"}))
+	has, err = s.HasLocalOrgs(ctx)
+	require.NoError(t, err)
+	assert.False(t, has, "a KMS-only store has no local keys")
+	require.NoError(t, s.CreateOrg(ctx, Org{DID: "did:dimo:l", KeyEnc: []byte("sealed")}))
+	has, err = s.HasLocalOrgs(ctx)
+	require.NoError(t, err)
+	assert.True(t, has)
+}
+
+func TestStore_HasLocalOrgsPostgres(t *testing.T) {
+	s, ok := stores(t)["postgres"]
+	if !ok {
+		t.Skip("no " + TestDatabaseURLEnv)
+	}
+	newOrg(t, s)
+	has, err := s.HasLocalOrgs(context.Background())
+	require.NoError(t, err)
+	assert.True(t, has)
+}
+
+// CountOrgsSince is what the register daily cap reads: orgs created after
+// since, whatever backend their key is in.
+func TestStore_CountOrgsSince(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC()
+			// Other packages' tests write orgs to the same database at the same
+			// time, so on Postgres only bounds hold; the memory store is exact.
+			before, err := s.CountOrgsSince(ctx, now.Add(-time.Minute))
+			require.NoError(t, err)
+			old := fmt.Sprintf("did:dimo:old%d-%d", now.UnixNano(), orgCounter.Add(1))
+			require.NoError(t, s.CreateOrg(ctx, Org{DID: old, KeyEnc: []byte("sealed"), CreatedAt: now.Add(-48 * time.Hour)}))
+			newOrg(t, s)
+			kms := fmt.Sprintf("did:dimo:kms%d-%d", now.UnixNano(), orgCounter.Add(1))
+			require.NoError(t, s.CreateOrg(ctx, Org{DID: kms, KeyRef: "arn:aws:kms:us-east-1:111122223333:key/count"}))
+
+			n, err := s.CountOrgsSince(ctx, now.Add(-time.Minute))
+			require.NoError(t, err)
+			if name == "memory" {
+				assert.Equal(t, 2, n, "the org created two days ago is outside the window")
+			} else {
+				assert.GreaterOrEqual(t, n, before+2)
+			}
+			n, err = s.CountOrgsSince(ctx, time.Now().Add(time.Hour))
+			require.NoError(t, err)
+			assert.Zero(t, n, "nothing is created in the future")
+		})
+	}
+}
+
+// AnyKMSKeyRef is how a host finds out at startup that it has orgs whose keys
+// are in KMS, and one key to probe KMS with.
+func TestStore_AnyKMSKeyRef(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemoryStore()
+	ref, err := m.AnyKMSKeyRef(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, ref)
+	newOrg(t, m)
+	ref, err = m.AnyKMSKeyRef(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, ref, "a sealed key is not a KMS key")
+	require.NoError(t, m.CreateOrg(ctx, Org{DID: "did:dimo:k", KeyRef: "arn:aws:kms:us-east-1:111122223333:key/k"}))
+	ref, err = m.AnyKMSKeyRef(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "arn:aws:kms:us-east-1:111122223333:key/k", ref)
+
+	pg, ok := stores(t)["postgres"]
+	if !ok {
+		return
+	}
+	did := fmt.Sprintf("did:dimo:kmsref%d-%d", time.Now().UnixNano(), orgCounter.Add(1))
+	require.NoError(t, pg.CreateOrg(ctx, Org{DID: did, KeyRef: "arn:aws:kms:us-east-1:111122223333:key/pg"}))
+	ref, err = pg.AnyKMSKeyRef(ctx)
+	require.NoError(t, err)
+	assert.NotEmpty(t, ref)
+}
+
+// R4-F11: a row holds exactly one of a sealed key and a KMS key. One with
+// neither would be served and fail every write; one with both would sign with
+// whichever the router tried first.
+func TestStore_OrgNeedsExactlyOneKey(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			for label, o := range map[string]Org{
+				"neither":   {},
+				"empty key": {KeyEnc: []byte{}},
+				"both":      {KeyEnc: []byte("sealed"), KeyRef: "arn:aws:kms:us-east-1:111122223333:key/both"},
+			} {
+				o.DID = fmt.Sprintf("did:dimo:nokey%d-%d", time.Now().UnixNano(), orgCounter.Add(1))
+				assert.ErrorIs(t, s.CreateOrg(ctx, o), ErrOrgKey, label)
+				_, err := s.GetOrg(ctx, o.DID)
+				assert.True(t, IsNotFound(err), label)
+			}
+		})
+	}
+	pg, ok := stores(t)["postgres"]
+	if !ok {
+		return
+	}
+	// The database holds the line too, for writers other than CreateOrg.
+	_, err := pg.(*PostgresStore).pool.Exec(context.Background(), `INSERT INTO orgs (did) VALUES ($1)`,
+		fmt.Sprintf("did:dimo:raw%d", time.Now().UnixNano()))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "orgs_one_signing_key")
+}

@@ -19,20 +19,21 @@ func runRevokeSince(args []string) {
 	server := fs.String("server", defaultServer(), "directory server URL")
 	didStr := fs.String("did", "", "controlled DID (required)")
 	since := fs.String("since", "", "start of the compromise window (RFC3339, required)")
+	tk := bindTurnkeyFlags(fs)
 	fs.Parse(args)
 
+	if err := tk.validate(); err != nil {
+		fatal(err)
+	}
+	if err := tk.refuseSensitive(); err != nil {
+		fatal(err)
+	}
 	if *didStr == "" || *since == "" {
 		fmt.Fprintf(os.Stderr, "Error: --did and --since are required\n")
 		os.Exit(1)
 	}
 	if _, err := time.Parse(time.RFC3339, *since); err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid --since: %v\n", err)
-		os.Exit(1)
-	}
-
-	custodyKey, err := LoadKey(*didStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading custody key: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -64,10 +65,13 @@ func runRevokeSince(args []string) {
 		os.Exit(1)
 	}
 
-	newCustody, newCustodyDIDKey, err := newKey()
+	custodySigner, err := resolveSigner(ctx, tk, *didStr, currentOp, purposeRevoke)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
+	}
+	newCustodyDIDKey, saveCustody, err := newCustody(ctx, tk)
+	if err != nil {
+		fatal(err)
 	}
 	nextEra := cur.Number + 1
 	newOpening, commitment, err := newCommitment(oldOpening.Controller, nextEra)
@@ -77,7 +81,7 @@ func runRevokeSince(args []string) {
 	}
 	issued := time.Now().UTC().Format(time.RFC3339)
 
-	op, err := signOp(custodyKey, &did.UnsignedOperation{
+	op, err := signOpWith(ctx, custodySigner, &did.UnsignedOperation{
 		Type:                did.OpTypeRevokeSince,
 		RotationKeys:        []string{newCustodyDIDKey},
 		VerificationMethods: currentOp.VerificationMethods,
@@ -89,8 +93,7 @@ func runRevokeSince(args []string) {
 		Prev:                &prevCID,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
 	resp, err := c.Submit(ctx, *didStr, op)
@@ -99,7 +102,7 @@ func runRevokeSince(args []string) {
 		os.Exit(1)
 	}
 
-	if err := SaveKey(*didStr, newCustody); err != nil {
+	if err := saveCustody(*didStr); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save new custody key: %v\n", err)
 	}
 	if err := SaveOpening(*didStr, newOpening); err != nil {

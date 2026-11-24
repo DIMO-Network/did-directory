@@ -30,12 +30,18 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureWith(t, store.NewMemoryStore(), 0)
+}
 
-	st := store.NewMemoryStore()
+// newFixtureWith serves st, capping each DID's log at maxOps operations (the
+// default when zero).
+func newFixtureWith(t *testing.T, st store.Store, maxOps int) *fixture {
+	t.Helper()
+
 	log := zerolog.Nop()
 	app := fiber.New(fiber.Config{DisableStartupMessage: true})
 	app.Get("/export", NewExportHandler(st, 100, log).Handle)
-	app.Post("/:did", NewSubmitHandler(st, log).Handle)
+	app.Post("/:did", NewSubmitHandler(st, maxOps, log).Handle)
 	resolve := NewResolveHandler(st, log)
 	app.Get("/:did", resolve.HandleResolve)
 	app.Get("/:did/data", resolve.HandleData)

@@ -36,6 +36,10 @@ func main() {
 		runRotate(args)
 	case "transfer":
 		runTransfer(args)
+	case "custody-proof":
+		runCustodyProof(args)
+	case "register":
+		runRegister(args)
 	case "revoke-since":
 		runRevokeSince(args)
 	case "pubkey":
@@ -70,10 +74,16 @@ Usage:
 Commands:
   create       Create a new DID (--controller for a controlled asset such as a vehicle,
                --org for an org with a #dimo_org commit key and --org-host)
+  register     Register an org DID on the org host its #dimo_org_host names and publish
+               the key the host makes (finishes a create --org-host that failed)
   resolve      Resolve a DID to its document
   update       Update a DID's service endpoints, #dimo_org key or #dimo_org_host
   rotate       Rotate a DID's keys
-  transfer     Transfer a controlled DID to a new controller (starts a new era)
+  transfer     Transfer a controlled DID to a new controller (starts a new era); a
+               custody key the new controller supplies needs its --new-custody-proof
+  custody-proof
+               As the new controller: sign the acceptance of a transfer with the new
+               custody key from a key file (--generate makes one), for the seller
   revoke-since Record a compromise window and rotate the custody key
   pubkey       Print the did:key public key for a local DID (--org for its #dimo_org key)
   signin       Sign in to dauth as a local DID and print the identity token: --scope

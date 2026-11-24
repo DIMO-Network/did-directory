@@ -43,9 +43,25 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	query := `
 		CREATE TABLE IF NOT EXISTS orgs (
 			did             TEXT PRIMARY KEY,
-			signing_key_enc BYTEA NOT NULL,
+			signing_key_enc BYTEA,
+			signing_key_ref TEXT,
 			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
+		ALTER TABLE orgs ADD COLUMN IF NOT EXISTS signing_key_ref TEXT;
+		ALTER TABLE orgs ALTER COLUMN signing_key_enc DROP NOT NULL;
+		-- The register daily cap counts the orgs created in the last day.
+		CREATE INDEX IF NOT EXISTS orgs_created_at_idx ON orgs (created_at);
+		-- Exactly one of the sealed key and the KMS key (R4-F11). Postgres has no
+		-- ADD CONSTRAINT IF NOT EXISTS, so it is added once to a table that
+		-- predates it; a start over rows that break it fails, naming it.
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint
+					WHERE conname = 'orgs_one_signing_key' AND conrelid = 'orgs'::regclass) THEN
+				ALTER TABLE orgs ADD CONSTRAINT orgs_one_signing_key
+					CHECK ((signing_key_enc IS NULL) <> (signing_key_ref IS NULL));
+			END IF;
+		END $$;
 		CREATE TABLE IF NOT EXISTS commits (
 			org          TEXT NOT NULL REFERENCES orgs(did),
 			seq          BIGINT NOT NULL,
@@ -81,6 +97,17 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 			operator BOOLEAN NOT NULL,
 			set_at   TIMESTAMPTZ NOT NULL
 		);
+		-- Accepted DPoP proofs, so a proof is accepted once by every replica on
+		-- this database (R5-F6); expired rows are deleted by DeleteExpiredProofs.
+		CREATE TABLE IF NOT EXISTS dpop_proofs (
+			jkt        TEXT NOT NULL,
+			jti        TEXT NOT NULL,
+			subject    TEXT NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (jkt, jti)
+		);
+		CREATE INDEX IF NOT EXISTS dpop_proofs_subject_idx ON dpop_proofs (subject, expires_at);
+		CREATE INDEX IF NOT EXISTS dpop_proofs_expires_idx ON dpop_proofs (expires_at);
 		CREATE TABLE IF NOT EXISTS pending (
 			org          TEXT NOT NULL REFERENCES orgs(did),
 			id           TEXT NOT NULL,
@@ -134,12 +161,23 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 }
 
 func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
+	if err := org.checkKey(); err != nil {
+		return err
+	}
 	if org.CreatedAt.IsZero() {
 		org.CreatedAt = time.Now().UTC()
 	}
+	var keyEnc []byte // NULL, not an empty bytea, for a KMS org
+	if len(org.KeyEnc) > 0 {
+		keyEnc = org.KeyEnc
+	}
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO orgs (did, signing_key_enc, created_at) VALUES ($1, $2, $3) ON CONFLICT (did) DO NOTHING`,
-		org.DID, org.KeyEnc, org.CreatedAt)
+		`INSERT INTO orgs (did, signing_key_enc, signing_key_ref, created_at) VALUES ($1, $2, NULLIF($3, ''), $4) ON CONFLICT (did) DO NOTHING`,
+		org.DID, keyEnc, org.KeyRef, org.CreatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23514" && pgErr.ConstraintName == "orgs_one_signing_key" {
+		return ErrOrgKey
+	}
 	if err != nil {
 		return fmt.Errorf("insert org: %w", err)
 	}
@@ -149,10 +187,76 @@ func (s *PostgresStore) CreateOrg(ctx context.Context, org Org) error {
 	return nil
 }
 
+func (s *PostgresStore) CountOrgsSince(ctx context.Context, since time.Time) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM orgs WHERE created_at > $1`, since).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count orgs: %w", err)
+	}
+	return n, nil
+}
+
+func (s *PostgresStore) AnyKMSKeyRef(ctx context.Context) (string, error) {
+	var ref string
+	err := s.pool.QueryRow(ctx, `SELECT signing_key_ref FROM orgs WHERE signing_key_ref IS NOT NULL LIMIT 1`).Scan(&ref)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query kms orgs: %w", err)
+	}
+	return ref, nil
+}
+
+func (s *PostgresStore) RecordProof(ctx context.Context, p Proof, now time.Time, perSubject int) error {
+	if perSubject > 0 {
+		// LIMIT bounds the count's cost at the cap, however many proofs the
+		// subject has.
+		var n int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT count(*) FROM (SELECT 1 FROM dpop_proofs WHERE subject = $1 AND expires_at > $2 LIMIT $3) live`,
+			p.Subject, now, perSubject).Scan(&n); err != nil {
+			return fmt.Errorf("count dpop proofs: %w", err)
+		}
+		if n >= perSubject {
+			return ErrProofLimit
+		}
+	}
+	// An expired row with the same key and id may be taken over; a live one
+	// is a replay.
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO dpop_proofs (jkt, jti, subject, expires_at) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (jkt, jti) DO UPDATE SET subject = EXCLUDED.subject, expires_at = EXCLUDED.expires_at
+			WHERE dpop_proofs.expires_at <= $5`,
+		p.JKT, p.JTI, p.Subject, p.Expires, now)
+	if err != nil {
+		return fmt.Errorf("record dpop proof: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProofReplayed
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteExpiredProofs(ctx context.Context, now time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM dpop_proofs WHERE expires_at <= $1`, now)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired dpop proofs: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *PostgresStore) HasLocalOrgs(ctx context.Context) (bool, error) {
+	var has bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orgs WHERE signing_key_enc IS NOT NULL)`).Scan(&has); err != nil {
+		return false, fmt.Errorf("query local orgs: %w", err)
+	}
+	return has, nil
+}
+
 func (s *PostgresStore) GetOrg(ctx context.Context, did string) (*Org, error) {
 	var org Org
-	err := s.pool.QueryRow(ctx, `SELECT did, signing_key_enc, created_at FROM orgs WHERE did = $1`, did).
-		Scan(&org.DID, &org.KeyEnc, &org.CreatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT did, signing_key_enc, COALESCE(signing_key_ref, ''), created_at FROM orgs WHERE did = $1`, did).
+		Scan(&org.DID, &org.KeyEnc, &org.KeyRef, &org.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

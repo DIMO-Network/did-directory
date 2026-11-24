@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,8 +48,18 @@ const (
 	maxRSAModulusBits = 4096
 )
 
-// ErrInvalid is wrapped by every verification failure.
+// ErrInvalid is wrapped by every proof failure: a proof that is malformed,
+// badly signed, for another request or token, outside its time window, or
+// replayed. A caller answers it as a bad proof (400 or 401); presenting the
+// same proof again never succeeds.
 var ErrInvalid = errors.New("invalid DPoP proof")
+
+// ErrReplayCacheFull is returned for a proof that passed every check but could
+// not be recorded because the replay cache holds MaxReplayEntries unexpired
+// proofs. It says nothing about the proof and does not wrap ErrInvalid: a
+// caller answers it as a retryable capacity problem (503), and the client
+// retries with a fresh proof.
+var ErrReplayCacheFull = errors.New("DPoP replay cache full")
 
 // Verifier checks proofs.
 type Verifier struct {
@@ -58,6 +69,14 @@ type Verifier struct {
 	Skew time.Duration
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// MaxReplayEntries caps the replay cache; zero means
+	// DefaultMaxReplayEntries. When the cache is full of unexpired proofs,
+	// Verify refuses further proofs with ErrReplayCacheFull until entries
+	// expire. Size the cap against the rate that reaches Verify (every limit in
+	// front of it: the ingress's and the service's own per-client one) and
+	// against the process's memory: an entry with a 64-byte jti takes about
+	// 160 bytes of heap, so a full default cache is about 160 MiB.
+	MaxReplayEntries int
 
 	replay *replayCache
 }
@@ -73,6 +92,13 @@ func (v *Verifier) maxAge() time.Duration {
 		return v.MaxAge
 	}
 	return 5 * time.Minute
+}
+
+func (v *Verifier) maxReplay() int {
+	if v.MaxReplayEntries > 0 {
+		return v.MaxReplayEntries
+	}
+	return DefaultMaxReplayEntries
 }
 
 func (v *Verifier) skew() time.Duration {
@@ -112,6 +138,10 @@ func (proofClaims) GetAudience() (jwt.ClaimStrings, error)       { return nil, n
 // and against accessToken when one was presented (the ath claim is then
 // required). It returns the thumbprint of the key that signed the proof; the
 // caller compares it to the access token's cnf.jkt.
+//
+// Every proof failure wraps ErrInvalid. A sound proof refused only because the
+// replay cache is full returns ErrReplayCacheFull instead, which a caller
+// should answer as retryable (503) rather than as a bad proof.
 func (v *Verifier) Verify(proof, method, requestURL, accessToken string) (string, error) {
 	if len(proof) > maxProofBytes {
 		return "", fmt.Errorf("%w: proof too large", ErrInvalid)
@@ -149,7 +179,8 @@ func (v *Verifier) Verify(proof, method, requestURL, accessToken string) (string
 	if len(claims.JTI) > maxJTIBytes {
 		return "", fmt.Errorf("%w: jti too long", ErrInvalid)
 	}
-	if !strings.EqualFold(claims.HTM, method) {
+	// RFC 9449 §4.3: the method matches exactly; HTTP methods are case-sensitive.
+	if claims.HTM != method {
 		return "", fmt.Errorf("%w: htm %q does not match %s", ErrInvalid, claims.HTM, method)
 	}
 	if NormalizeURI(claims.HTU) != NormalizeURI(requestURL) {
@@ -168,23 +199,68 @@ func (v *Verifier) Verify(proof, method, requestURL, accessToken string) (string
 			return "", fmt.Errorf("%w: ath does not match the access token", ErrInvalid)
 		}
 	}
-	if v.replay != nil && !v.replay.add(claims.JTI, now.Add(v.maxAge()+v.skew()), now) {
-		return "", fmt.Errorf("%w: proof replayed", ErrInvalid)
+	if v.replay != nil {
+		switch v.replay.add(claims.JTI, now.Add(v.maxAge()+v.skew()), now, v.maxReplay()) {
+		case addReplayed:
+			return "", fmt.Errorf("%w: proof replayed", ErrInvalid)
+		case addFull:
+			return "", ErrReplayCacheFull
+		}
 	}
 	return jkt, nil
 }
 
-// NormalizeURI reduces a URL to what htu compares on: scheme, host and path,
-// without query or fragment, with scheme and host lowercased.
+// NormalizeURI reduces a URL to what htu compares on: scheme, host and path.
+// The scheme and host are lowercased, the default port is dropped (:443 for
+// https, :80 for http, and an empty port), the query and fragment are
+// dropped, and the path is kept as it travels on the wire: byte for byte for
+// any path a request line can carry, with no trailing-slash, escape or
+// dot-segment change. Only characters a request line cannot carry raw (a
+// space, say) are percent-encoded, as an HTTP client sends them. The SDK
+// normalises the same way, and both test the vectors in
+// testdata/htu-vectors.json (cross-repo contract 4).
 func NormalizeURI(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return raw
 	}
 	u.RawQuery, u.Fragment, u.RawFragment, u.ForceQuery = "", "", "", false
-	u.Scheme = strings.ToLower(u.Scheme)
-	u.Host = strings.ToLower(u.Host)
-	return u.String()
+	if u.Scheme == "" || u.Opaque != "" {
+		// Not an absolute URL with an authority; nothing to normalise but the
+		// query and fragment.
+		return u.String()
+	}
+	var userinfo string
+	if u.User != nil {
+		userinfo = u.User.String() + "@"
+	}
+	// url.Parse has lowercased the scheme already.
+	return u.Scheme + "://" + userinfo + normalizeAuthority(u.Scheme, strings.ToLower(u.Host)) + u.EscapedPath()
+}
+
+// defaultPorts are the ports a URL of each scheme names by leaving it out.
+var defaultPorts = map[string]int{"https": 443, "http": 80}
+
+// normalizeAuthority drops the scheme's default port, or an empty one, and
+// writes any other port without leading zeros. An authority whose port is not
+// a number is left as it is.
+func normalizeAuthority(scheme, authority string) string {
+	colon := strings.LastIndexByte(authority, ':')
+	if colon < 0 || strings.IndexByte(authority[colon:], ']') >= 0 {
+		return authority // no port, or the colon is inside an IPv6 literal
+	}
+	host, port := authority[:colon], authority[colon+1:]
+	if port == "" {
+		return host
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return authority
+	}
+	if def, ok := defaultPorts[scheme]; ok && int(n) == def {
+		return host
+	}
+	return host + ":" + strconv.FormatUint(n, 10)
 }
 
 // Thumbprint computes the RFC 7638 thumbprint of a JWK given as its JSON

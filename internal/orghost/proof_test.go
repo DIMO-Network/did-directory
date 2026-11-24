@@ -227,6 +227,7 @@ func TestDescendants(t *testing.T) {
 			h.clock = day(1)
 
 			for _, did := range []string{owner, dealer, lender} {
+				h.publish(did)
 				status, body := h.do(http.MethodPost, "/orgs/"+did, did, nil)
 				require.Equal(t, http.StatusCreated, status, body)
 			}

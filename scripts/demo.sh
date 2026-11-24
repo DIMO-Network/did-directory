@@ -456,7 +456,7 @@ step "Building dq and dq-seed from $DQ_DIR (CGO, embedded DuckDB)..."
 success "built $BIN/dq and $BIN/dq-seed"
 
 step "Starting the DID directory (in memory) on :$DIRECTORY_PORT..."
-DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
+ALLOW_MEMORY_STORE=true DATABASE_URL="" PORT="$DIRECTORY_PORT" MONITORING_PORT="$DIRECTORY_MON_PORT" LOG_LEVEL=warn \
     "$BIN/did-directory" -settings /dev/null >"$DEMO_DIR/directory.log" 2>&1 &
 PIDS+=($!)
 wait_for "$DIRECTORY_URL/health" "directory"
@@ -485,7 +485,7 @@ created "DIMO" "$DIMO"
 step "Starting the org host (in memory) on :$ORG_HOST_PORT..."
 info "It trusts identity tokens from dauth's sign-in keys, lets $DAUTH_DID call"
 info "/authorize, and lets DIMO set party attributes."
-DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" \
+DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_URL" PUBLIC_URL="$ORG_HOST_URL" \
     IDENTITY_JWKS_URL="$DAUTH_URL/signin/keys" IDENTITY_ISSUER="$DAUTH_URL/signin" IDENTITY_AUDIENCE="$ORG_HOST_URL" \
     ISSUER_DIDS="$DAUTH_DID" ADMIN_DIDS="$DIMO" CONTROL_CACHE_TTL=1s \
     "$BIN/org-host" -settings /dev/null >"$DEMO_DIR/org-host.log" 2>&1 &
@@ -500,19 +500,19 @@ info "An org DID carries two keys: #signing, which its service uses to sign in,"
 info "and #dimo_org, the key the org host signs every commit of its repository"
 info "with. The document also names the host (#dimo_org_host)."
 
-RENTAL_CO=$(create --org --org-host "$ORG_HOST_URL" --alias "rentalco.example")
+step "RentalCo's DID names the host; the CLI signs in as RentalCo and registers its repository..."
+info "dimocli create publishes the DID with #dimo_org_host, signs in to dauth with"
+info "the new #signing key, and registers on the host, which makes the #dimo_org"
+info "key and seals it at rest. The CLI then publishes the key the host returned."
+info "From here on only the host signs commits."
+RENTAL_CO=$(create --org --org-host "$ORG_HOST_URL" --dauth "$DAUTH_URL" --alias "rentalco.example")
 created "RentalCo" "$RENTAL_CO"
 "$DIMOCLI" resolve -server "$DIRECTORY_URL" "$RENTAL_CO" | jq '{verificationMethod, service}' | show
-
-step "RentalCo signs in to dauth with its #signing key and registers its repository..."
-info "The CLI generated the #dimo_org key; the host takes the private half and"
-info "seals it at rest. From here on only the host signs commits."
 RENTAL_CO_TOKEN=$(signin "$RENTAL_CO")
-RENTAL_CO_ORG_KEY=$(jq -r .privateKeyBase64 "$KEYS/${RENTAL_CO#did:dimo:}.org.json")
-host POST "/orgs/$RENTAL_CO" "$(signin "$RENTAL_CO" approve)" "$(jq -cn --arg k "$RENTAL_CO_ORG_KEY" '{privateKey: $k}')"
-expect 201 "repository registered"
+host GET "/orgs/$RENTAL_CO" "$RENTAL_CO_TOKEN"
+expect 200 "repository registered"
 HOST_KEY=$(echo "$BODY" | jq -r .key)
-if [ "$HOST_KEY" = "$("$DIMOCLI" pubkey --org "$RENTAL_CO")" ]; then
+if [ "$HOST_KEY" = "$(curl -s "$DIRECTORY_URL/$RENTAL_CO/log/audit" | jq -r '.[-1].operation.verificationMethods.dimo_org')" ]; then
     success "the host's commit key is the #dimo_org the directory publishes: $HOST_KEY"
 else
     die "the host's key does not match #dimo_org"
@@ -618,7 +618,7 @@ header "Step 3: Three partners"
 
 INSURER=$(create --alias "claims.insurer.example")
 FINANCIAL_CO=$(create --alias "financialco.example")
-FLEET_CO=$(create --org --org-host "$ORG_HOST_URL" --alias "fleetco.example")
+FLEET_CO=$(create --org --org-host "$ORG_HOST_URL" --dauth "$DAUTH_URL" --alias "fleetco.example")
 INTEGRATOR=$(create --alias "integrator.example")
 created "Insurer" "$INSURER"
 created "FinancialCo" "$FINANCIAL_CO"
@@ -672,10 +672,10 @@ approve "$RENTAL_CO" "$(echo "$BODY" | jq -r .pending)" "$CAROL" "Carol approves
 FLEET_CO_URI="at://$RENTAL_CO/network.dimo.delegation/fleetco"
 
 echo ""
-step "FleetCo registers its own repository and redelegates telemetry to its integrator..."
+step "FleetCo, registered on the host when it was created, redelegates telemetry to its integrator..."
 FLEET_CO_TOKEN=$(signin "$FLEET_CO")
-host POST "/orgs/$FLEET_CO" "$(signin "$FLEET_CO" approve)" "$(jq -cn --arg k "$(jq -r .privateKeyBase64 "$KEYS/${FLEET_CO#did:dimo:}.org.json")" '{privateKey: $k}')"
-expect 201 "FleetCo's repository registered"
+host GET "/orgs/$FLEET_CO" "$FLEET_CO_TOKEN"
+expect 200 "FleetCo's repository registered"
 host PUT "/parties/$FLEET_CO" "$DIMO_TOKEN" '{"kind":"org","operator":true}'
 expect 200 "DIMO attests FleetCo"
 REC=$(grant "$FLEET_CO" "$INTEGRATOR" '{"inherit":true}' "telemetry:read" analytics "{\"dimo:basis\":[\"$FLEET_CO_URI\"]}")
@@ -815,14 +815,16 @@ pause
 echo ""
 step "The buyer starts clean: a repository of their own, the era-1 opening, and a consent to the insurer..."
 info "This is spec §13.3: a person granting one app over one car is the same"
-info "record and the same issuer path as a fleet. The host generated this"
-info "repository's key, so the buyer publishes it as #dimo_org."
+info "record and the same issuer path as a fleet. A host only registers an org"
+info "whose DID names it, so the buyer publishes #dimo_org_host first. The host"
+info "generates the repository's key, and the buyer publishes it as #dimo_org."
 BUYER_TOKEN=$(signin "$BUYER")
 host PUT "/parties/$BUYER" "$DIMO_TOKEN" '{"kind":"person"}'
 expect 200 "DIMO attests the buyer as a person"
+"$DIMOCLI" update -server "$DIRECTORY_URL" --did "$BUYER" --org-host "$ORG_HOST_URL" | show
 host POST "/orgs/$BUYER" "$(signin "$BUYER" approve)"
 expect 201 "repository registered with a host-generated key"
-"$DIMOCLI" update -server "$DIRECTORY_URL" --did "$BUYER" --org-key "$(echo "$BODY" | jq -r .key)" --org-host "$ORG_HOST_URL" | show
+"$DIMOCLI" update -server "$DIRECTORY_URL" --did "$BUYER" --org-key "$(echo "$BODY" | jq -r .key)" | show
 host PUT "/orgs/$BUYER/network.dimo.org.vehicleControl/$CAR1" "$BUYER_TOKEN" "$(cat "$KEYS/${CAR1#did:dimo:}.control.json")"
 expect 201 "era-1 opening committed to the buyer's repository"
 REC=$(grant "$BUYER" "$INSURER" "{\"vehicle\":\"$CAR1\"}" "telemetry:read" consumer-insurance)

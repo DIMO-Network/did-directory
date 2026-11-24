@@ -53,11 +53,18 @@ type Store interface {
 	// GetLog retrieves the full operation log for a DID, ordered by sequence.
 	GetLog(ctx context.Context, did string) ([]OperationRecord, error)
 
+	// Count returns how many operations a DID's log holds without reading
+	// them: 0 for a DID the store does not hold.
+	Count(ctx context.Context, did string) (int, error)
+
 	// Exists checks if a DID exists in the store.
 	Exists(ctx context.Context, did string) (bool, error)
 
 	// Export returns operations after the given sequence number, up to limit.
 	Export(ctx context.Context, afterSeq int64, limit int) ([]OperationRecord, error)
+
+	// Ping reports whether the store is reachable.
+	Ping(ctx context.Context) error
 
 	// Close closes the store.
 	Close() error

@@ -167,3 +167,43 @@ func TestRSAModulusBounds(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "too large")
 }
+
+func TestReplayCacheCap(t *testing.T) {
+	key, err := GenerateKey()
+	require.NoError(t, err)
+	now := time.Now()
+	v := NewVerifier()
+	v.MaxReplayEntries = 3
+	v.Now = func() time.Time { return now }
+	const target = "https://dq.test/query"
+
+	for _, jti := range []string{"a", "b", "c"} {
+		_, err := v.Verify(signedProof(t, key, jti, now), "POST", target, "")
+		require.NoError(t, err, jti)
+	}
+	// Full: a new proof is refused, as a capacity problem rather than a bad
+	// proof, so callers can answer it as retryable.
+	_, err = v.Verify(signedProof(t, key, "d", now), "POST", target, "")
+	require.ErrorIs(t, err, ErrReplayCacheFull)
+	assert.NotErrorIs(t, err, ErrInvalid)
+	assert.Len(t, v.replay.seen, 3)
+
+	// A replay of a cached proof is still reported as a replay.
+	_, err = v.Verify(signedProof(t, key, "a", now), "POST", target, "")
+	require.ErrorIs(t, err, ErrInvalid)
+	assert.NotErrorIs(t, err, ErrReplayCacheFull)
+	assert.Contains(t, err.Error(), "replayed")
+
+	// Once the entries expire they free space.
+	now = now.Add(7 * time.Minute)
+	_, err = v.Verify(signedProof(t, key, "d", now), "POST", target, "")
+	require.NoError(t, err)
+	assert.Len(t, v.replay.seen, 1)
+}
+
+func TestReplayCacheDefaultCap(t *testing.T) {
+	assert.Equal(t, 1_000_000, NewVerifier().maxReplay())
+	v := NewVerifier()
+	v.MaxReplayEntries = 5
+	assert.Equal(t, 5, v.maxReplay())
+}

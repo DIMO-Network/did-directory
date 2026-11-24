@@ -4,13 +4,94 @@ LOG_LEVEL: "info"
 # Base64 of 32 random bytes; seals org signing keys at rest. Required with DATABASE_URL.
 #   openssl rand -base64 32
 MASTER_KEY: ""
+# Where new orgs' #dimo_org keys live: local (sealed under MASTER_KEY) or kms.
+# Orgs already registered keep the backend their row names, so switching to kms
+# keeps MASTER_KEY needed until no local org remains, and switching back to
+# local still builds the KMS client while any org's key is in KMS (only new
+# orgs register locally). Whenever the host has a KMS client it probes KMS once
+# at startup (GetPublicKey on an org's key, or DescribeKey on
+# <KMS_ALIAS_PREFIX>startup-probe when it has no KMS org yet) and refuses to
+# start if KMS does not answer its credentials. While the host has no KMS org
+# yet, the probe proves only that the credentials authenticate and KMS is
+# reachable: it does not prove the role may CreateKey, CreateAlias or Sign, nor
+# that KMS_REGION is the region you meant. The first register is that check. kms uses the AWS default
+# credential chain (IRSA in the cluster). Each new key gets the account's
+# default key policy, which defers to IAM, so the role's IAM policy is the
+# whole boundary. Least privilege for the role, every key tagged org=<org DID>:
+#
+#   {"Version": "2012-10-17", "Statement": [
+#     {"Sid": "CreateOrgKeys", "Effect": "Allow",
+#      "Action": ["kms:CreateKey", "kms:TagResource"],
+#      "Resource": "*",
+#      "Condition": {"StringLike": {"aws:RequestTag/org": "did:dimo:*"}}},
+#     {"Sid": "AliasOrgKeys", "Effect": "Allow",
+#      "Action": "kms:CreateAlias",
+#      "Resource": ["arn:aws:kms:*:*:alias/dimo-org/*", "arn:aws:kms:*:*:key/*"]},
+#     {"Sid": "UseOrgKeys", "Effect": "Allow",
+#      "Action": ["kms:Sign", "kms:GetPublicKey", "kms:DescribeKey",
+#                 "kms:ListResourceTags", "kms:ScheduleKeyDeletion"],
+#      "Resource": "arn:aws:kms:*:*:key/*",
+#      "Condition": {"StringLike": {"aws:ResourceTag/org": "did:dimo:*"}}}]}
+#
+# CreateAlias needs the permission on the alias and on the key. It carries no
+# tag condition because it runs right after CreateKey and tag-based
+# authorization in KMS is eventually consistent (AWS documents up to five
+# minutes for tag changes); the alias ARN bounds it, and an aliased key is
+# still unusable without the org tag. A register the tag condition refuses in
+# that window is safe to retry: the alias finds the key the first attempt made.
+# Narrow the alias ARN to KMS_ALIAS_PREFIX, and the region and account
+# wildcards to yours.
+ORG_SIGNER: "local"
+KMS_REGION: ""
+# Give each environment its own prefix, for example alias/dimo-org/prod/ and
+# alias/dimo-org/dev/: an alias is the prefix plus the hex SHA-256 of the org
+# DID (64 characters), derived from the DID alone, so dev and prod in one
+# account would otherwise share aliases, and an org on both hosts would get one
+# key. A register refuses a key found through the alias unless it is tagged for
+# the org, enabled, and a P-256 SIGN_VERIFY key offering ECDSA_SHA_256. Every
+# KMS call has its own deadline: 5 s for Sign and GetPublicKey, 15 s for each
+# other step of a register.
+KMS_ALIAS_PREFIX: "alias/dimo-org/"
 # Identity tokens (RS256, sub = member DID) are verified against this key set.
 IDENTITY_JWKS_URL: "http://localhost:8080/signin/keys"
 IDENTITY_ISSUER: "http://localhost:8080/signin"
 # Tokens must name this host in aud: its public URL, which members request
-# from dauth when they sign in to write here.
+# from dauth when they sign in to write here. It is also the base of every
+# DPoP proof's htu. The host refuses to start if it ends in "/" (dauth issues
+# audiences without one), carries userinfo, a query or a fragment, or is not in
+# its normal form (lower-case scheme and host, no :443 or :80).
 IDENTITY_AUDIENCE: "http://localhost:8081"
-# The DID directory, for control state.
+# This host's public URL. POST /orgs/{org} registers an org only when the org's
+# DID, resolved through DIRECTORY_URL, publishes this URL as its
+# #dimo_org_host service endpoint; anything else is 403. Both sides are
+# normalised before the compare (scheme and host lowercased, default port and
+# a trailing slash dropped, the path kept as written), so it must equal
+# accounts' V2_ORG_HOST_URL up to that. The host refuses to start if it ends in
+# "/" or is not in that normal form. Empty means IDENTITY_AUDIENCE, which is the same URL unless tokens name
+# the host by another one.
+PUBLIC_URL: ""
+# Registers allowed host-wide in any rolling minute (each can make a billable
+# KMS key); past it, 429 with Retry-After. A register is charged only once it
+# will make a key: one refused for its DID, or for an org already here, spends
+# nothing. 0 disables the limit.
+REGISTER_RATE_LIMIT_PER_MINUTE: 10
+# Registers one caller may make in any rolling minute, so a DID whose register
+# keeps failing cannot spend the host-wide minute alone. 0 disables it.
+REGISTER_RATE_LIMIT_PER_CALLER_PER_MINUTE: 3
+# Register attempts one caller may make in any rolling minute, counted ahead of
+# the DID resolve every attempt makes, whatever it then answers. It only ever
+# slows that caller and spends nothing of the key budget. 0 disables it.
+REGISTER_ATTEMPTS_PER_CALLER_PER_MINUTE: 30
+# New orgs (keys) this host may create in any rolling 24 hours, counted in the
+# database so every replica shares it. Past it registers answer 429 and the
+# host logs at error level: alert on that line. 0 disables the cap.
+ORG_REGISTER_MAX_PER_DAY: 200
+# Every accepted DPoP proof is remembered until it expires (six minutes), in
+# the database when DATABASE_URL is set so a proof one replica accepted is
+# refused by the others. One caller DID may hold this many live proofs; past
+# it, that caller alone gets 429. ISSUER_DIDS are not bounded. 0 disables it.
+DPOP_MAX_PROOFS_PER_SUBJECT: 10000
+# The DID directory, for control state and for the org DIDs register checks.
 DIRECTORY_URL: "http://localhost:8082"
 # How long a vehicle's control state read from the directory is served before
 # it is fetched again; empty means 30s. scripts/demo.sh sets 1s.
