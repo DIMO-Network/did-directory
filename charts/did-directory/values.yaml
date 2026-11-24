@@ -3,11 +3,8 @@ fullnameOverride: did-directory-dev
 image:
   repository: dimozone/did-directory
   pullPolicy: IfNotPresent
-  # Dev: CI writes the 7-character SHA of the latest main image. Empty falls
-  # back to v<Chart.appVersion>.
-  # Prod sets requireTag, so an empty tag fails the render.
   requireTag: false
-  tag: ''
+  tag: 24bcf86
 imagePullSecrets: []
 nameOverride: ''
 serviceAccount:
@@ -24,7 +21,6 @@ securityContext:
   capabilities:
     drop:
       - all
-# Settings from settings.sample.yaml. DATABASE_URL comes from the secret.
 env:
   PORT: 8080
   MONITORING_PORT: 8888
