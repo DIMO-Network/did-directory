@@ -66,10 +66,21 @@ DIRECTORY_MON_PORT="${DIRECTORY_MON_PORT:-18888}"
 DAUTH_OPS_PORT="${DAUTH_OPS_PORT:-18089}"
 DQ_GRPC_PORT="${DQ_GRPC_PORT:-13001}"
 DQ_MON_PORT="${DQ_MON_PORT:-18889}"
-DIRECTORY_URL="http://localhost:$DIRECTORY_PORT"
-ORG_HOST_URL="http://localhost:$ORG_HOST_PORT"
-DAUTH_URL="http://localhost:$DAUTH_PORT"
-DQ_URL="http://localhost:$DQ_PORT"
+# DEMO_REMOTE=1 runs the story against a deployed node instead of starting the
+# services here: set DIRECTORY_URL, ORG_HOST_URL, DAUTH_URL and DQ_URL to its
+# public URLs and DEMO_ADMIN_DID to a DID the node's org host lists in
+# ADMIN_DIDS (its key must be in ~/.dimo/keys). Nothing seeds telemetry there,
+# so step 6 only shows that dq accepts and refuses the right tokens, and step 7
+# verifies the proof with the host still up.
+REMOTE="${DEMO_REMOTE:-0}"
+DIRECTORY_URL="${DIRECTORY_URL:-http://localhost:$DIRECTORY_PORT}"
+ORG_HOST_URL="${ORG_HOST_URL:-http://localhost:$ORG_HOST_PORT}"
+DAUTH_URL="${DAUTH_URL:-http://localhost:$DAUTH_PORT}"
+DQ_URL="${DQ_URL:-http://localhost:$DQ_PORT}"
+# How long after a directory change the org host may still serve the old
+# control state: the local host runs with CONTROL_CACHE_TTL=1s, a deployed one
+# with the 30s default.
+CONTROL_SETTLE="${CONTROL_SETTLE:-$([ "$REMOTE" = 1 ] && echo 32 || echo 2)}"
 DAUTH_DID="did:dimo:dauth"
 
 DEMO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dimo-demo-XXXXXX")"
@@ -435,6 +446,19 @@ header "Step 0: Prerequisites and services"
 for tool in go jq curl openssl; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
+if [ "$REMOTE" = 1 ]; then
+    [ -n "${DEMO_ADMIN_DID:-}" ] || die "DEMO_REMOTE=1 needs DEMO_ADMIN_DID, a DID in the org host's ADMIN_DIDS"
+    step "Building dimocli..."
+    mkdir -p "$BIN"
+    (cd "$PROJECT_DIR" && go build -o "$DIMOCLI" ./cmd/dimocli)
+    success "built $DIMOCLI"
+    wait_for "$DIRECTORY_URL/health" "directory at $DIRECTORY_URL"
+    wait_for "$DAUTH_URL/signin/keys" "dauth at $DAUTH_URL"
+    wait_for "$ORG_HOST_URL/health" "org host at $ORG_HOST_URL"
+    wait_for "$DQ_URL/" "dq at $DQ_URL"
+    DIMO="$DEMO_ADMIN_DID"
+    name "$DIMO" "DIMO"
+else
 [ -d "$DAUTH_DIR/cmd/dauth" ] || die "dauth checkout not found at $DAUTH_DIR (set DAUTH_DIR)"
 [ -d "$DQ_DIR/cmd/dq" ] || die "dq checkout not found at $DQ_DIR (set DQ_DIR)"
 for port in "$DIRECTORY_PORT" "$ORG_HOST_PORT" "$DAUTH_PORT" "$DQ_PORT" \
@@ -491,6 +515,7 @@ DATABASE_URL="" PORT="$ORG_HOST_PORT" LOG_LEVEL=info DIRECTORY_URL="$DIRECTORY_U
     "$BIN/org-host" -settings /dev/null >"$DEMO_DIR/org-host.log" 2>&1 &
 PIDS+=($!)
 wait_for "$ORG_HOST_URL/health" "org host"
+fi
 DIMO_TOKEN=$(signin "$DIMO")
 
 # ── Step 1: The org ───────────────────────────────────────────────────────
@@ -794,7 +819,7 @@ BUYER=$(create --alias "bob.example")
 created "Buyer" "$BUYER"
 "$DIMOCLI" transfer -server "$DIRECTORY_URL" --did "$CAR1" --to "$BUYER" | show
 SALE_EPOCH=$(date +%s)
-sleep 2
+sleep "$CONTROL_SETTLE"
 step "Car 1's eras now:"
 curl -s "$DIRECTORY_URL/$CAR1/control" | jq '.eras | map({number, start, end})' | show
 
@@ -858,6 +883,12 @@ info "has one writer. Every query carries an access token from dauth and a DPoP"
 info "proof for the request, and dq clamps the requested range to the token's"
 info "windows (spec §11.4). Same car, same data, three grants, three slices."
 
+BUYER_CONSENT_URI="at://$BUYER/network.dimo.delegation/insurance"
+RANGE=$(jq -cn --arg from "$(iso $((NOW_EPOCH - 86400)))" --arg to "$(iso $((NOW_EPOCH + 3600)))" '{from: $from, to: $to}')
+if [ "$REMOTE" = 1 ]; then
+    info "Remote run: nothing seeds this node's lake, so the answers are empty. What"
+    info "this shows is dq taking each token and refusing the one that does not cover."
+else
 LAKE="$DEMO_DIR/lake"
 mkdir -p "$LAKE/data" "$LAKE/blobs"
 step "The buyer drives off. A few seconds of readings under the new owner..."
@@ -876,8 +907,6 @@ DUCKLAKE_CATALOG_DSN="$LAKE/catalog.ducklake" DUCKLAKE_DATA_PATH="$LAKE/data" BL
     "$BIN/dq" -settings /dev/null >"$DEMO_DIR/dq.log" 2>&1 &
 PIDS+=($!)
 wait_for "$DQ_URL/" "dq"
-BUYER_CONSENT_URI="at://$BUYER/network.dimo.delegation/insurance"
-RANGE=$(jq -cn --arg from "$(iso $((NOW_EPOCH - 86400)))" --arg to "$(iso $((NOW_EPOCH + 3600)))" '{from: $from, to: $to}')
 step "Checking dq serves the seeded signals..."
 for i in $(seq 1 20); do
     PROBE=$("$DIMOCLI" query --dauth "$DAUTH_URL" --dq "$DQ_URL" --did "$INSURER" --grant "$BUYER_CONSENT_URI" --vehicle "$CAR1" \
@@ -889,6 +918,7 @@ for i in $(seq 1 20); do
     sleep 1
 done
 success "signals served"
+fi
 pause
 echo ""
 info "Everyone asks for the same range, a day before the run to an hour after, in"
@@ -918,12 +948,16 @@ echo "$BODY" >"$DEMO_DIR/proof.json"
 echo "$BODY" | jq '{delegation, at, keys, commits: [.commits[] | "\(.collection)/\(.rkey) \(.op) by \(.committedBy // "the org")"]}' | show
 
 pause
+if [ "$REMOTE" = 1 ]; then
+    info "Remote run: the host stays up; the verification below does not call it."
+else
 step "Stopping the org host..."
 kill "${PIDS[2]}" 2>/dev/null || true
 wait "${PIDS[2]}" 2>/dev/null || true
 PIDS[2]=""
 if curl -sf "$ORG_HOST_URL/health" >/dev/null 2>&1; then die "the org host is still up"; fi
 success "org host is down"
+fi
 
 step "Verifying the proof against the directory's keys and era log..."
 "$DIMOCLI" verify-proof -server "$DIRECTORY_URL" --file "$DEMO_DIR/proof.json" | show
