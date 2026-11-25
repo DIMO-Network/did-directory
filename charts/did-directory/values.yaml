@@ -4,7 +4,7 @@ image:
   repository: dimozone/did-directory
   pullPolicy: IfNotPresent
   requireTag: false
-  tag: 24bcf86
+  tag: c87f4c3
 imagePullSecrets: []
 nameOverride: ''
 serviceAccount:
